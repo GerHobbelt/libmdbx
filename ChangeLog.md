@@ -1,7 +1,7 @@
 ChangeLog
 ---------
 
-## Underway
+## v0.11.8 at 2022-06-12
 
 Acknowledgements:
 
@@ -11,6 +11,9 @@ New:
 
  - Added most of transactions flags to the public API.
  - Added `MDBX_NOSUCCESS_EMPTY_COMMIT` build option to return non-success result (`MDBX_RESULT_TRUE`) on empty commit.
+ - Reworked validation and import of DBI-handles into a transaction.
+   Assumes  these changes will be invisible to most users, but will cause fewer surprises in complex DBI cases.
+ - Added ability to open DB in without-LCK (exclusive read-only) mode in case no permissions to create/write LCK-file.
 
 Fixes:
 
@@ -18,12 +21,32 @@ Fixes:
  - Fixed copy&paste bug with could lead to `SIGSEGV` (nullptr dereference) in the exclusive/no-lck mode.
  - Fixed minor warnings from modern Apple's CLANG 13.
  - Fixed minor warnings from CLANG 14 and in-development CLANG 15.
+ - Fixed `SIGSEGV` regression in without-LCK (exclusive read-only) mode.
+ - Fixed `mdbx_check_fs_local()` for CDROM case on Windows.
+ - Fixed nasty typo of typename which caused false `MDBX_CORRUPTED` error in a rare execution path,
+   when the size of the thread-ID type not equal to 8.
+ - Fixed write-after-free memory corruption on latest `macOS` during finalization/cleanup of thread(s) that executed read transaction(s).
+   > The issue was suddenly discovered by a [CI](https://en.wikipedia.org/wiki/Continuous_integration)
+   > after adding an iteration with macOS 11 "Big Sur", and then reproduced on recent release of macOS 12 "Monterey".
+   > The issue was never noticed nor reported on macOS 10 "Catalina" nor others.
+   > Analysis shown that the problem caused by a change in the behavior of the system library (internals of dyld and pthread)
+   > during thread finalization/cleanup: now a memory allocated for a `__thread` variable(s) is released
+   > before execution of the registered Thread-Local-Storage destructor(s),
+   > thus a TLS-destructor will write-after-free just by legitime dereference any `__thread` variable.
+   > This is unexpected crazy-like behavior since the order of resources releasing/destroying
+   > is not the reverse of ones acquiring/construction order. Nonetheless such surprise
+   > is now workarounded by using atomic compare-and-swap operations on a 64-bit signatures/cookies.
+ - Fixed Elbrus/E2K LCC 1.26 compiler warnings (memory model for atomic operations, etc).
 
 Minors:
 
  - Refined `release-assets` GNU Make target.
  - Added logging to `mdbx_fetch_sdb()` to help debugging complex DBI-handels use cases.
  - Added explicit error message from probe of no-support for `std::filesystem`.
+ - Added contributors "score" table by `git fame` to generated docs.
+ - Added `mdbx_assert_fail()` to public API (mostly for backtracing).
+ - Now C++20 concepts used/enabled only when `__cpp_lib_concepts >= 202002`.
+ - Don't provide nor report package information if used as a CMake subproject.
 
 
 -------------------------------------------------------------------------------

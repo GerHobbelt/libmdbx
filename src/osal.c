@@ -141,7 +141,13 @@ typedef struct _FILE_PROVIDER_EXTERNAL_INFO_V1 {
 
 /*----------------------------------------------------------------------------*/
 
-#if defined(__UCLIBC__)
+#if defined(__ANDROID_API__)
+__extern_C void __assert2(const char *file, int line, const char *function,
+                          const char *msg) __noreturn;
+#define __assert_fail(assertion, file, line, function)                         \
+  __assert2(file, line, function, assertion)
+
+#elif defined(__UCLIBC__)
 __extern_C void __assert(const char *, const char *, unsigned int, const char *)
 #ifdef __THROW
     __THROW
@@ -215,10 +221,8 @@ __extern_C void __assert(const char *function, const char *file, int line,
 
 #endif /* __assert_fail */
 
-#if !defined(__ANDROID_API__) || MDBX_DEBUG
-
 __cold void mdbx_assert_fail(const MDBX_env *env, const char *msg,
-                             const char *func, int line) {
+                             const char *func, unsigned line) {
 #if MDBX_DEBUG
   if (env && env->me_assert_func) {
     env->me_assert_func(env, msg, func, line);
@@ -240,8 +244,6 @@ __cold void mdbx_assert_fail(const MDBX_env *env, const char *msg,
     OutputDebugStringA(message);
     if (IsDebuggerPresent())
       DebugBreak();
-#elif defined(__ANDROID_API__)
-    __android_log_assert(msg, "mdbx", "%s:%u", func, line);
 #else
     __assert_fail(msg, "mdbx", line, func);
 #endif
@@ -253,8 +255,6 @@ __cold void mdbx_assert_fail(const MDBX_env *env, const char *msg,
   abort();
 #endif
 }
-
-#endif /* __ANDROID_API__ || MDBX_DEBUG */
 
 __cold void mdbx_panic(const char *fmt, ...) {
   va_list ap;
@@ -274,11 +274,7 @@ __cold void mdbx_panic(const char *fmt, ...) {
     DebugBreak();
   FatalExit(ERROR_UNHANDLED_ERROR);
 #else
-#if defined(__ANDROID_API__)
-  __android_log_assert("panic", "mdbx", "%s", const_message);
-#else
   __assert_fail(const_message, "mdbx", 0, "panic");
-#endif /* __ANDROID_API__ */
   abort();
 #endif
 }
@@ -614,8 +610,15 @@ MDBX_INTERNAL_FUNC int mdbx_openfile(const enum mdbx_openfile_purpose purpose,
 
   *fd = CreateFileW(pathnameW, DesiredAccess, ShareMode, NULL,
                     CreationDisposition, FlagsAndAttributes, NULL);
-  if (*fd == INVALID_HANDLE_VALUE)
-    return (int)GetLastError();
+  if (*fd == INVALID_HANDLE_VALUE) {
+    int err = (int)GetLastError();
+    if (err == ERROR_ACCESS_DENIED && purpose == MDBX_OPEN_LCK) {
+      if (GetFileAttributesW(pathnameW) == INVALID_FILE_ATTRIBUTES &&
+          GetLastError() == ERROR_FILE_NOT_FOUND)
+        err = ERROR_FILE_NOT_FOUND;
+    }
+    return err;
+  }
 
   BY_HANDLE_FILE_INFORMATION info;
   if (!GetFileInformationByHandle(*fd, &info)) {
@@ -709,6 +712,12 @@ MDBX_INTERNAL_FUNC int mdbx_openfile(const enum mdbx_openfile_purpose purpose,
     *fd = open(pathname, flags, unix_mode_bits);
   }
 #endif /* O_DIRECT */
+
+  if (*fd < 0 && errno == EACCES && purpose == MDBX_OPEN_LCK) {
+    struct stat unused;
+    if (stat(pathname, &unused) == 0 || errno != ENOENT)
+      errno = EACCES /* restore errno if file exists */;
+  }
 
   /* Safeguard for todo4recovery://erased_by_github/libmdbx/issues/144 */
 #if STDIN_FILENO == 0 && STDOUT_FILENO == 1 && STDERR_FILENO == 2
@@ -1095,10 +1104,10 @@ MDBX_INTERNAL_FUNC int mdbx_check_fs_rdonly(mdbx_filehandle_t handle,
 #else
   struct statvfs info;
   if (err != MDBX_ENOFILE) {
-    if (statvfs(pathname, &info))
-      return errno;
-    if ((info.f_flag & ST_RDONLY) == 0)
+    if (statvfs(pathname, &info) == 0 && (info.f_flag & ST_RDONLY) == 0)
       return err;
+    if (errno != MDBX_ENOFILE)
+      return errno;
   }
   if (fstatvfs(handle, &info))
     return errno;
@@ -1177,21 +1186,25 @@ static int mdbx_check_fs_local(mdbx_filehandle_t handle, int flags) {
       }
     }
 
-    if (!mdbx_GetFinalPathNameByHandleW(handle, PathBuffer, INT16_MAX,
-                                        FILE_NAME_NORMALIZED |
-                                            VOLUME_NAME_NT)) {
-      rc = (int)GetLastError();
+    if (mdbx_GetFinalPathNameByHandleW(handle, PathBuffer, INT16_MAX,
+                                       FILE_NAME_NORMALIZED | VOLUME_NAME_NT)) {
+      if (_wcsnicmp(PathBuffer, L"\\Device\\Mup\\", 12) == 0) {
+        if (!(flags & MDBX_EXCLUSIVE)) {
+          rc = ERROR_REMOTE_STORAGE_MEDIA_ERROR;
+          goto bailout;
+        }
+      }
+    }
+
+    if (F_ISSET(flags, MDBX_RDONLY | MDBX_EXCLUSIVE) &&
+        (FileSystemFlags & FILE_READ_ONLY_VOLUME)) {
+      /* without-LCK (exclusive readonly) mode for DB on a read-only volume */
       goto bailout;
     }
 
-    if (_wcsnicmp(PathBuffer, L"\\Device\\Mup\\", 12) == 0) {
-      if (!(flags & MDBX_EXCLUSIVE)) {
-        rc = ERROR_REMOTE_STORAGE_MEDIA_ERROR;
-        goto bailout;
-      }
-    } else if (mdbx_GetFinalPathNameByHandleW(handle, PathBuffer, INT16_MAX,
-                                              FILE_NAME_NORMALIZED |
-                                                  VOLUME_NAME_DOS)) {
+    if (mdbx_GetFinalPathNameByHandleW(handle, PathBuffer, INT16_MAX,
+                                       FILE_NAME_NORMALIZED |
+                                           VOLUME_NAME_DOS)) {
       UINT DriveType = GetDriveTypeW(PathBuffer);
       if (DriveType == DRIVE_NO_ROOT_DIR &&
           _wcsnicmp(PathBuffer, L"\\\\?\\", 4) == 0 &&
@@ -1217,6 +1230,7 @@ static int mdbx_check_fs_local(mdbx_filehandle_t handle, int flags) {
         break;
       }
     }
+
   bailout:
     mdbx_free(PathBuffer);
     return rc;

@@ -553,9 +553,13 @@ docs/__$(1).md: $(2) $(lastword $(MAKEFILE_LIST))
 endef
 $(foreach section,overview mithril characteristics improvements history usage performance bindings,$(eval $(call md-extract-section,$(section),README.md)))
 
-docs/overall.md: docs/__overview.md docs/_toc.md docs/__mithril.md docs/__history.md AUTHORS LICENSE $(lastword $(MAKEFILE_LIST))
+docs/contrib.fame: src/version.c $(lastword $(MAKEFILE_LIST))
 	@echo '  MAKE $@'
-	$(QUIET)echo -e "\\mainpage Overall\n\\section brief Brief" | cat - $(filter %.md, $^) >$@ && echo -e "\n\n\nLicense\n=======\n" | cat AUTHORS - LICENSE >>$@
+	$(QUIET)echo "" > $@ && git fame --show-email --format=md --silent-progress -w -M -C | grep '^|' >> $@
+
+docs/overall.md: docs/__overview.md docs/_toc.md docs/__mithril.md docs/__history.md AUTHORS docs/contrib.fame LICENSE $(lastword $(MAKEFILE_LIST))
+	@echo '  MAKE $@'
+	$(QUIET)echo -e "\\mainpage Overall\n\\section brief Brief" | cat - $(filter %.md, $^) >$@ && echo -e "\n\n\nLicense\n=======\n" | cat AUTHORS docs/contrib.fame - LICENSE >>$@
 
 docs/intro.md: docs/_preface.md docs/__characteristics.md docs/__improvements.md docs/_restrictions.md docs/__performance.md
 	@echo '  MAKE $@'
@@ -641,7 +645,7 @@ dist/@tmp-shared_internals.inc: src/version.c $(ALLOY_DEPS) $(lastword $(MAKEFIL
 	&& sed \
 		-e '/#pragma once/r dist/@tmp-sed.inc' \
 		-e 's|#include "../mdbx.h"|@INCLUDE "mdbx.h"|' \
-		-e '/#include "defs.h"/r src/defs.h' \
+		-e '/#include "base.h"/r src/base.h' \
 		-e '/#include "osal.h"/r src/osal.h' \
 		-e '/#include "options.h"/r src/options.h' \
 		-e '/ clang-format o/d' -e '/ \*INDENT-O/d' \

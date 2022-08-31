@@ -877,6 +877,7 @@ size_t __hot mdbx_e2k_strnlen_bug_workaround(const char *s, size_t maxlen) {
 /*------------------------------------------------------------------------------
  * safe read/write volatile 64-bit fields on 32-bit architectures. */
 
+#ifndef atomic_store64
 MDBX_MAYBE_UNUSED static __always_inline uint64_t
 atomic_store64(MDBX_atomic_uint64_t *p, const uint64_t value,
                enum MDBX_memory_order order) {
@@ -900,7 +901,9 @@ atomic_store64(MDBX_atomic_uint64_t *p, const uint64_t value,
 #endif /* !MDBX_64BIT_ATOMIC */
   return value;
 }
+#endif /* atomic_store64 */
 
+#ifndef atomic_load64
 MDBX_MAYBE_UNUSED static
 #if MDBX_64BIT_ATOMIC
     __always_inline
@@ -940,6 +943,7 @@ MDBX_MAYBE_UNUSED static
   }
 #endif /* !MDBX_64BIT_ATOMIC */
 }
+#endif /* atomic_load64 */
 
 static __always_inline void atomic_yield(void) {
 #if defined(_WIN32) || defined(_WIN64)
@@ -1062,6 +1066,12 @@ static __always_inline uint64_t safe64_txnid_next(uint64_t txnid) {
   return txnid;
 }
 
+#if defined(MDBX_HAVE_C11ATOMICS) && defined(__LCC__)
+#define safe64_reset(p, single_writer)                                         \
+  atomic_store64(p, UINT64_MAX,                                                \
+                 (single_writer) ? mo_AcquireRelease                           \
+                                 : mo_SequentialConsistency)
+#else
 static __always_inline void safe64_reset(MDBX_atomic_uint64_t *p,
                                          bool single_writer) {
 #if !MDBX_64BIT_CAS
@@ -1089,6 +1099,7 @@ static __always_inline void safe64_reset(MDBX_atomic_uint64_t *p,
   assert(p->weak >= SAFE64_INVALID_THRESHOLD);
   mdbx_jitter4testing(true);
 }
+#endif /* LCC && MDBX_HAVE_C11ATOMICS */
 
 static __always_inline bool safe64_reset_compare(MDBX_atomic_uint64_t *p,
                                                  txnid_t compare) {
@@ -1191,7 +1202,6 @@ typedef struct rthc_entry_t {
   MDBX_reader *begin;
   MDBX_reader *end;
   mdbx_thread_key_t thr_tls_key;
-  bool key_valid;
 } rthc_entry_t;
 
 #if MDBX_DEBUG
@@ -1206,23 +1216,109 @@ static bin128_t bootid;
 static CRITICAL_SECTION rthc_critical_section;
 static CRITICAL_SECTION lcklist_critical_section;
 #else
-int __cxa_thread_atexit_impl(void (*dtor)(void *), void *obj, void *dso_symbol)
-    __attribute__((__weak__));
-#ifdef __APPLE__ /* FIXME: Thread-Local Storage destructors & DSO-unloading */
-int __cxa_thread_atexit_impl(void (*dtor)(void *), void *obj,
-                             void *dso_symbol) {
-  (void)dtor;
-  (void)obj;
-  (void)dso_symbol;
-  return -1;
-}
-#endif           /* __APPLE__ */
 
 static pthread_mutex_t lcklist_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t rthc_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t rthc_cond = PTHREAD_COND_INITIALIZER;
 static mdbx_thread_key_t rthc_key;
 static MDBX_atomic_uint32_t rthc_pending;
+
+static __inline uint64_t rthc_signature(const void *addr, uint8_t kind) {
+  uint64_t salt = mdbx_thread_self() * UINT64_C(0xA2F0EEC059629A17) ^
+                  UINT64_C(0x01E07C6FDB596497) * (uintptr_t)(addr);
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  return salt << 8 | kind;
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  return (uint64_t)kind << 56 | salt >> 8;
+#else
+#error "FIXME: Unsupported byte order"
+#endif /* __BYTE_ORDER__ */
+}
+
+#define MDBX_THREAD_RTHC_REGISTERED(addr) rthc_signature(addr, 0x0D)
+#define MDBX_THREAD_RTHC_COUNTED(addr) rthc_signature(addr, 0xC0)
+static __thread uint64_t rthc_thread_state;
+
+#if defined(__APPLE__) && defined(__SANITIZE_ADDRESS__) &&                     \
+    !defined(MDBX_ATTRIBUTE_NO_SANITIZE_ADDRESS)
+/* Avoid ASAN-trap due the target TLS-variable feed by Darwin's tlv_free() */
+#define MDBX_ATTRIBUTE_NO_SANITIZE_ADDRESS                                     \
+  __attribute__((__no_sanitize_address__, __noinline__))
+#else
+#define MDBX_ATTRIBUTE_NO_SANITIZE_ADDRESS __inline
+#endif
+
+MDBX_ATTRIBUTE_NO_SANITIZE_ADDRESS static uint64_t rthc_read(const void *rthc) {
+  return *(volatile uint64_t *)rthc;
+}
+
+MDBX_ATTRIBUTE_NO_SANITIZE_ADDRESS static uint64_t
+rthc_compare_and_clean(const void *rthc, const uint64_t signature) {
+#if MDBX_64BIT_CAS
+  return atomic_cas64((MDBX_atomic_uint64_t *)rthc, signature, 0);
+#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  return atomic_cas32((MDBX_atomic_uint32_t *)rthc, (uint32_t)signature, 0);
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  return atomic_cas32((MDBX_atomic_uint32_t *)rthc, (uint32_t)(signature >> 32),
+                      0);
+#else
+#error "FIXME: Unsupported byte order"
+#endif
+}
+
+static __inline int rthc_atexit(void (*dtor)(void *), void *obj,
+                                void *dso_symbol) {
+  int rc = MDBX_ENOSYS;
+
+#if defined(__APPLE__) || defined(_DARWIN_C_SOURCE)
+#if !defined(MAC_OS_X_VERSION_MIN_REQUIRED) || !defined(MAC_OS_X_VERSION_10_7)
+#error                                                                         \
+    "The <AvailabilityMacros.h> should be included and MAC_OS_X_VERSION_MIN_REQUIRED must be defined"
+#elif MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_7
+  extern void _tlv_atexit(void (*termfunc)(void *objAddr), void *objAddr)
+      __attribute__((__weak__, __weak_import__));
+  if (rc && &_tlv_atexit) {
+    (void)dso_symbol;
+    _tlv_atexit(dtor, obj);
+    rc = 0;
+  }
+#elif !defined(MDBX_HAVE_CXA_THREAD_ATEXIT)
+#define MDBX_HAVE_CXA_THREAD_ATEXIT 1
+#endif /* MAC_OS_X_VERSION_MIN_REQUIRED */
+#endif /* Apple */
+
+#if defined(MDBX_HAVE_CXA_THREAD_ATEXIT) && MDBX_HAVE_CXA_THREAD_ATEXIT
+  extern int __cxa_thread_atexit(void (*dtor)(void *), void *obj,
+                                 void *dso_symbol)
+#ifdef WEAK_IMPORT_ATTRIBUTE
+      WEAK_IMPORT_ATTRIBUTE
+#elif defined(MAC_OS_X_VERSION_MIN_REQUIRED) &&                                \
+    MAC_OS_X_VERSION_MIN_REQUIRED >= 1020 &&                                   \
+    ((__has_attribute(__weak__) && __has_attribute(__weak_import__)) ||        \
+     (defined(__GNUC__) && __GNUC__ >= 4))
+      __attribute__((__weak__, __weak_import__))
+#elif (__has_attribute(__weak__) || (defined(__GNUC__) && __GNUC__ >= 4)) &&   \
+    !defined(MAC_OS_X_VERSION_MIN_REQUIRED)
+      __attribute__((__weak__))
+#endif
+      ;
+  if (rc && &__cxa_thread_atexit)
+    rc = __cxa_thread_atexit(dtor, obj, dso_symbol);
+#elif __GLIBC_PREREQ(2, 18) || defined(ANDROID) || defined(__linux__) ||       \
+    defined(__gnu_linux__)
+  extern int __cxa_thread_atexit_impl(void (*dtor)(void *), void *obj,
+                                      void *dso_symbol)
+      __attribute__((__weak__));
+  if (rc && &__cxa_thread_atexit_impl)
+    rc = __cxa_thread_atexit_impl(dtor, obj, dso_symbol);
+#else
+  (void)dtor;
+  (void)obj;
+  (void)dso_symbol;
+#endif
+
+  return rc;
+}
 
 __cold static void workaround_glibc_bug21031(void) {
   /* Workaround for https://sourceware.org/bugzilla/show_bug.cgi?id=21031
@@ -1295,24 +1391,22 @@ static void thread_rthc_set(mdbx_thread_key_t key, const void *value) {
 #if defined(_WIN32) || defined(_WIN64)
   mdbx_ensure(nullptr, TlsSetValue(key, (void *)value));
 #else
-#define MDBX_THREAD_RTHC_ZERO 0
-#define MDBX_THREAD_RTHC_REGISTERED 1
-#define MDBX_THREAD_RTHC_COUNTED 2
-  static __thread char thread_registration_state;
-  if (value && unlikely(thread_registration_state == MDBX_THREAD_RTHC_ZERO)) {
-    thread_registration_state = MDBX_THREAD_RTHC_REGISTERED;
+  const uint64_t sign_registered =
+      MDBX_THREAD_RTHC_REGISTERED(&rthc_thread_state);
+  const uint64_t sign_counted = MDBX_THREAD_RTHC_COUNTED(&rthc_thread_state);
+  if (value && unlikely(rthc_thread_state != sign_registered &&
+                        rthc_thread_state != sign_counted)) {
+    rthc_thread_state = sign_registered;
     mdbx_trace("thread registered 0x%" PRIxPTR, mdbx_thread_self());
-    if (&__cxa_thread_atexit_impl == nullptr ||
-        __cxa_thread_atexit_impl(mdbx_rthc_thread_dtor,
-                                 &thread_registration_state,
-                                 (void *)&mdbx_version /* dso_anchor */)) {
-      mdbx_ensure(nullptr, pthread_setspecific(
-                               rthc_key, &thread_registration_state) == 0);
-      thread_registration_state = MDBX_THREAD_RTHC_COUNTED;
+    if (rthc_atexit(mdbx_rthc_thread_dtor, &rthc_thread_state,
+                    (void *)&mdbx_version /* dso_anchor */)) {
+      mdbx_ensure(nullptr,
+                  pthread_setspecific(rthc_key, &rthc_thread_state) == 0);
+      rthc_thread_state = sign_counted;
       const unsigned count_before = atomic_add32(&rthc_pending, 1);
       mdbx_ensure(nullptr, count_before < INT_MAX);
-      mdbx_trace("fallback to pthreads' tsd, key %" PRIuPTR ", count %u",
-                 (uintptr_t)rthc_key, count_before);
+      mdbx_notice("fallback to pthreads' tsd, key %" PRIuPTR ", count %u",
+                  (uintptr_t)rthc_key, count_before);
       (void)count_before;
     }
   }
@@ -1362,24 +1456,22 @@ __cold void mdbx_rthc_global_init(void) {
 }
 
 /* dtor called for thread, i.e. for all mdbx's environment objects */
-__cold void mdbx_rthc_thread_dtor(void *ptr) {
+__cold void mdbx_rthc_thread_dtor(void *rthc) {
   rthc_lock();
   mdbx_trace(">> pid %d, thread 0x%" PRIxPTR ", rthc %p", mdbx_getpid(),
-             mdbx_thread_self(), ptr);
+             mdbx_thread_self(), rthc);
 
   const uint32_t self_pid = mdbx_getpid();
   for (unsigned i = 0; i < rthc_count; ++i) {
-    if (!rthc_table[i].key_valid)
-      continue;
     const mdbx_thread_key_t key = rthc_table[i].thr_tls_key;
-    MDBX_reader *const rthc = thread_rthc_get(key);
-    if (rthc < rthc_table[i].begin || rthc >= rthc_table[i].end)
+    MDBX_reader *const reader = thread_rthc_get(key);
+    if (reader < rthc_table[i].begin || reader >= rthc_table[i].end)
       continue;
 #if !defined(_WIN32) && !defined(_WIN64)
     if (pthread_setspecific(key, nullptr) != 0) {
       mdbx_trace("== thread 0x%" PRIxPTR
                  ", rthc %p: ignore race with tsd-key deletion",
-                 mdbx_thread_self(), ptr);
+                 mdbx_thread_self(), __Wpedantic_format_voidptr(reader));
       continue /* ignore race with tsd-key deletion by mdbx_env_close() */;
     }
 #endif
@@ -1387,35 +1479,49 @@ __cold void mdbx_rthc_thread_dtor(void *ptr) {
     mdbx_trace("== thread 0x%" PRIxPTR
                ", rthc %p, [%i], %p ... %p (%+i), rtch-pid %i, "
                "current-pid %i",
-               mdbx_thread_self(), __Wpedantic_format_voidptr(rthc), i,
+               mdbx_thread_self(), __Wpedantic_format_voidptr(reader), i,
                __Wpedantic_format_voidptr(rthc_table[i].begin),
                __Wpedantic_format_voidptr(rthc_table[i].end),
-               (int)(rthc - rthc_table[i].begin), rthc->mr_pid.weak, self_pid);
-    if (atomic_load32(&rthc->mr_pid, mo_Relaxed) == self_pid) {
+               (int)(reader - rthc_table[i].begin), reader->mr_pid.weak,
+               self_pid);
+    if (atomic_load32(&reader->mr_pid, mo_Relaxed) == self_pid) {
       mdbx_trace("==== thread 0x%" PRIxPTR ", rthc %p, cleanup",
-                 mdbx_thread_self(), __Wpedantic_format_voidptr(rthc));
-      atomic_store32(&rthc->mr_pid, 0, mo_AcquireRelease);
+                 mdbx_thread_self(), __Wpedantic_format_voidptr(reader));
+      atomic_cas32(&reader->mr_pid, self_pid, 0);
     }
   }
 
 #if defined(_WIN32) || defined(_WIN64)
-  mdbx_trace("<< thread 0x%" PRIxPTR ", rthc %p", mdbx_thread_self(), ptr);
+  mdbx_trace("<< thread 0x%" PRIxPTR ", rthc %p", mdbx_thread_self(), rthc);
   rthc_unlock();
 #else
-  const char self_registration = *(volatile char *)ptr;
-  *(volatile char *)ptr = MDBX_THREAD_RTHC_ZERO;
-  mdbx_trace("== thread 0x%" PRIxPTR ", rthc %p, pid %d, self-status %d",
-             mdbx_thread_self(), ptr, mdbx_getpid(), self_registration);
-  if (self_registration == MDBX_THREAD_RTHC_COUNTED)
+  const uint64_t sign_registered = MDBX_THREAD_RTHC_REGISTERED(rthc);
+  const uint64_t sign_counted = MDBX_THREAD_RTHC_COUNTED(rthc);
+  const uint64_t state = rthc_read(rthc);
+  if (state == sign_registered &&
+      rthc_compare_and_clean(rthc, sign_registered)) {
+    mdbx_trace("== thread 0x%" PRIxPTR
+               ", rthc %p, pid %d, self-status %s (0x%08" PRIx64 ")",
+               mdbx_thread_self(), rthc, mdbx_getpid(), "registered", state);
+  } else if (state == sign_counted &&
+             rthc_compare_and_clean(rthc, sign_counted)) {
+    mdbx_trace("== thread 0x%" PRIxPTR
+               ", rthc %p, pid %d, self-status %s (0x%08" PRIx64 ")",
+               mdbx_thread_self(), rthc, mdbx_getpid(), "counted", state);
     mdbx_ensure(nullptr, atomic_sub32(&rthc_pending, 1) > 0);
+  } else {
+    mdbx_warning("thread 0x%" PRIxPTR
+                 ", rthc %p, pid %d, self-status %s (0x%08" PRIx64 ")",
+                 mdbx_thread_self(), rthc, mdbx_getpid(), "wrong", state);
+  }
 
   if (atomic_load32(&rthc_pending, mo_AcquireRelease) == 0) {
     mdbx_trace("== thread 0x%" PRIxPTR ", rthc %p, pid %d, wake",
-               mdbx_thread_self(), ptr, mdbx_getpid());
+               mdbx_thread_self(), rthc, mdbx_getpid());
     mdbx_ensure(nullptr, pthread_cond_broadcast(&rthc_cond) == 0);
   }
 
-  mdbx_trace("<< thread 0x%" PRIxPTR ", rthc %p", mdbx_thread_self(), ptr);
+  mdbx_trace("<< thread 0x%" PRIxPTR ", rthc %p", mdbx_thread_self(), rthc);
   /* Allow tail call optimization, i.e. gcc should generate the jmp instruction
    * instead of a call for pthread_mutex_unlock() and therefore CPU could not
    * return to current DSO's code section, which may be unloaded immediately
@@ -1429,16 +1535,35 @@ __cold void mdbx_rthc_global_dtor(void) {
 
   rthc_lock();
 #if !defined(_WIN32) && !defined(_WIN64)
-  char *rthc = pthread_getspecific(rthc_key);
-  mdbx_trace(
-      "== thread 0x%" PRIxPTR ", rthc %p, pid %d, self-status %d, left %d",
-      mdbx_thread_self(), __Wpedantic_format_voidptr(rthc), mdbx_getpid(),
-      rthc ? *rthc : -1, atomic_load32(&rthc_pending, mo_Relaxed));
+  uint64_t *rthc = pthread_getspecific(rthc_key);
+  mdbx_trace("== thread 0x%" PRIxPTR
+             ", rthc %p, pid %d, self-status 0x%08" PRIx64 ", left %d",
+             mdbx_thread_self(), __Wpedantic_format_voidptr(rthc),
+             mdbx_getpid(), rthc ? rthc_read(rthc) : ~UINT64_C(0),
+             atomic_load32(&rthc_pending, mo_Relaxed));
   if (rthc) {
-    const char self_registration = *rthc;
-    *rthc = MDBX_THREAD_RTHC_ZERO;
-    if (self_registration == MDBX_THREAD_RTHC_COUNTED)
+    const uint64_t sign_registered = MDBX_THREAD_RTHC_REGISTERED(rthc);
+    const uint64_t sign_counted = MDBX_THREAD_RTHC_COUNTED(rthc);
+    const uint64_t state = rthc_read(rthc);
+    if (state == sign_registered &&
+        rthc_compare_and_clean(rthc, sign_registered)) {
+      mdbx_trace("== thread 0x%" PRIxPTR
+                 ", rthc %p, pid %d, self-status %s (0x%08" PRIx64 ")",
+                 mdbx_thread_self(), __Wpedantic_format_voidptr(rthc),
+                 mdbx_getpid(), "registered", state);
+    } else if (state == sign_counted &&
+               rthc_compare_and_clean(rthc, sign_counted)) {
+      mdbx_trace("== thread 0x%" PRIxPTR
+                 ", rthc %p, pid %d, self-status %s (0x%08" PRIx64 ")",
+                 mdbx_thread_self(), __Wpedantic_format_voidptr(rthc),
+                 mdbx_getpid(), "counted", state);
       mdbx_ensure(nullptr, atomic_sub32(&rthc_pending, 1) > 0);
+    } else {
+      mdbx_warning("thread 0x%" PRIxPTR
+                   ", rthc %p, pid %d, self-status %s (0x%08" PRIx64 ")",
+                   mdbx_thread_self(), __Wpedantic_format_voidptr(rthc),
+                   mdbx_getpid(), "wrong", state);
+    }
   }
 
   struct timespec abstime;
@@ -1454,7 +1579,8 @@ __cold void mdbx_rthc_global_dtor(void) {
 
   for (unsigned left;
        (left = atomic_load32(&rthc_pending, mo_AcquireRelease)) > 0;) {
-    mdbx_trace("pid %d, pending %u, wait for...", mdbx_getpid(), left);
+    mdbx_notice("tls-cleanup: pid %d, pending %u, wait for...", mdbx_getpid(),
+                left);
     const int rc = pthread_cond_timedwait(&rthc_cond, &rthc_mutex, &abstime);
     if (rc && rc != EINTR)
       break;
@@ -1464,8 +1590,6 @@ __cold void mdbx_rthc_global_dtor(void) {
 
   const uint32_t self_pid = mdbx_getpid();
   for (unsigned i = 0; i < rthc_count; ++i) {
-    if (!rthc_table[i].key_valid)
-      continue;
     const mdbx_thread_key_t key = rthc_table[i].thr_tls_key;
     thread_key_delete(key);
     for (MDBX_reader *rthc = rthc_table[i].begin; rthc < rthc_table[i].end;
@@ -1502,22 +1626,16 @@ __cold void mdbx_rthc_global_dtor(void) {
   mdbx_trace("<< pid %d\n", mdbx_getpid());
 }
 
-__cold int mdbx_rthc_alloc(mdbx_thread_key_t *key, MDBX_reader *begin,
+__cold int mdbx_rthc_alloc(mdbx_thread_key_t *pkey, MDBX_reader *begin,
                            MDBX_reader *end) {
-  int rc;
-  if (key) {
+  assert(pkey != NULL);
 #ifndef NDEBUG
-    *key = (mdbx_thread_key_t)0xBADBADBAD;
+  *pkey = (mdbx_thread_key_t)0xBADBADBAD;
 #endif /* NDEBUG */
-    rc = thread_key_create(key);
-    if (rc != MDBX_SUCCESS)
-      return rc;
-  }
 
   rthc_lock();
-  const mdbx_thread_key_t new_key = key ? *key : 0;
-  mdbx_trace(">> key %" PRIuPTR ", rthc_count %u, rthc_limit %u",
-             (uintptr_t)new_key, rthc_count, rthc_limit);
+  mdbx_trace(">> rthc_count %u, rthc_limit %u", rthc_count, rthc_limit);
+  int rc;
   if (rthc_count == rthc_limit) {
     rthc_entry_t *new_table =
         mdbx_realloc((rthc_table == rthc_table_static) ? nullptr : rthc_table,
@@ -1531,22 +1649,25 @@ __cold int mdbx_rthc_alloc(mdbx_thread_key_t *key, MDBX_reader *begin,
     rthc_table = new_table;
     rthc_limit *= 2;
   }
+
+  rc = thread_key_create(&rthc_table[rthc_count].thr_tls_key);
+  if (rc != MDBX_SUCCESS)
+    goto bailout;
+
+  *pkey = rthc_table[rthc_count].thr_tls_key;
   mdbx_trace("== [%i] = key %" PRIuPTR ", %p ... %p", rthc_count,
-             (uintptr_t)new_key, __Wpedantic_format_voidptr(begin),
+             (uintptr_t)*pkey, __Wpedantic_format_voidptr(begin),
              __Wpedantic_format_voidptr(end));
-  rthc_table[rthc_count].key_valid = key ? true : false;
-  rthc_table[rthc_count].thr_tls_key = key ? new_key : 0;
+
   rthc_table[rthc_count].begin = begin;
   rthc_table[rthc_count].end = end;
   ++rthc_count;
   mdbx_trace("<< key %" PRIuPTR ", rthc_count %u, rthc_limit %u",
-             (uintptr_t)new_key, rthc_count, rthc_limit);
+             (uintptr_t)*pkey, rthc_count, rthc_limit);
   rthc_unlock();
   return MDBX_SUCCESS;
 
 bailout:
-  if (key)
-    thread_key_delete(*key);
   rthc_unlock();
   return rc;
 }
@@ -1554,11 +1675,11 @@ bailout:
 __cold void mdbx_rthc_remove(const mdbx_thread_key_t key) {
   thread_key_delete(key);
   rthc_lock();
-  mdbx_trace(">> key %zu, rthc_count %u, rthc_limit %u", (size_t)key,
+  mdbx_trace(">> key %zu, rthc_count %u, rthc_limit %u", (uintptr_t)key,
              rthc_count, rthc_limit);
 
   for (unsigned i = 0; i < rthc_count; ++i) {
-    if (rthc_table[i].key_valid && key == rthc_table[i].thr_tls_key) {
+    if (key == rthc_table[i].thr_tls_key) {
       const uint32_t self_pid = mdbx_getpid();
       mdbx_trace("== [%i], %p ...%p, current-pid %d", i,
                  __Wpedantic_format_voidptr(rthc_table[i].begin),
@@ -6384,6 +6505,7 @@ __cold static int mdbx_wipe_steady(MDBX_env *env, const txnid_t last_steady) {
 #define MDBX_ALLOC_NEW 4
 #define MDBX_ALLOC_SLOT 8
 #define MDBX_ALLOC_FAKE 16
+#define MDBX_ALLOC_NOLOG 32
 #define MDBX_ALLOC_ALL (MDBX_ALLOC_CACHE | MDBX_ALLOC_GC | MDBX_ALLOC_NEW)
 
 __hot static struct page_result mdbx_page_alloc(MDBX_cursor *mc,
@@ -6819,12 +6941,9 @@ no_loose:
       txn->mt_flags |= MDBX_TXN_ERROR;
       level = MDBX_LOG_ERROR;
       what = "pages";
-    } else if (flags & MDBX_ALLOC_SLOT) {
-      level = MDBX_LOG_NOTICE;
-      what = "gc-slot/backlog";
     } else {
-      level = MDBX_LOG_NOTICE;
-      what = "backlog-pages";
+      level = (flags & MDBX_ALLOC_NOLOG) ? MDBX_LOG_DEBUG : MDBX_LOG_NOTICE;
+      what = (flags & MDBX_ALLOC_SLOT) ? "gc-slot/backlog" : "backlog-pages";
     }
     if (mdbx_log_enabled(level))
       mdbx_debug_log(level, __func__, __LINE__,
@@ -8461,29 +8580,56 @@ int mdbx_txn_flags(const MDBX_txn *txn) {
 #define TXN_DBI_CHANGED(txn, dbi)                                              \
   ((txn)->mt_dbiseqs[dbi] != (txn)->mt_env->me_dbiseqs[dbi])
 
+static __inline unsigned dbi_seq(const MDBX_env *const env, unsigned slot) {
+  unsigned v = env->me_dbiseqs[slot] + 1;
+  return v + (v == 0);
+}
+
 static void dbi_import_locked(MDBX_txn *txn) {
-  MDBX_env *const env = txn->mt_env;
-  const unsigned n = env->me_numdbs;
+  const MDBX_env *const env = txn->mt_env;
+  unsigned n = env->me_numdbs;
   for (unsigned i = CORE_DBS; i < n; ++i) {
     if (i >= txn->mt_numdbs) {
-      txn->mt_dbistate[i] = 0;
       txn->mt_cursors[i] = NULL;
+      if (txn->mt_dbiseqs != env->me_dbiseqs)
+        txn->mt_dbiseqs[i] = 0;
+      txn->mt_dbistate[i] = 0;
     }
-    if ((env->me_dbflags[i] & DB_VALID) &&
-        !(txn->mt_dbistate[i] & DBI_USRVALID)) {
+    if ((TXN_DBI_CHANGED(txn, i) &&
+         (txn->mt_dbistate[i] & (DBI_CREAT | DBI_DIRTY | DBI_FRESH)) == 0) ||
+        ((env->me_dbflags[i] & DB_VALID) &&
+         !(txn->mt_dbistate[i] & DBI_VALID))) {
+      mdbx_tassert(txn, (txn->mt_dbistate[i] &
+                         (DBI_CREAT | DBI_DIRTY | DBI_FRESH)) == 0);
       txn->mt_dbiseqs[i] = env->me_dbiseqs[i];
       txn->mt_dbs[i].md_flags = env->me_dbflags[i] & DB_PERSISTENT_FLAGS;
-      txn->mt_dbistate[i] = DBI_VALID | DBI_USRVALID | DBI_STALE;
-      mdbx_tassert(txn, txn->mt_dbxs[i].md_cmp != NULL);
-      mdbx_tassert(txn, txn->mt_dbxs[i].md_name.iov_base != NULL);
+      txn->mt_dbistate[i] = 0;
+      if (env->me_dbflags[i] & DB_VALID) {
+        txn->mt_dbistate[i] = DBI_VALID | DBI_USRVALID | DBI_STALE;
+        mdbx_tassert(txn, txn->mt_dbxs[i].md_cmp != NULL);
+        mdbx_tassert(txn, txn->mt_dbxs[i].md_name.iov_base != NULL);
+      }
     }
   }
+  while (unlikely(n < txn->mt_numdbs))
+    if (txn->mt_cursors[txn->mt_numdbs - 1] == NULL &&
+        (txn->mt_dbistate[txn->mt_numdbs - 1] & DBI_USRVALID) == 0)
+      txn->mt_numdbs -= 1;
+    else {
+      if ((txn->mt_dbistate[n] & DBI_USRVALID) == 0) {
+        if (txn->mt_dbiseqs != env->me_dbiseqs)
+          txn->mt_dbiseqs[n] = 0;
+        txn->mt_dbistate[n] = 0;
+      }
+      ++n;
+    }
   txn->mt_numdbs = n;
 }
 
 /* Import DBI which opened after txn started into context */
 __cold static bool dbi_import(MDBX_txn *txn, MDBX_dbi dbi) {
-  if (dbi < CORE_DBS || dbi >= txn->mt_env->me_numdbs)
+  if (dbi < CORE_DBS ||
+      (dbi >= txn->mt_numdbs && dbi >= txn->mt_env->me_numdbs))
     return false;
 
   mdbx_ensure(txn->mt_env, mdbx_fastmutex_acquire(&txn->mt_env->me_dbi_lock) ==
@@ -8520,7 +8666,7 @@ static void dbi_update(MDBX_txn *txn, int keep) {
           env->me_dbxs[i].md_name.iov_len = 0;
           mdbx_memory_fence(mo_AcquireRelease, true);
           mdbx_assert(env, env->me_dbflags[i] == 0);
-          env->me_dbiseqs[i]++;
+          env->me_dbiseqs[i] = dbi_seq(env, i);
           env->me_dbxs[i].md_name.iov_base = NULL;
           mdbx_free(ptr);
         }
@@ -9005,7 +9151,8 @@ static int mdbx_prep_backlog(MDBX_txn *txn, MDBX_cursor *gc_cursor,
 
   while (backlog_size(txn) < backlog4cow + linear4list && err == MDBX_SUCCESS)
     err = mdbx_page_alloc(gc_cursor, 0,
-                          MDBX_ALLOC_GC | MDBX_ALLOC_SLOT | MDBX_ALLOC_FAKE)
+                          MDBX_ALLOC_GC | MDBX_ALLOC_SLOT | MDBX_ALLOC_FAKE |
+                              MDBX_ALLOC_NOLOG)
               .err;
 
   gc_cursor->mc_flags |= C_RECLAIMING;
@@ -9443,7 +9590,7 @@ retry:
               break;
             }
             if (unlikely(rc != MDBX_SUCCESS ||
-                         key.iov_len != sizeof(mdbx_tid_t))) {
+                         key.iov_len != sizeof(txnid_t))) {
               rc = MDBX_CORRUPTED;
               goto bailout;
             }
@@ -9844,11 +9991,16 @@ static int mdbx_txn_write(MDBX_txn *txn, struct mdbx_iov_ctx *ctx) {
 /* Check txn and dbi arguments to a function */
 static __always_inline bool check_dbi(MDBX_txn *txn, MDBX_dbi dbi,
                                       unsigned validity) {
-  if (likely(dbi < txn->mt_numdbs))
-    return likely((txn->mt_dbistate[dbi] & validity) &&
-                  !TXN_DBI_CHANGED(txn, dbi) &&
-                  (txn->mt_dbxs[dbi].md_name.iov_base || dbi < CORE_DBS));
-
+  if (likely(dbi < txn->mt_numdbs)) {
+    mdbx_memory_fence(mo_AcquireRelease, false);
+    if (likely(!TXN_DBI_CHANGED(txn, dbi))) {
+      if (likely(txn->mt_dbistate[dbi] & validity))
+        return true;
+      if (likely(dbi < CORE_DBS ||
+                 (txn->mt_env->me_dbflags[dbi] & DB_VALID) == 0))
+        return false;
+    }
+  }
   return dbi_import(txn, dbi);
 }
 
@@ -10422,10 +10574,6 @@ int mdbx_txn_commit_ex(MDBX_txn *txn, MDBX_commit_latency *latency) {
       goto fail;
     for (MDBX_dbi i = CORE_DBS; i < txn->mt_numdbs; i++) {
       if (txn->mt_dbistate[i] & DBI_DIRTY) {
-        if (unlikely(TXN_DBI_CHANGED(txn, i))) {
-          rc = MDBX_BAD_DBI;
-          goto fail;
-        }
         MDBX_db *db = &txn->mt_dbs[i];
         mdbx_debug("update main's entry for sub-db %u, mod_txnid %" PRIaTXN
                    " -> %" PRIaTXN,
@@ -12413,17 +12561,29 @@ __cold static int mdbx_setup_lck(MDBX_env *env, char *lck_pathname,
 
   int err = mdbx_openfile(MDBX_OPEN_LCK, env, lck_pathname, &env->me_lfd, mode);
   if (err != MDBX_SUCCESS) {
-    if (!(err == MDBX_ENOFILE && (env->me_flags & MDBX_EXCLUSIVE)) &&
-        !((err == MDBX_EROFS || err == MDBX_EACCESS || err == MDBX_EPERM) &&
-          (env->me_flags & MDBX_RDONLY)))
+    switch (err) {
+    default:
       return err;
+    case MDBX_ENOFILE:
+    case MDBX_EACCESS:
+    case MDBX_EPERM:
+      if (!F_ISSET(env->me_flags, MDBX_RDONLY | MDBX_EXCLUSIVE))
+        return err;
+      break;
+    case MDBX_EROFS:
+      if ((env->me_flags & MDBX_RDONLY) == 0)
+        return err;
+      break;
+    }
 
-    /* ensure the file system is read-only */
-    err = mdbx_check_fs_rdonly(env->me_lazy_fd, lck_pathname, err);
-    if (err != MDBX_SUCCESS &&
-        /* ignore ERROR_NOT_SUPPORTED for exclusive mode */
-        !(err == MDBX_ENOSYS && (env->me_flags & MDBX_EXCLUSIVE)))
-      return err;
+    if (err != MDBX_ENOFILE) {
+      /* ensure the file system is read-only */
+      err = mdbx_check_fs_rdonly(env->me_lazy_fd, lck_pathname, err);
+      if (err != MDBX_SUCCESS &&
+          /* ignore ERROR_NOT_SUPPORTED for exclusive mode */
+          !(err == MDBX_ENOSYS && (env->me_flags & MDBX_EXCLUSIVE)))
+        return err;
+    }
 
     /* LY: without-lck mode (e.g. exclusive or on read-only filesystem) */
     /* beginning of a locked section ---------------------------------------- */
@@ -13077,7 +13237,7 @@ __cold int mdbx_env_open(MDBX_env *env, const char *pathname,
   }
   mode = (/* inherit read permissions for group and others */ mode &
           (S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)) |
-         /* always add read/write/search for owner */ S_IRUSR | S_IWUSR |
+         /* always add read/write for owner */ S_IRUSR | S_IWUSR |
          ((mode & S_IRGRP) ? /* +write if readable by group */ S_IWGRP : 0) |
          ((mode & S_IROTH) ? /* +write if readable by others */ S_IWOTH : 0);
 #endif /* !Windows */
@@ -13156,6 +13316,9 @@ __cold int mdbx_env_open(MDBX_env *env, const char *pathname,
   if (lck) {
     if (lck_rc == MDBX_RESULT_TRUE) {
       lck->mti_envmode.weak = env->me_flags & (mode_flags | MDBX_RDONLY);
+      lck->mti_meta_sync_txnid.weak =
+          (uint32_t)mdbx_recent_committed_txnid(env);
+      lck->mti_reader_check_timestamp.weak = mdbx_osal_monotime();
       rc = mdbx_lck_downgrade(env);
       mdbx_debug("lck-downgrade-%s: rc %i",
                  (env->me_flags & MDBX_EXCLUSIVE) ? "partial" : "full", rc);
@@ -13174,6 +13337,11 @@ __cold int mdbx_env_open(MDBX_env *env, const char *pathname,
         goto bailout;
       env->me_flags |= MDBX_ENV_TXKEY;
     }
+  } else {
+    env->me_lck->mti_envmode.weak = env->me_flags & (mode_flags | MDBX_RDONLY);
+    env->me_lck->mti_meta_sync_txnid.weak =
+        (uint32_t)mdbx_recent_committed_txnid(env);
+    env->me_lck->mti_reader_check_timestamp.weak = mdbx_osal_monotime();
   }
 
   if ((flags & MDBX_RDONLY) == 0) {
@@ -16643,9 +16811,6 @@ static __inline int mdbx_couple_init(MDBX_cursor_couple *couple,
 /* Initialize a cursor for a given transaction and database. */
 static int mdbx_cursor_init(MDBX_cursor *mc, MDBX_txn *txn, MDBX_dbi dbi) {
   STATIC_ASSERT(offsetof(MDBX_cursor_couple, outer) == 0);
-  if (unlikely(TXN_DBI_CHANGED(txn, dbi)))
-    return MDBX_BAD_DBI;
-
   return mdbx_couple_init(container_of(mc, MDBX_cursor_couple, outer), dbi, txn,
                           &txn->mt_dbs[dbi], &txn->mt_dbxs[dbi],
                           &txn->mt_dbistate[dbi]);
@@ -20120,15 +20285,17 @@ __cold static int fetch_envinfo_ex(const MDBX_env *env, const MDBX_txn *txn,
 
   arg->mi_self_latter_reader_txnid = arg->mi_latter_reader_txnid =
       arg->mi_recent_txnid;
-  for (unsigned i = 0; i < arg->mi_numreaders; ++i) {
-    const uint32_t pid =
-        atomic_load32(&lck->mti_readers[i].mr_pid, mo_AcquireRelease);
-    if (pid) {
-      const txnid_t txnid = safe64_read(&lck->mti_readers[i].mr_txnid);
-      if (arg->mi_latter_reader_txnid > txnid)
-        arg->mi_latter_reader_txnid = txnid;
-      if (pid == env->me_pid && arg->mi_self_latter_reader_txnid > txnid)
-        arg->mi_self_latter_reader_txnid = txnid;
+  if (env->me_lck_mmap.lck) {
+    for (unsigned i = 0; i < arg->mi_numreaders; ++i) {
+      const uint32_t pid =
+          atomic_load32(&lck->mti_readers[i].mr_pid, mo_AcquireRelease);
+      if (pid) {
+        const txnid_t txnid = safe64_read(&lck->mti_readers[i].mr_txnid);
+        if (arg->mi_latter_reader_txnid > txnid)
+          arg->mi_latter_reader_txnid = txnid;
+        if (pid == env->me_pid && arg->mi_self_latter_reader_txnid > txnid)
+          arg->mi_self_latter_reader_txnid = txnid;
+      }
     }
   }
 
@@ -20441,15 +20608,16 @@ static int dbi_open(MDBX_txn *txn, const char *table_name, unsigned user_flags,
     txn->mt_dbistate[slot] = (uint8_t)dbiflags;
     txn->mt_dbxs[slot].md_name.iov_base = namedup;
     txn->mt_dbxs[slot].md_name.iov_len = len;
-    txn->mt_dbiseqs[slot] = ++env->me_dbiseqs[slot];
+    txn->mt_dbiseqs[slot] = env->me_dbiseqs[slot] = dbi_seq(env, slot);
     if (!(dbiflags & DBI_CREAT))
       env->me_dbflags[slot] = txn->mt_dbs[slot].md_flags | DB_VALID;
     if (txn->mt_numdbs == slot) {
       mdbx_compiler_barrier();
-      txn->mt_numdbs = env->me_numdbs = slot + 1;
+      txn->mt_numdbs = slot + 1;
       txn->mt_cursors[slot] = NULL;
     }
-    mdbx_assert(env, env->me_numdbs > slot);
+    if (env->me_numdbs <= slot)
+      env->me_numdbs = slot + 1;
     *dbi = slot;
   }
 
@@ -20509,7 +20677,6 @@ static int mdbx_dbi_close_locked(MDBX_env *env, MDBX_dbi dbi) {
     return MDBX_BAD_DBI;
 
   env->me_dbflags[dbi] = 0;
-  env->me_dbiseqs[dbi]++;
   env->me_dbxs[dbi].md_name.iov_len = 0;
   mdbx_memory_fence(mo_AcquireRelease, true);
   env->me_dbxs[dbi].md_name.iov_base = NULL;
@@ -22821,7 +22988,7 @@ int mdbx_set_attr(MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *key, MDBX_val *data,
   if (unlikely(txn->mt_signature != MDBX_MT_SIGNATURE))
     return MDBX_EBADSIGN;
 
-  if (unlikely(!TXN_DBI_EXIST(txn, dbi, DB_USRVALID)))
+  if (unlikely(!check_dbi(txn, dbi, DB_USRVALID)))
     return MDBX_BAD_DBI;
 
   if (unlikely(txn->mt_flags & (MDBX_TXN_RDONLY | MDBX_TXN_BLOCKED)))
@@ -23101,7 +23268,9 @@ LIBMDBX_API __attribute__((__weak__)) const char *__asan_default_options() {
          "report_globals=1:"
          "replace_str=1:replace_intrin=1:"
          "malloc_context_size=9:"
+#if !defined(__APPLE__)
          "detect_leaks=1:"
+#endif
          "check_printf=1:"
          "detect_deadlocks=1:"
 #ifndef LTO_ENABLED
