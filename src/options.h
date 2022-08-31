@@ -80,6 +80,24 @@
 #error MDBX_ENABLE_PGOP_STAT must be defined as 0 or 1
 #endif /* MDBX_ENABLE_PGOP_STAT */
 
+/** Enables chunking long list of retired pages during huge transactions commit
+ * to avoid use sequences of pages. */
+#ifndef MDBX_ENABLE_BIGFOOT
+#if MDBX_WORDBITS >= 64 || defined(DOXYGEN)
+#define MDBX_ENABLE_BIGFOOT 1
+#else
+#define MDBX_ENABLE_BIGFOOT 0
+#endif
+#elif !(MDBX_ENABLE_BIGFOOT == 0 || MDBX_ENABLE_BIGFOOT == 1)
+#error MDBX_ENABLE_BIGFOOT must be defined as 0 or 1
+#endif /* MDBX_ENABLE_BIGFOOT */
+
+#ifndef MDBX_CACHE_METAPTR
+#define MDBX_CACHE_METAPTR 0
+#elif !(MDBX_CACHE_METAPTR == 0 || MDBX_CACHE_METAPTR == 1)
+#error MDBX_CACHE_METAPTR must be defined as 0 or 1
+#endif /* MDBX_CACHE_METAPTR */
+
 /** Controls use of POSIX madvise() hints and friends. */
 #ifndef MDBX_ENABLE_MADVISE
 #define MDBX_ENABLE_MADVISE 1
@@ -89,11 +107,11 @@
 
 /** Disable some checks to reduce an overhead and detection probability of
  * database corruption to a values closer to the LMDB. */
-#ifndef MDBX_DISABLE_PAGECHECKS
-#define MDBX_DISABLE_PAGECHECKS 0
-#elif !(MDBX_DISABLE_PAGECHECKS == 0 || MDBX_DISABLE_PAGECHECKS == 1)
-#error MDBX_DISABLE_PAGECHECKS must be defined as 0 or 1
-#endif /* MDBX_DISABLE_PAGECHECKS */
+#ifndef MDBX_DISABLE_VALIDATION
+#define MDBX_DISABLE_VALIDATION 0
+#elif !(MDBX_DISABLE_VALIDATION == 0 || MDBX_DISABLE_VALIDATION == 1)
+#error MDBX_DISABLE_VALIDATION must be defined as 0 or 1
+#endif /* MDBX_DISABLE_VALIDATION */
 
 #ifndef MDBX_PNL_PREALLOC_FOR_RADIXSORT
 #define MDBX_PNL_PREALLOC_FOR_RADIXSORT 1

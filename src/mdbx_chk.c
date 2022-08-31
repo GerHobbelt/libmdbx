@@ -93,7 +93,7 @@ struct {
 #define dbi_main walk.dbi[MAIN_DBI]
 #define dbi_meta walk.dbi[CORE_DBS]
 
-int envflags = MDBX_RDONLY | MDBX_EXCLUSIVE;
+int envflags = MDBX_RDONLY | MDBX_EXCLUSIVE | MDBX_VALIDATION;
 MDBX_env *env;
 MDBX_txn *txn;
 MDBX_envinfo envinfo;
@@ -125,7 +125,8 @@ static void MDBX_PRINTF_ARGS(1, 2) print(const char *msg, ...) {
   }
 }
 
-static void va_log(MDBX_log_level_t level, const char *msg, va_list args) {
+static void va_log(MDBX_log_level_t level, const char *function, int line,
+                   const char *msg, va_list args) {
   static const char *const prefixes[] = {
       "!!!fatal: ",       " ! " /* error */,      " ~ " /* warning */,
       "   " /* notice */, "   // " /* verbose */, "   //// " /* debug */,
@@ -143,13 +144,20 @@ static void va_log(MDBX_log_level_t level, const char *msg, va_list args) {
     fflush(nullptr);
     fputs(prefixes[level], out);
     vfprintf(out, msg, args);
-    if (msg[strlen(msg) - 1] != '\n')
+
+    const bool have_lf = msg[strlen(msg) - 1] == '\n';
+    if (level == MDBX_LOG_FATAL && function && line)
+      fprintf(out, have_lf ? "          %s(), %u\n" : " (%s:%u)\n",
+              function + (strncmp(function, "mdbx_", 5) ? 5 : 0), line);
+    else if (!have_lf)
       fputc('\n', out);
     fflush(nullptr);
   }
 
   if (level == MDBX_LOG_FATAL) {
+#if !MDBX_DEBUG && !MDBX_FORCE_ASSERTIONS
     exit(EXIT_FAILURE_MDBX);
+#endif
     abort();
   }
 }
@@ -157,7 +165,7 @@ static void va_log(MDBX_log_level_t level, const char *msg, va_list args) {
 static void MDBX_PRINTF_ARGS(1, 2) error(const char *msg, ...) {
   va_list args;
   va_start(args, msg);
-  va_log(MDBX_LOG_ERROR, msg, args);
+  va_log(MDBX_LOG_ERROR, nullptr, 0, msg, args);
   va_end(args);
 }
 
@@ -166,7 +174,7 @@ static void logger(MDBX_log_level_t level, const char *function, int line,
   (void)line;
   (void)function;
   if (level < MDBX_LOG_EXTRA)
-    va_log(level, msg, args);
+    va_log(level, function, line, msg, args);
 }
 
 static int check_user_break(void) {
@@ -805,9 +813,9 @@ static int process_db(MDBX_dbi dbi_handle, char *dbi_name, visitor *handler,
   }
 
   if (ignore_wrong_order) { /* for debugging with enabled assertions */
-    mc->mc_flags |= C_SKIPORD;
+    mc->mc_checking |= CC_SKIPORD;
     if (mc->mc_xcursor)
-      mc->mc_xcursor->mx_cursor.mc_flags |= C_SKIPORD;
+      mc->mc_xcursor->mx_cursor.mc_checking |= CC_SKIPORD;
   }
 
   const size_t maxkeysize = mdbx_env_get_maxkeysize_ex(env, flags);
@@ -1231,7 +1239,9 @@ int main(int argc, char *argv[]) {
   mdbx_setup_debug((verbose < MDBX_LOG_TRACE - 1)
                        ? (MDBX_log_level_t)(verbose + 1)
                        : MDBX_LOG_TRACE,
-                   MDBX_DBG_LEGACY_OVERLAP | MDBX_DBG_DONT_UPGRADE, logger);
+                   MDBX_DBG_DUMP | MDBX_DBG_ASSERT | MDBX_DBG_AUDIT |
+                       MDBX_DBG_LEGACY_OVERLAP | MDBX_DBG_DONT_UPGRADE,
+                   logger);
 
   rc = mdbx_env_create(&env);
   if (rc) {
