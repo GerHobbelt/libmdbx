@@ -923,9 +923,9 @@ struct MDBX_txn {
   /* corresponding to the current size of datafile */
 #define mt_end_pgno mt_geo.now
 
-  /* The ID of this transaction. IDs are integers incrementing from 1.
-   * Only committed write transactions increment the ID. If a transaction
-   * aborts, the ID may be re-used by the next writer. */
+  /* The ID of this transaction. IDs are integers incrementing from
+   * INITIAL_TXNID. Only committed write transactions increment the ID. If a
+   * transaction aborts, the ID may be re-used by the next writer. */
   txnid_t mt_txnid;
   txnid_t mt_front;
 
@@ -986,11 +986,11 @@ struct MDBX_txn {
       MDBX_page *loose_pages;
       /* Number of loose pages (tw.loose_pages) */
       unsigned loose_count;
+      unsigned spill_least_removed;
       /* The sorted list of dirty pages we temporarily wrote to disk
        * because the dirty list was full. page numbers in here are
        * shifted left by 1, deleted slots have the LSB set. */
       MDBX_PNL spill_pages;
-      unsigned spill_least_removed;
     } tw;
   };
 };
@@ -1086,6 +1086,8 @@ struct MDBX_env {
 #define MDBX_ENV_TXKEY UINT32_C(0x10000000)
   /* Legacy MDBX_MAPASYNC (prior v0.9) */
 #define MDBX_DEPRECATED_MAPASYNC UINT32_C(0x100000)
+  /* Legacy MDBX_MAPASYNC (prior v0.12) */
+#define MDBX_DEPRECATED_COALESCE UINT32_C(0x2000000)
 #define ENV_INTERNAL_FLAGS (MDBX_FATAL_ERROR | MDBX_ENV_ACTIVE | MDBX_ENV_TXKEY)
   uint32_t me_flags;
   mdbx_mmap_t me_dxb_mmap; /* The main data file */
