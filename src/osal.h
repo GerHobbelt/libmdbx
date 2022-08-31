@@ -180,6 +180,9 @@ static inline void mdbx_free(void *ptr) { HeapFree(GetProcessHeap(), 0, ptr); }
 #define vsnprintf _vsnprintf /* ntdll */
 #endif
 
+MDBX_INTERNAL_FUNC size_t mdbx_mb2w(wchar_t *dst, size_t dst_n, const char *src,
+                                    size_t src_n);
+
 #else /*----------------------------------------------------------------------*/
 
 typedef pthread_t mdbx_thread_t;
@@ -223,6 +226,12 @@ mdbx_syspagesize(void) {
   return sysconf(_SC_PAGE_SIZE);
 #endif
 }
+
+#if defined(_WIN32) || defined(_WIN64)
+typedef wchar_t pathchar_t;
+#else
+typedef char pathchar_t;
+#endif
 
 typedef struct mdbx_mmap_param {
   union {
@@ -365,12 +374,13 @@ enum mdbx_openfile_purpose {
 };
 
 MDBX_INTERNAL_FUNC int mdbx_openfile(const enum mdbx_openfile_purpose purpose,
-                                     const MDBX_env *env, const char *pathname,
+                                     const MDBX_env *env,
+                                     const pathchar_t *pathname,
                                      mdbx_filehandle_t *fd,
                                      mdbx_mode_t unix_mode_bits);
 MDBX_INTERNAL_FUNC int mdbx_closefile(mdbx_filehandle_t fd);
-MDBX_INTERNAL_FUNC int mdbx_removefile(const char *pathname);
-MDBX_INTERNAL_FUNC int mdbx_removedirectory(const char *pathname);
+MDBX_INTERNAL_FUNC int mdbx_removefile(const pathchar_t *pathname);
+MDBX_INTERNAL_FUNC int mdbx_removedirectory(const pathchar_t *pathname);
 MDBX_INTERNAL_FUNC int mdbx_is_pipe(mdbx_filehandle_t fd);
 MDBX_INTERNAL_FUNC int mdbx_lockfile(mdbx_filehandle_t fd, bool wait);
 
@@ -398,7 +408,8 @@ MDBX_INTERNAL_FUNC int mdbx_msync(mdbx_mmap_t *map, size_t offset,
                                   size_t length,
                                   enum mdbx_syncmode_bits mode_bits);
 MDBX_INTERNAL_FUNC int mdbx_check_fs_rdonly(mdbx_filehandle_t handle,
-                                            const char *pathname, int err);
+                                            const pathchar_t *pathname,
+                                            int err);
 
 MDBX_MAYBE_UNUSED static __inline uint32_t mdbx_getpid(void) {
   STATIC_ASSERT(sizeof(mdbx_pid_t) <= sizeof(uint32_t));
@@ -548,6 +559,20 @@ MDBX_INTERNAL_FUNC int mdbx_rpid_clear(MDBX_env *env);
 MDBX_INTERNAL_FUNC int mdbx_rpid_check(MDBX_env *env, uint32_t pid);
 
 #if defined(_WIN32) || defined(_WIN64)
+
+#define MUSTDIE_MB2WIDE(FROM, TO)                                              \
+  do {                                                                         \
+    const char *const from_tmp = (FROM);                                       \
+    const size_t from_mblen = strlen(from_tmp);                                \
+    const size_t to_wlen = mdbx_mb2w(nullptr, 0, from_tmp, from_mblen);        \
+    if (to_wlen < 1 || to_wlen > /* MAX_PATH */ INT16_MAX)                     \
+      return ERROR_INVALID_NAME;                                               \
+    wchar_t *const to_tmp = _alloca((to_wlen + 1) * sizeof(wchar_t));          \
+    if (to_wlen + 1 !=                                                         \
+        mdbx_mb2w(to_tmp, to_wlen + 1, from_tmp, from_mblen + 1))              \
+      return ERROR_INVALID_NAME;                                               \
+    (TO) = to_tmp;                                                             \
+  } while (0)
 
 typedef void(WINAPI *MDBX_srwlock_function)(MDBX_srwlock *);
 MDBX_INTERNAL_VAR MDBX_srwlock_function mdbx_srwlock_Init,

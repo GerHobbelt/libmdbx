@@ -1099,16 +1099,16 @@ static __always_inline void safe64_reset(MDBX_atomic_uint64_t *p,
   } else {
 #if MDBX_64BIT_CAS && MDBX_64BIT_ATOMIC
     /* atomically make value >= SAFE64_INVALID_THRESHOLD by 64-bit operation */
-    atomic_store64(p, UINT64_MAX, mo_SequentialConsistency);
+    atomic_store64(p, UINT64_MAX, mo_AcquireRelease);
 #elif MDBX_64BIT_CAS
     /* atomically make value >= SAFE64_INVALID_THRESHOLD by 32-bit operation */
-    atomic_store32(&p->high, UINT32_MAX, mo_SequentialConsistency);
+    atomic_store32(&p->high, UINT32_MAX, mo_AcquireRelease);
 #else
     /* it is safe to increment low-part to avoid ABA, since xMDBX_TXNID_STEP > 1
      * and overflow was preserved in safe64_txnid_next() */
     STATIC_ASSERT(xMDBX_TXNID_STEP > 1);
     atomic_add32(&p->low, 1) /* avoid ABA in safe64_reset_compare() */;
-    atomic_store32(&p->high, UINT32_MAX, mo_SequentialConsistency);
+    atomic_store32(&p->high, UINT32_MAX, mo_AcquireRelease);
     atomic_add32(&p->low, 1) /* avoid ABA in safe64_reset_compare() */;
 #endif /* MDBX_64BIT_CAS && MDBX_64BIT_ATOMIC */
   }
@@ -1285,55 +1285,50 @@ rthc_compare_and_clean(const void *rthc, const uint64_t signature) {
 
 static __inline int rthc_atexit(void (*dtor)(void *), void *obj,
                                 void *dso_symbol) {
-  int rc = MDBX_ENOSYS;
+#ifndef MDBX_HAVE_CXA_THREAD_ATEXIT_IMPL
+#if defined(LIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL) ||                           \
+    defined(HAVE___CXA_THREAD_ATEXIT_IMPL) || __GLIBC_PREREQ(2, 18) ||         \
+    defined(ANDROID)
+#define MDBX_HAVE_CXA_THREAD_ATEXIT_IMPL 1
+#else
+#define MDBX_HAVE_CXA_THREAD_ATEXIT_IMPL 0
+#endif
+#endif /* MDBX_HAVE_CXA_THREAD_ATEXIT_IMPL */
 
-#if defined(__APPLE__) || defined(_DARWIN_C_SOURCE)
-#if !defined(MAC_OS_X_VERSION_MIN_REQUIRED) || !defined(MAC_OS_X_VERSION_10_7)
-#error                                                                         \
-    "The <AvailabilityMacros.h> should be included and MAC_OS_X_VERSION_MIN_REQUIRED must be defined"
-#elif MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_7
+#ifndef MDBX_HAVE_CXA_THREAD_ATEXIT
+#if defined(LIBCXXABI_HAS_CXA_THREAD_ATEXIT) ||                                \
+    defined(HAVE___CXA_THREAD_ATEXIT)
+#define MDBX_HAVE_CXA_THREAD_ATEXIT 1
+#elif !MDBX_HAVE_CXA_THREAD_ATEXIT_IMPL &&                                     \
+    (defined(__linux__) || defined(__gnu_linux__))
+#define MDBX_HAVE_CXA_THREAD_ATEXIT 1
+#else
+#define MDBX_HAVE_CXA_THREAD_ATEXIT 0
+#endif
+#endif /* MDBX_HAVE_CXA_THREAD_ATEXIT */
+
+  int rc = MDBX_ENOSYS;
+#if MDBX_HAVE_CXA_THREAD_ATEXIT_IMPL && !MDBX_HAVE_CXA_THREAD_ATEXIT
+#define __cxa_thread_atexit __cxa_thread_atexit_impl
+#endif
+#if MDBX_HAVE_CXA_THREAD_ATEXIT || defined(__cxa_thread_atexit)
+  extern int __cxa_thread_atexit(void (*dtor)(void *), void *obj,
+                                 void *dso_symbol) MDBX_WEAK_IMPORT_ATTRIBUTE;
+  if (&__cxa_thread_atexit)
+    rc = __cxa_thread_atexit(dtor, obj, dso_symbol);
+#elif defined(__APPLE__) || defined(_DARWIN_C_SOURCE)
   extern void _tlv_atexit(void (*termfunc)(void *objAddr), void *objAddr)
-      __attribute__((__weak__, __weak_import__));
-  if (rc && &_tlv_atexit) {
+      MDBX_WEAK_IMPORT_ATTRIBUTE;
+  if (&_tlv_atexit) {
     (void)dso_symbol;
     _tlv_atexit(dtor, obj);
     rc = 0;
   }
-#elif !defined(MDBX_HAVE_CXA_THREAD_ATEXIT)
-#define MDBX_HAVE_CXA_THREAD_ATEXIT 1
-#endif /* MAC_OS_X_VERSION_MIN_REQUIRED */
-#endif /* Apple */
-
-#if defined(MDBX_HAVE_CXA_THREAD_ATEXIT) && MDBX_HAVE_CXA_THREAD_ATEXIT
-  extern int __cxa_thread_atexit(void (*dtor)(void *), void *obj,
-                                 void *dso_symbol)
-#ifdef WEAK_IMPORT_ATTRIBUTE
-      WEAK_IMPORT_ATTRIBUTE
-#elif defined(MAC_OS_X_VERSION_MIN_REQUIRED) &&                                \
-    MAC_OS_X_VERSION_MIN_REQUIRED >= 1020 &&                                   \
-    ((__has_attribute(__weak__) && __has_attribute(__weak_import__)) ||        \
-     (defined(__GNUC__) && __GNUC__ >= 4))
-      __attribute__((__weak__, __weak_import__))
-#elif (__has_attribute(__weak__) || (defined(__GNUC__) && __GNUC__ >= 4)) &&   \
-    !defined(MAC_OS_X_VERSION_MIN_REQUIRED)
-      __attribute__((__weak__))
-#endif
-      ;
-  if (rc && &__cxa_thread_atexit)
-    rc = __cxa_thread_atexit(dtor, obj, dso_symbol);
-#elif __GLIBC_PREREQ(2, 18) || defined(ANDROID) || defined(__linux__) ||       \
-    defined(__gnu_linux__)
-  extern int __cxa_thread_atexit_impl(void (*dtor)(void *), void *obj,
-                                      void *dso_symbol)
-      __attribute__((__weak__));
-  if (rc && &__cxa_thread_atexit_impl)
-    rc = __cxa_thread_atexit_impl(dtor, obj, dso_symbol);
 #else
   (void)dtor;
   (void)obj;
   (void)dso_symbol;
 #endif
-
   return rc;
 }
 
@@ -1459,7 +1454,8 @@ __cold void mdbx_rthc_global_init(void) {
   }
 
   bootid = mdbx_osal_bootid();
-#if 0 /* debug */
+
+#if 0  /* debug */
   for (unsigned i = 0; i < 65536; ++i) {
     size_t pages = pv2pages(i);
     unsigned x = pages2pv(pages);
@@ -1469,7 +1465,7 @@ __cold void mdbx_rthc_global_init(void) {
     assert(pages == xp);
   }
   fflush(stdout);
-#endif
+#endif /* #if 0 */
 }
 
 /* dtor called for thread, i.e. for all mdbx's environment objects */
@@ -1547,6 +1543,7 @@ __cold void mdbx_rthc_thread_dtor(void *rthc) {
 #endif
 }
 
+MDBX_EXCLUDE_FOR_GPROF
 __cold void mdbx_rthc_global_dtor(void) {
   mdbx_trace(">> pid %d", mdbx_getpid());
 
@@ -1794,8 +1791,7 @@ static int uniq_poke(const mdbx_mmap_t *pending, mdbx_mmap_t *scan,
           << 24 |
       *abra >> 40;
   MDBX_lockinfo *const scan_lck = scan->lck;
-  atomic_store64(&scan_lck->mti_bait_uniqueness, cadabra,
-                 mo_SequentialConsistency);
+  atomic_store64(&scan_lck->mti_bait_uniqueness, cadabra, mo_AcquireRelease);
   *abra = *abra * UINT64_C(6364136223846793005) + 1;
   return uniq_peek(pending, scan);
 }
@@ -1873,13 +1869,24 @@ static int lcklist_detach_locked(MDBX_env *env) {
  * and network-sort for small chunks.
  * Thanks to John M. Gamble for the http://pages.ripco.net/~jgamble/nw.html */
 
+#if MDBX_HAVE_CMOV
 #define SORT_CMP_SWAP(TYPE, CMP, a, b)                                         \
   do {                                                                         \
     const TYPE swap_tmp = (a);                                                 \
-    const bool swap_cmp = CMP(swap_tmp, b);                                    \
+    const bool swap_cmp = expect_with_probability(CMP(swap_tmp, b), 0, .5);    \
     (a) = swap_cmp ? swap_tmp : b;                                             \
     (b) = swap_cmp ? b : swap_tmp;                                             \
   } while (0)
+#else
+#define SORT_CMP_SWAP(TYPE, CMP, a, b)                                         \
+  do                                                                           \
+    if (expect_with_probability(!CMP(a, b), 0, .5)) {                          \
+      const TYPE swap_tmp = (a);                                               \
+      (a) = (b);                                                               \
+      (b) = swap_tmp;                                                          \
+    }                                                                          \
+  while (0)
+#endif
 
 //  3 comparators, 3 parallel operations
 //  o-----^--^--o
@@ -2070,686 +2077,10 @@ static int lcklist_detach_locked(MDBX_env *env) {
     SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
   } while (0)
 
-//  25 comparators, 9 parallel operations
-//  o--^-----^--^-----^-----------------------------------o
-//     |     |  |     |
-//  o--v--^--v--|-----|--^-----^-----------^--------------o
-//        |     |     |  |     |           |
-//  o-----v-----|-----|--|-----|--^-----^--|--^-----^--^--o
-//              |     |  |     |  |     |  |  |     |  |
-//  o--^-----^--v--^--v--|-----|--|-----|--v--|-----|--v--o
-//     |     |     |     |     |  |     |     |     |
-//  o--v--^--v-----|-----v--^--v--|-----|-----|--^--v-----o
-//        |        |        |     |     |     |  |
-//  o-----v--------|--------|-----v--^--v--^--|--|--^-----o
-//                 |        |        |     |  |  |  |
-//  o--^-----^-----v--------|--------|-----|--v--v--v-----o
-//     |     |              |        |     |
-//  o--v--^--v--------------v--------|-----v--------------o
-//        |                          |
-//  o-----v--------------------------v--------------------o
-//
-//  [[0,1],[3,4],[6,7]]
-//  [[1,2],[4,5],[7,8]]
-//  [[0,1],[3,4],[6,7],[2,5]]
-//  [[0,3],[1,4],[5,8]]
-//  [[3,6],[4,7],[2,5]]
-//  [[0,3],[1,4],[5,7],[2,6]]
-//  [[1,3],[4,6]]
-//  [[2,4],[5,6]]
-//  [[2,3]]
-#define SORT_NETWORK_9(TYPE, CMP, begin)                                       \
-  do {                                                                         \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[1]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[1]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-  } while (0)
-
-//  29 comparators, 9 parallel operations
-//  o--------------^-----^--^--^-----------------------o
-//                 |     |  |  |
-//  o-----------^--|--^--|--|--v--^--------^-----------o
-//              |  |  |  |  |     |        |
-//  o--------^--|--|--|--|--v--^--v-----^--|--^--------o
-//           |  |  |  |  |     |        |  |  |
-//  o-----^--|--|--|--|--v--^--|-----^--|--v--v--^-----o
-//        |  |  |  |  |     |  |     |  |        |
-//  o--^--|--|--|--|--v-----|--v--^--|--|--^-----v--^--o
-//     |  |  |  |  |        |     |  |  |  |        |
-//  o--|--|--|--|--v--^-----|--^--|--v--v--|-----^--v--o
-//     |  |  |  |     |     |  |  |        |     |
-//  o--|--|--|--v--^--|-----v--|--v--^-----|--^--v-----o
-//     |  |  |     |  |        |     |     |  |
-//  o--|--|--v-----|--|--^-----v--^--|-----v--v--------o
-//     |  |        |  |  |        |  |
-//  o--|--v--------|--v--|--^-----v--v-----------------o
-//     |           |     |  |
-//  o--v-----------v-----v--v--------------------------o
-//
-//  [[4,9],[3,8],[2,7],[1,6],[0,5]]
-//  [[1,4],[6,9],[0,3],[5,8]]
-//  [[0,2],[3,6],[7,9]]
-//  [[0,1],[2,4],[5,7],[8,9]]
-//  [[1,2],[4,6],[7,8],[3,5]]
-//  [[2,5],[6,8],[1,3],[4,7]]
-//  [[2,3],[6,7]]
-//  [[3,4],[5,6]]
-//  [[4,5]]
-#define SORT_NETWORK_10(TYPE, CMP, begin)                                      \
-  do {                                                                         \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[1]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[5]);                              \
-  } while (0)
-
-//  35 comparators, 9 parallel operations
-//  o--^-----^-----------------^--------^--------------------o
-//     |     |                 |        |
-//  o--v--^--|--^--^--------^--|--------|--^-----------------o
-//        |  |  |  |        |  |        |  |
-//  o--^--|--v--v--|-----^--|--|--------|--|-----^--^--------o
-//     |  |        |     |  |  |        |  |     |  |
-//  o--v--v--------|-----|--|--|--^-----|--|--^--v--|--^--^--o
-//                 |     |  |  |  |     |  |  |     |  |  |
-//  o--^-----^-----|-----|--|--v--|--^--v--v--|-----v--|--v--o
-//     |     |     |     |  |     |  |        |        |
-//  o--v--^--|--^--v--^--|--v-----|--|--------|--------v--^--o
-//        |  |  |     |  |        |  |        |           |
-//  o--^--|--v--v--^--|--v--^-----|--|--------|--------^--v--o
-//     |  |        |  |     |     |  |        |        |
-//  o--v--v--------|--|-----|-----v--|--^-----|-----^--|--^--o
-//                 |  |     |        |  |     |     |  |  |
-//  o--^--^--------|--|-----|--------v--|-----v--^--|--v--v--o
-//     |  |        |  |     |           |        |  |
-//  o--v--|--^-----|--v-----|-----------|--------v--v--------o
-//        |  |     |        |           |
-//  o-----v--v-----v--------v-----------v--------------------o
-//
-//  [[0,1],[2,3],[4,5],[6,7],[8,9]]
-//  [[1,3],[5,7],[0,2],[4,6],[8,10]]
-//  [[1,2],[5,6],[9,10],[0,4],[3,7]]
-//  [[1,5],[6,10],[4,8]]
-//  [[5,9],[2,6],[0,4],[3,8]]
-//  [[1,5],[6,10],[2,3],[8,9]]
-//  [[1,4],[7,10],[3,5],[6,8]]
-//  [[2,4],[7,9],[5,6]]
-//  [[3,4],[7,8]]
-#define SORT_NETWORK_11(TYPE, CMP, begin)                                      \
-  do {                                                                         \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[1]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[8]);                              \
-  } while (0)
-
-//  39 comparators, parallel operations
-//  o--^-----^-----------------^--------^--------------------o
-//     |     |                 |        |
-//  o--v--^--|--^--^--------^--|--------|--^-----------------o
-//        |  |  |  |        |  |        |  |
-//  o--^--|--v--v--|-----^--|--|--------|--|-----^--^--------o
-//     |  |        |     |  |  |        |  |     |  |
-//  o--v--v--------|-----|--|--|--^-----|--|--^--v--|--^--^--o
-//                 |     |  |  |  |     |  |  |     |  |  |
-//  o--^-----^-----|-----|--|--v--|--^--v--v--|-----v--|--v--o
-//     |     |     |     |  |     |  |        |        |
-//  o--v--^--|--^--v--^--|--v-----|--|--------|--------v--^--o
-//        |  |  |     |  |        |  |        |           |
-//  o--^--|--v--v--^--|--v--^-----|--|--------|--------^--v--o
-//     |  |        |  |     |     |  |        |        |
-//  o--v--v--------|--|-----|--^--v--|--^--^--|-----^--|--^--o
-//                 |  |     |  |     |  |  |  |     |  |  |
-//  o--^-----^-----|--|-----|--|-----v--|--|--v--^--|--v--v--o
-//     |     |     |  |     |  |        |  |     |  |
-//  o--v--^--|--^--|--v-----|--|--------|--|-----v--v--------o
-//        |  |  |  |        |  |        |  |
-//  o--^--|--v--v--v--------v--|--------|--v-----------------o
-//     |  |                    |        |
-//  o--v--v--------------------v--------v--------------------o
-//
-//  [[0,1],[2,3],[4,5],[6,7],[8,9],[10,11]]
-//  [[1,3],[5,7],[9,11],[0,2],[4,6],[8,10]]
-//  [[1,2],[5,6],[9,10],[0,4],[7,11]]
-//  [[1,5],[6,10],[3,7],[4,8]]
-//  [[5,9],[2,6],[0,4],[7,11],[3,8]]
-//  [[1,5],[6,10],[2,3],[8,9]]
-//  [[1,4],[7,10],[3,5],[6,8]]
-//  [[2,4],[7,9],[5,6]]
-//  [[3,4],[7,8]]
-#define SORT_NETWORK_12(TYPE, CMP, begin)                                      \
-  do {                                                                         \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[1]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[11]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[8]);                              \
-  } while (0)
-
-//  45 comparators, 10 parallel operations
-//  o--------^--^-----^-----------------------------^-----------------o
-//           |  |     |                             |
-//  o--^-----|--v-----|-----^--------------^-----^--|-----^-----------o
-//     |     |        |     |              |     |  |     |
-//  o--|-----|--^--^--v-----|--------------|--^--|--|--^--v--^--------o
-//     |     |  |  |        |              |  |  |  |  |     |
-//  o--|--^--|--|--v-----^--|--------^-----|--|--v--|--|--^--v-----^--o
-//     |  |  |  |        |  |        |     |  |     |  |  |        |
-//  o--|--v--|--|--^-----|--v-----^--v-----|--|--^--|--|--|--^--^--v--o
-//     |     |  |  |     |        |        |  |  |  |  |  |  |  |
-//  o--|--^--|--|--|--^--|--------|-----^--|--|--|--v--v--v--|--v--^--o
-//     |  |  |  |  |  |  |        |     |  |  |  |           |     |
-//  o--|--|--|--v--v--|--|--^-----|--^--v--|--v--|--^--------v--^--v--o
-//     |  |  |        |  |  |     |  |     |     |  |           |
-//  o--v--|--|-----^--|--v--|--^--|--|-----v-----v--|--^--------v-----o
-//        |  |     |  |     |  |  |  |              |  |
-//  o-----v--|--^--|--|-----|--v--|--|--^-----^-----v--v--^-----------o
-//           |  |  |  |     |     |  |  |     |           |
-//  o--^-----|--|--|--v-----|-----v--|--v--^--|--^--------v-----------o
-//     |     |  |  |        |        |     |  |  |
-//  o--|-----|--|--|--^-----|--------v--^--|--v--v--------------------o
-//     |     |  |  |  |     |           |  |
-//  o--v-----|--v--|--v-----|--^--------v--v--------------------------o
-//           |     |        |  |
-//  o--------v-----v--------v--v--------------------------------------o
-//
-//  [[1,7],[9,11],[3,4],[5,8],[0,12],[2,6]]
-//  [[0,1],[2,3],[4,6],[8,11],[7,12],[5,9]]
-//  [[0,2],[3,7],[10,11],[1,4],[6,12]]
-//  [[7,8],[11,12],[4,9],[6,10]]
-//  [[3,4],[5,6],[8,9],[10,11],[1,7]]
-//  [[2,6],[9,11],[1,3],[4,7],[8,10],[0,5]]
-//  [[2,5],[6,8],[9,10]]
-//  [[1,2],[3,5],[7,8],[4,6]]
-//  [[2,3],[4,5],[6,7],[8,9]]
-//  [[3,4],[5,6]]
-#define SORT_NETWORK_13(TYPE, CMP, begin)                                      \
-  do {                                                                         \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[1]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[11]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[11], begin[12]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[11]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-  } while (0)
-
-/* *INDENT-OFF* */
-/* clang-format off */
-
-//  51 comparators, 10 parallel operations
-//  o--^--^-----^-----------^-----------------------------------------------------------o
-//     |  |     |           |
-//  o--v--|--^--|--^--------|--^-----^-----------------------^--------------------------o
-//        |  |  |  |        |  |     |                       |
-//  o--^--v--|--|--|--^-----|--|--^--v-----------------------|--^--^--------------------o
-//     |     |  |  |  |     |  |  |                          |  |  |
-//  o--v-----v--|--|--|--^--|--|--|--^--------------^--------|--|--|--^--^--^-----------o
-//              |  |  |  |  |  |  |  |              |        |  |  |  |  |  |
-//  o--^--^-----v--|--|--|--|--|--|--|--^-----------|-----^--v--|--v--|--|--v-----------o
-//     |  |        |  |  |  |  |  |  |  |           |     |     |     |  |
-//  o--v--|--^-----v--|--|--|--|--|--|--|--^--^-----|-----|-----|--^--|--v-----^--------o
-//        |  |        |  |  |  |  |  |  |  |  |     |     |     |  |  |        |
-//  o--^--v--|--------v--|--|--|--|--|--|--|--|--^--|-----|-----|--v--|-----^--v-----^--o
-//     |     |           |  |  |  |  |  |  |  |  |  |     |     |     |     |        |
-//  o--v-----v-----------v--|--|--|--|--|--|--|--|--|--^--|--^--|-----|--^--|--^--^--v--o
-//                          |  |  |  |  |  |  |  |  |  |  |  |  |     |  |  |  |  |
-//  o--^--^-----^-----------v--|--|--|--|--|--|--|--|--|--v--|--v-----v--|--v--|--v--^--o
-//     |  |     |              |  |  |  |  |  |  |  |  |     |           |     |     |
-//  o--v--|--^--|--^-----------v--|--|--|--|--|--v--|--|-----|--^--------|-----v--^--v--o
-//        |  |  |  |              |  |  |  |  |     |  |     |  |        |        |
-//  o--^--v--|--|--|--------------v--|--|--|--v-----|--|-----|--v--------|--^-----v-----o
-//     |     |  |  |                 |  |  |        |  |     |           |  |
-//  o--v-----v--|--|-----------------v--|--|--------|--v-----|--^--------|--|--^--------o
-//              |  |                    |  |        |        |  |        |  |  |
-//  o--^--------v--|--------------------v--|--------v--------|--|--------v--v--v--------o
-//     |           |                       |                 |  |
-//  o--v-----------v-----------------------v-----------------v--v-----------------------o
-//
-//  [[0,1],[2,3],[4,5],[6,7],[8,9],[10,11],[12,13]]
-//  [[0,2],[4,6],[8,10],[1,3],[5,7],[9,11]]
-//  [[0,4],[8,12],[1,5],[9,13],[2,6],[3,7]]
-//  [[0,8],[1,9],[2,10],[3,11],[4,12],[5,13]]
-//  [[5,10],[6,9],[3,12],[7,11],[1,2],[4,8]]
-//  [[1,4],[7,13],[2,8],[5,6],[9,10]]
-//  [[2,4],[11,13],[3,8],[7,12]]
-//  [[6,8],[10,12],[3,5],[7,9]]
-//  [[3,4],[5,6],[7,8],[9,10],[11,12]]
-//  [[6,7],[8,9]]
-
-/* *INDENT-ON* */
-/* clang-format on */
-
-#define SORT_NETWORK_14(TYPE, CMP, begin)                                      \
-  do {                                                                         \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[1]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[11]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[12], begin[13]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[13]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[13]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[13]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[11], begin[13]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[12]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[11], begin[12]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-  } while (0)
-
-/* *INDENT-OFF* */
-/* clang-format off */
-
-//  56 comparators, 10 parallel operations
-//  o--^--^-----^-----------^--------------------------------------------------------------o
-//     |  |     |           |
-//  o--v--|--^--|--^--------|--^-----^--------------------------^--------------------------o
-//        |  |  |  |        |  |     |                          |
-//  o--^--v--|--|--|--^-----|--|--^--v--------------------------|--^--^--------------------o
-//     |     |  |  |  |     |  |  |                             |  |  |
-//  o--v-----v--|--|--|--^--|--|--|--^-----------------^--------|--|--|--^--^--^-----------o
-//              |  |  |  |  |  |  |  |                 |        |  |  |  |  |  |
-//  o--^--^-----v--|--|--|--|--|--|--|--^--------------|-----^--v--|--v--|--|--v-----------o
-//     |  |        |  |  |  |  |  |  |  |              |     |     |     |  |
-//  o--v--|--^-----v--|--|--|--|--|--|--|--^-----^-----|-----|-----|--^--|--v-----^--------o
-//        |  |        |  |  |  |  |  |  |  |     |     |     |     |  |  |        |
-//  o--^--v--|--------v--|--|--|--|--|--|--|--^--|--^--|-----|-----|--v--|-----^--v-----^--o
-//     |     |           |  |  |  |  |  |  |  |  |  |  |     |     |     |     |        |
-//  o--v-----v-----------v--|--|--|--|--|--|--|--|--|--|--^--|--^--|-----|--^--|--^--^--v--o
-//                          |  |  |  |  |  |  |  |  |  |  |  |  |  |     |  |  |  |  |
-//  o--^--^-----^-----------v--|--|--|--|--|--|--|--|--|--|--v--|--v-----v--|--v--|--v--^--o
-//     |  |     |              |  |  |  |  |  |  |  |  |  |     |           |     |     |
-//  o--v--|--^--|--^-----------v--|--|--|--|--|--|--v--|--|-----|--^--------|-----v--^--v--o
-//        |  |  |  |              |  |  |  |  |  |     |  |     |  |        |        |
-//  o--^--v--|--|--|--^-----------v--|--|--|--|--v-----|--|-----|--v--------|--^-----v-----o
-//     |     |  |  |  |              |  |  |  |        |  |     |           |  |
-//  o--v-----v--|--|--|--------------v--|--|--|--------|--v-----|--^--^-----|--|--^--------o
-//              |  |  |                 |  |  |        |        |  |  |     |  |  |
-//  o--^--^-----v--|--|-----------------v--|--|--------v--------|--|--|-----v--v--v--------o
-//     |  |        |  |                    |  |                 |  |  |
-//  o--v--|--------v--|--------------------v--|--^--------------v--|--v--------------------o
-//        |           |                       |  |                 |
-//  o-----v-----------v-----------------------v--v-----------------v-----------------------o
-//
-//  [[0,1],[2,3],[4,5],[6,7],[8,9],[10,11],[12,13]]
-//  [[0,2],[4,6],[8,10],[12,14],[1,3],[5,7],[9,11]]
-//  [[0,4],[8,12],[1,5],[9,13],[2,6],[10,14],[3,7]]
-//  [[0,8],[1,9],[2,10],[3,11],[4,12],[5,13],[6,14]]
-//  [[5,10],[6,9],[3,12],[13,14],[7,11],[1,2],[4,8]]
-//  [[1,4],[7,13],[2,8],[11,14],[5,6],[9,10]]
-//  [[2,4],[11,13],[3,8],[7,12]]
-//  [[6,8],[10,12],[3,5],[7,9]]
-//  [[3,4],[5,6],[7,8],[9,10],[11,12]]
-//  [[6,7],[8,9]]
-
-/* *INDENT-ON* */
-/* clang-format on */
-
-#define SORT_NETWORK_15(TYPE, CMP, begin)                                      \
-  do {                                                                         \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[1]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[11]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[12], begin[13]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[12], begin[14]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[13]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[14]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[13]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[14]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[13], begin[14]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[13]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[11], begin[14]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[11], begin[13]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[12]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[11], begin[12]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-  } while (0)
-
-/* *INDENT-OFF* */
-/* clang-format off */
-
-//  60 comparators, 10 parallel operations
-//  o--^--^-----^-----------^-----------------------------------------------------------------o
-//     |  |     |           |
-//  o--v--|--^--|--^--------|--^-----^-----------------------------^--------------------------o
-//        |  |  |  |        |  |     |                             |
-//  o--^--v--|--|--|--^-----|--|--^--v-----------------------------|--^--^--------------------o
-//     |     |  |  |  |     |  |  |                                |  |  |
-//  o--v-----v--|--|--|--^--|--|--|--^--------------------^--------|--|--|--^--^--^-----------o
-//              |  |  |  |  |  |  |  |                    |        |  |  |  |  |  |
-//  o--^--^-----v--|--|--|--|--|--|--|--^-----------------|-----^--v--|--v--|--|--v-----------o
-//     |  |        |  |  |  |  |  |  |  |                 |     |     |     |  |
-//  o--v--|--^-----v--|--|--|--|--|--|--|--^--------^-----|-----|-----|--^--|--v-----^--------o
-//        |  |        |  |  |  |  |  |  |  |        |     |     |     |  |  |        |
-//  o--^--v--|--------v--|--|--|--|--|--|--|--^-----|--^--|-----|-----|--v--|-----^--v-----^--o
-//     |     |           |  |  |  |  |  |  |  |     |  |  |     |     |     |     |        |
-//  o--v-----v-----------v--|--|--|--|--|--|--|--^--|--|--|--^--|--^--|-----|--^--|--^--^--v--o
-//                          |  |  |  |  |  |  |  |  |  |  |  |  |  |  |     |  |  |  |  |
-//  o--^--^-----^-----------v--|--|--|--|--|--|--|--|--|--|--|--v--|--v-----v--|--v--|--v--^--o
-//     |  |     |              |  |  |  |  |  |  |  |  |  |  |     |           |     |     |
-//  o--v--|--^--|--^-----------v--|--|--|--|--|--|--|--v--|--|-----|--^--------|-----v--^--v--o
-//        |  |  |  |              |  |  |  |  |  |  |     |  |     |  |        |        |
-//  o--^--v--|--|--|--^-----------v--|--|--|--|--|--v-----|--|-----|--v--------|--^-----v-----o
-//     |     |  |  |  |              |  |  |  |  |        |  |     |           |  |
-//  o--v-----v--|--|--|--^-----------v--|--|--|--|--------|--v-----|--^--^-----|--|--^--------o
-//              |  |  |  |              |  |  |  |        |        |  |  |     |  |  |
-//  o--^--^-----v--|--|--|--------------v--|--|--|--------v--------|--|--|-----v--v--v--------o
-//     |  |        |  |  |                 |  |  |                 |  |  |
-//  o--v--|--^-----v--|--|-----------------v--|--|--^--------------v--|--v--------------------o
-//        |  |        |  |                    |  |  |                 |
-//  o--^--v--|--------v--|--------------------v--|--v-----------------v-----------------------o
-//     |     |           |                       |
-//  o--v-----v-----------v-----------------------v--------------------------------------------o
-//
-//  [[0,1],[2,3],[4,5],[6,7],[8,9],[10,11],[12,13],[14,15]]
-//  [[0,2],[4,6],[8,10],[12,14],[1,3],[5,7],[9,11],[13,15]]
-//  [[0,4],[8,12],[1,5],[9,13],[2,6],[10,14],[3,7],[11,15]]
-//  [[0,8],[1,9],[2,10],[3,11],[4,12],[5,13],[6,14],[7,15]]
-//  [[5,10],[6,9],[3,12],[13,14],[7,11],[1,2],[4,8]]
-//  [[1,4],[7,13],[2,8],[11,14],[5,6],[9,10]]
-//  [[2,4],[11,13],[3,8],[7,12]]
-//  [[6,8],[10,12],[3,5],[7,9]]
-//  [[3,4],[5,6],[7,8],[9,10],[11,12]]
-//  [[6,7],[8,9]]
-
-/* *INDENT-ON* */
-/* clang-format on */
-
-#define SORT_NETWORK_16(TYPE, CMP, begin)                                      \
-  do {                                                                         \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[1]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[11]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[12], begin[13]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[14], begin[15]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[12], begin[14]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[3]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[13], begin[15]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[13]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[14]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[11], begin[15]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[0], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[13]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[14]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[15]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[13], begin[14]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[11]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[2]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[4], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[1], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[13]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[11], begin[14]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[2], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[11], begin[13]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[12]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[10], begin[12]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[5]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[9]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[3], begin[4]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[5], begin[6]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[7], begin[8]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[9], begin[10]);                             \
-    SORT_CMP_SWAP(TYPE, CMP, begin[11], begin[12]);                            \
-    SORT_CMP_SWAP(TYPE, CMP, begin[6], begin[7]);                              \
-    SORT_CMP_SWAP(TYPE, CMP, begin[8], begin[9]);                              \
-  } while (0)
-
 #define SORT_INNER(TYPE, CMP, begin, end, len)                                 \
   switch (len) {                                                               \
   default:                                                                     \
+    assert(false);                                                             \
     __unreachable();                                                           \
   case 0:                                                                      \
   case 1:                                                                      \
@@ -2774,30 +2105,6 @@ static int lcklist_detach_locked(MDBX_env *env) {
     break;                                                                     \
   case 8:                                                                      \
     SORT_NETWORK_8(TYPE, CMP, begin);                                          \
-    break;                                                                     \
-  case 9:                                                                      \
-    SORT_NETWORK_9(TYPE, CMP, begin);                                          \
-    break;                                                                     \
-  case 10:                                                                     \
-    SORT_NETWORK_10(TYPE, CMP, begin);                                         \
-    break;                                                                     \
-  case 11:                                                                     \
-    SORT_NETWORK_11(TYPE, CMP, begin);                                         \
-    break;                                                                     \
-  case 12:                                                                     \
-    SORT_NETWORK_12(TYPE, CMP, begin);                                         \
-    break;                                                                     \
-  case 13:                                                                     \
-    SORT_NETWORK_13(TYPE, CMP, begin);                                         \
-    break;                                                                     \
-  case 14:                                                                     \
-    SORT_NETWORK_14(TYPE, CMP, begin);                                         \
-    break;                                                                     \
-  case 15:                                                                     \
-    SORT_NETWORK_15(TYPE, CMP, begin);                                         \
-    break;                                                                     \
-  case 16:                                                                     \
-    SORT_NETWORK_16(TYPE, CMP, begin);                                         \
     break;                                                                     \
   }
 
@@ -2826,7 +2133,7 @@ static int lcklist_detach_locked(MDBX_env *env) {
                                                                                \
   static __inline bool NAME##_is_sorted(const TYPE *first, const TYPE *last) { \
     while (++first <= last)                                                    \
-      if (CMP(first[0], first[-1]))                                            \
+      if (expect_with_probability(CMP(first[0], first[-1]), 1, .1))            \
         return false;                                                          \
     return true;                                                               \
   }                                                                            \
@@ -2835,14 +2142,15 @@ static int lcklist_detach_locked(MDBX_env *env) {
     TYPE *lo, *hi;                                                             \
   } NAME##_stack;                                                              \
                                                                                \
-  static __hot void NAME(TYPE *const begin, TYPE *const end) {                 \
-    NAME##_stack stack[sizeof(unsigned) * CHAR_BIT], *top = stack;             \
+  static __hot void NAME(TYPE *const __restrict begin,                         \
+                         TYPE *const __restrict end) {                         \
+    NAME##_stack stack[sizeof(unsigned) * CHAR_BIT], *__restrict top = stack;  \
                                                                                \
-    TYPE *hi = end - 1;                                                        \
-    TYPE *lo = begin;                                                          \
+    TYPE *__restrict hi = end - 1;                                             \
+    TYPE *__restrict lo = begin;                                               \
     while (true) {                                                             \
       const ptrdiff_t len = hi - lo;                                           \
-      if (len < 16) {                                                          \
+      if (len < 8) {                                                           \
         SORT_INNER(TYPE, CMP, lo, hi + 1, len + 1);                            \
         if (unlikely(top == stack))                                            \
           break;                                                               \
@@ -2850,7 +2158,7 @@ static int lcklist_detach_locked(MDBX_env *env) {
         continue;                                                              \
       }                                                                        \
                                                                                \
-      TYPE *mid = lo + (len >> 1);                                             \
+      TYPE *__restrict mid = lo + (len >> 1);                                  \
       SORT_CMP_SWAP(TYPE, CMP, *lo, *mid);                                     \
       SORT_CMP_SWAP(TYPE, CMP, *mid, *hi);                                     \
       SORT_CMP_SWAP(TYPE, CMP, *lo, *mid);                                     \
@@ -2858,9 +2166,9 @@ static int lcklist_detach_locked(MDBX_env *env) {
       TYPE *right = hi - 1;                                                    \
       TYPE *left = lo + 1;                                                     \
       while (1) {                                                              \
-        while (CMP(*left, *mid))                                               \
+        while (expect_with_probability(CMP(*left, *mid), 0, .5))               \
           ++left;                                                              \
-        while (CMP(*mid, *right))                                              \
+        while (expect_with_probability(CMP(*mid, *right), 0, .5))              \
           --right;                                                             \
         if (unlikely(left > right)) {                                          \
           if (EXPECT_LOW_CARDINALITY_OR_PRESORTED) {                           \
@@ -2964,52 +2272,73 @@ static int lcklist_detach_locked(MDBX_env *env) {
 /*------------------------------------------------------------------------------
  * LY: Binary search */
 
+#if defined(__clang__) && __clang_major__ > 4 && defined(__ia32__)
+#define WORKAROUND_FOR_CLANG_OPTIMIZER_BUG(size, flag)                         \
+  do                                                                           \
+    __asm __volatile(""                                                        \
+                     : "+r"(size)                                              \
+                     : "r" /* the `b` constraint is more suitable here, but    \
+                              cause CLANG to allocate and push/pop an one more \
+                              register, so using the `r` which avoids this. */ \
+                     (flag));                                                  \
+  while (0)
+#else
+#define WORKAROUND_FOR_CLANG_OPTIMIZER_BUG(size, flag)                         \
+  do {                                                                         \
+    /* nope for non-clang or non-x86 */;                                       \
+  } while (0)
+#endif /* Workaround for CLANG */
+
+#define BINARY_SEARCH_STEP(TYPE_LIST, CMP, it, size, key)                      \
+  do {                                                                         \
+  } while (0)
+
 #define SEARCH_IMPL(NAME, TYPE_LIST, TYPE_ARG, CMP)                            \
   static __always_inline const TYPE_LIST *NAME(                                \
-      const TYPE_LIST *first, unsigned length, const TYPE_ARG item) {          \
-    const TYPE_LIST *const begin = first, *const end = begin + length;         \
+      const TYPE_LIST *it, unsigned length, const TYPE_ARG item) {             \
+    const TYPE_LIST *const begin = it, *const end = begin + length;            \
                                                                                \
-    while (length > 3) {                                                       \
-      const unsigned whole = length;                                           \
-      length >>= 1;                                                            \
-      const TYPE_LIST *const middle = first + length;                          \
-      const unsigned left = whole - length - 1;                                \
-      const bool cmp = CMP(*middle, item);                                     \
-      length = cmp ? left : length;                                            \
-      first = cmp ? middle + 1 : first;                                        \
-    }                                                                          \
-                                                                               \
-    switch (length) {                                                          \
-    case 3:                                                                    \
-      if (!CMP(*first, item))                                                  \
-        break;                                                                 \
-      ++first;                                                                 \
-      __fallthrough /* fall through */;                                        \
-    case 2:                                                                    \
-      if (!CMP(*first, item))                                                  \
-        break;                                                                 \
-      ++first;                                                                 \
-      __fallthrough /* fall through */;                                        \
-    case 1:                                                                    \
-      if (!CMP(*first, item))                                                  \
-        break;                                                                 \
-      ++first;                                                                 \
-      __fallthrough /* fall through */;                                        \
-    case 0:                                                                    \
-      break;                                                                   \
-    default:                                                                   \
-      __unreachable();                                                         \
-    }                                                                          \
+    if (MDBX_HAVE_CMOV)                                                        \
+      do {                                                                     \
+        /* Адаптивно-упрощенный шаг двоичного поиска:                          \
+         *  - без переходов при наличии cmov или аналога;                      \
+         *  - допускает лишние итерации;                                       \
+         *  - но ищет пока size > 2, что требует дозавершения поиска           \
+         *    среди остающихся 0-1-2 элементов. */                             \
+        const TYPE_LIST *const middle = it + (length >> 1);                    \
+        length = (length + 1) >> 1;                                            \
+        const bool flag = expect_with_probability(CMP(*middle, item), 0, .5);  \
+        WORKAROUND_FOR_CLANG_OPTIMIZER_BUG(length, flag);                      \
+        it = flag ? middle : it;                                               \
+      } while (length > 2);                                                    \
+    else                                                                       \
+      while (length > 2) {                                                     \
+        /* Вариант с использованием условного перехода. Основное отличие в     \
+         * том, что при "не равно" (true от компаратора) переход делается на 1 \
+         * ближе к концу массива. Алгоритмически это верно и обеспечивает      \
+         * чуть-чуть более быструю сходимость, но зато требует больше          \
+         * вычислений при true от компаратора. Также ВАЖНО(!) не допускается   \
+         * спекулятивное выполнение при size == 0. */                          \
+        const TYPE_LIST *const middle = it + (length >> 1);                    \
+        length = (length + 1) >> 1;                                            \
+        const bool flag = expect_with_probability(CMP(*middle, item), 0, .5);  \
+        if (flag) {                                                            \
+          it = middle + 1;                                                     \
+          length -= 1;                                                         \
+        }                                                                      \
+      }                                                                        \
+    it += length > 1 && expect_with_probability(CMP(*it, item), 0, .5);        \
+    it += length > 0 && expect_with_probability(CMP(*it, item), 0, .5);        \
                                                                                \
     if (mdbx_audit_enabled()) {                                                \
-      for (const TYPE_LIST *scan = begin; scan < first; ++scan)                \
+      for (const TYPE_LIST *scan = begin; scan < it; ++scan)                   \
         assert(CMP(*scan, item));                                              \
-      for (const TYPE_LIST *scan = first; scan < end; ++scan)                  \
+      for (const TYPE_LIST *scan = it; scan < end; ++scan)                     \
         assert(!CMP(*scan, item));                                             \
       (void)begin, (void)end;                                                  \
     }                                                                          \
                                                                                \
-    return first;                                                              \
+    return it;                                                                 \
   }
 
 /*----------------------------------------------------------------------------*/
@@ -3183,60 +2512,82 @@ static __hot int __must_check_result mdbx_pnl_insert_range(MDBX_PNL *ppl,
   return MDBX_SUCCESS;
 }
 
-static bool mdbx_pnl_check(const MDBX_PNL pl, const size_t limit) {
+__hot static bool pnl_check(const pgno_t *pl, const size_t limit) {
   assert(limit >= MIN_PAGENO - MDBX_ENABLE_REFUND);
   if (likely(MDBX_PNL_SIZE(pl))) {
-    assert(MDBX_PNL_LEAST(pl) >= MIN_PAGENO);
-    assert(MDBX_PNL_MOST(pl) < limit);
-    assert(MDBX_PNL_SIZE(pl) <= MDBX_PGL_LIMIT);
     if (unlikely(MDBX_PNL_SIZE(pl) > MDBX_PGL_LIMIT))
       return false;
     if (unlikely(MDBX_PNL_LEAST(pl) < MIN_PAGENO))
       return false;
     if (unlikely(MDBX_PNL_MOST(pl) >= limit))
       return false;
-    if (!MDBX_DISABLE_VALIDATION || mdbx_audit_enabled()) {
-      for (const pgno_t *scan = &MDBX_PNL_LAST(pl); --scan > pl;) {
-        assert(MDBX_PNL_ORDERED(scan[0], scan[1]));
-        if (unlikely(!MDBX_PNL_ORDERED(scan[0], scan[1])))
+
+    if ((!MDBX_DISABLE_VALIDATION || mdbx_audit_enabled()) &&
+        likely(MDBX_PNL_SIZE(pl) > 1)) {
+      const pgno_t *scan = MDBX_PNL_BEGIN(pl);
+      const pgno_t *const end = MDBX_PNL_END(pl);
+      pgno_t prev = *scan++;
+      do {
+        if (unlikely(!MDBX_PNL_ORDERED(prev, *scan)))
           return false;
-      }
+        prev = *scan;
+      } while (likely(++scan != end));
     }
   }
   return true;
 }
 
-static __always_inline bool mdbx_pnl_check4assert(const MDBX_PNL pl,
-                                                  const size_t limit) {
-  if (unlikely(pl == nullptr))
-    return true;
-  assert(MDBX_PNL_ALLOCLEN(pl) >= MDBX_PNL_SIZE(pl));
-  if (unlikely(MDBX_PNL_ALLOCLEN(pl) < MDBX_PNL_SIZE(pl)))
-    return false;
-  return mdbx_pnl_check(pl, limit);
+static __always_inline bool pnl_check_allocated(const pgno_t *pl,
+                                                const size_t limit) {
+  return pl == nullptr ||
+         (MDBX_PNL_ALLOCLEN(pl) >= MDBX_PNL_SIZE(pl) && pnl_check(pl, limit));
 }
 
-/* Merge an PNL onto an PNL. The destination PNL must be big enough */
-static void __hot mdbx_pnl_xmerge(MDBX_PNL dst, const MDBX_PNL src) {
-  assert(mdbx_pnl_check4assert(dst, MAX_PAGENO + 1));
-  assert(mdbx_pnl_check(src, MAX_PAGENO + 1));
-  if (likely(MDBX_PNL_SIZE(src) > 0)) {
-    const size_t total = MDBX_PNL_SIZE(dst) + MDBX_PNL_SIZE(src);
+static __always_inline void
+pnl_merge_inner(pgno_t *__restrict dst, const pgno_t *__restrict src_a,
+                const pgno_t *__restrict src_b,
+                const pgno_t *__restrict const src_b_detent) {
+  do {
+#if MDBX_HAVE_CMOV
+    const bool flag = MDBX_PNL_ORDERED(*src_b, *src_a);
+#if defined(__LCC__) || __CLANG_PREREQ(13, 0)
+    // lcc 1.26: 13ШК (подготовка и первая итерация) + 7ШК (цикл), БЕЗ loop-mode
+    // gcc>=7: cmp+jmp с возвратом в тело цикла (WTF?)
+    // gcc<=6: cmov×3
+    // clang<=12: cmov×3
+    // clang>=13: cmov, set+add/sub
+    *dst = flag ? *src_a-- : *src_b--;
+#else
+    // gcc: cmov, cmp+set+add/sub
+    // clang<=5: cmov×2, set+add/sub
+    // clang>=6: cmov, set+add/sub
+    *dst = flag ? *src_a : *src_b;
+    src_b += flag - 1;
+    src_a -= flag;
+#endif
+    --dst;
+#else  /* MDBX_HAVE_CMOV */
+    while (MDBX_PNL_ORDERED(*src_b, *src_a))
+      *dst-- = *src_a--;
+    *dst-- = *src_b--;
+#endif /* !MDBX_HAVE_CMOV */
+  } while (likely(src_b > src_b_detent));
+}
+
+/* Merge a PNL onto a PNL. The destination PNL must be big enough */
+static void __hot pnl_merge(MDBX_PNL dst, const MDBX_PNL src) {
+  assert(pnl_check_allocated(dst, MAX_PAGENO + 1));
+  assert(pnl_check(src, MAX_PAGENO + 1));
+  const pgno_t src_len = MDBX_PNL_SIZE(src);
+  const pgno_t dst_len = MDBX_PNL_SIZE(dst);
+  if (likely(src_len > 0)) {
+    const pgno_t total = dst_len + src_len;
     assert(MDBX_PNL_ALLOCLEN(dst) >= total);
-    pgno_t *w = dst + total;
-    pgno_t *d = dst + MDBX_PNL_SIZE(dst);
-    const pgno_t *s = src + MDBX_PNL_SIZE(src);
-    dst[0] = /* detent for scan below */ (MDBX_PNL_ASCENDING ? 0 : ~(pgno_t)0);
-    do {
-      const bool cmp = MDBX_PNL_ORDERED(*s, *d);
-      *w = cmp ? *d : *s;
-      d -= cmp ? 1 : 0;
-      s -= cmp ? 0 : 1;
-      --w;
-    } while (s > src);
-    MDBX_PNL_SIZE(dst) = (pgno_t)total;
+    dst[0] = /* the detent */ (MDBX_PNL_ASCENDING ? 0 : P_INVALID);
+    pnl_merge_inner(dst + total, dst + dst_len, src + src_len, src);
+    MDBX_PNL_SIZE(dst) = total;
   }
-  assert(mdbx_pnl_check4assert(dst, MAX_PAGENO + 1));
+  assert(pnl_check_allocated(dst, MAX_PAGENO + 1));
 }
 
 static void mdbx_spill_remove(MDBX_txn *txn, unsigned idx, unsigned npages) {
@@ -3306,7 +2657,7 @@ static __hot void mdbx_pnl_sort_nochk(MDBX_PNL pnl) {
 
 static __inline void mdbx_pnl_sort(MDBX_PNL pnl, size_t limit4check) {
   mdbx_pnl_sort_nochk(pnl);
-  assert(mdbx_pnl_check(pnl, limit4check));
+  assert(pnl_check(pnl, limit4check));
   (void)limit4check;
 }
 
@@ -3328,7 +2679,7 @@ static __hot unsigned mdbx_pnl_search_nochk(const MDBX_PNL pnl, pgno_t pgno) {
 
 static __inline unsigned mdbx_pnl_search(const MDBX_PNL pnl, pgno_t pgno,
                                          size_t limit) {
-  assert(mdbx_pnl_check4assert(pnl, limit));
+  assert(pnl_check_allocated(pnl, limit));
   assert(pgno < limit);
   (void)limit;
   return mdbx_pnl_search_nochk(pnl, pgno);
@@ -3584,7 +2935,7 @@ RADIXSORT_IMPL(dpl, MDBX_dp, MDBX_DPL_EXTRACT_KEY,
 #define DP_SORT_CMP(first, last) ((first).pgno < (last).pgno)
 SORT_IMPL(dp_sort, false, MDBX_dp, DP_SORT_CMP)
 
-__hot __noinline static MDBX_dpl *mdbx_dpl_sort_slowpath(const MDBX_txn *txn) {
+__hot __noinline static MDBX_dpl *dpl_sort_slowpath(const MDBX_txn *txn) {
   MDBX_dpl *dl = txn->tw.dirtylist;
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
   const unsigned unsorted = dl->length - dl->sorted;
@@ -3605,14 +2956,18 @@ __hot __noinline static MDBX_dpl *mdbx_dpl_sort_slowpath(const MDBX_txn *txn) {
       memcpy(tmp, sorted_end, unsorted * sizeof(MDBX_dp));
       dp_sort(tmp, tmp + unsorted);
       /* merge two parts from end to begin */
-      MDBX_dp *w = dl->items + dl->length;
-      MDBX_dp *l = dl->items + dl->sorted;
-      MDBX_dp *r = end - 1;
+      MDBX_dp *__restrict w = dl->items + dl->length;
+      MDBX_dp *__restrict l = dl->items + dl->sorted;
+      MDBX_dp *__restrict r = end - 1;
       do {
-        const bool cmp = l->pgno > r->pgno;
+        const bool cmp = expect_with_probability(l->pgno > r->pgno, 0, .5);
+#if defined(__LCC__) || __CLANG_PREREQ(13, 0) || !MDBX_HAVE_CMOV
+        *w = cmp ? *l-- : *r--;
+#else
         *w = cmp ? *l : *r;
         l -= cmp;
         r += cmp - 1;
+#endif
       } while (likely(--w > l));
       assert(r == tmp - 1);
       assert(dl->items[0].pgno == 0 &&
@@ -3633,12 +2988,12 @@ __hot __noinline static MDBX_dpl *mdbx_dpl_sort_slowpath(const MDBX_txn *txn) {
   return dl;
 }
 
-static __always_inline MDBX_dpl *mdbx_dpl_sort(const MDBX_txn *txn) {
+static __always_inline MDBX_dpl *dpl_sort(const MDBX_txn *txn) {
   MDBX_dpl *dl = txn->tw.dirtylist;
   assert(dl->length <= MDBX_PGL_LIMIT);
   assert(dl->sorted <= dl->length);
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
-  return likely(dl->sorted == dl->length) ? dl : mdbx_dpl_sort_slowpath(txn);
+  return likely(dl->sorted == dl->length) ? dl : dpl_sort_slowpath(txn);
 }
 
 /* Returns the index of the first dirty-page whose pgno
@@ -3646,7 +3001,7 @@ static __always_inline MDBX_dpl *mdbx_dpl_sort(const MDBX_txn *txn) {
 #define DP_SEARCH_CMP(dp, id) ((dp).pgno < (id))
 SEARCH_IMPL(dp_bsearch, MDBX_dp, pgno_t, DP_SEARCH_CMP)
 
-static unsigned __hot mdbx_dpl_search(const MDBX_txn *txn, pgno_t pgno) {
+__hot static unsigned dpl_search(const MDBX_txn *txn, pgno_t pgno) {
   MDBX_dpl *dl = txn->tw.dirtylist;
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
   if (mdbx_audit_enabled()) {
@@ -3659,7 +3014,7 @@ static unsigned __hot mdbx_dpl_search(const MDBX_txn *txn, pgno_t pgno) {
   switch (dl->length - dl->sorted) {
   default:
     /* sort a whole */
-    mdbx_dpl_sort_slowpath(txn);
+    dpl_sort_slowpath(txn);
     break;
   case 0:
     /* whole sorted cases */
@@ -3671,22 +3026,13 @@ static unsigned __hot mdbx_dpl_search(const MDBX_txn *txn, pgno_t pgno) {
       return dl->length - N + 1;                                               \
     __fallthrough
 
-    /* try linear search until the threshold */
-    LINEAR_SEARCH_CASE(16); /* fall through */
-    LINEAR_SEARCH_CASE(15); /* fall through */
-    LINEAR_SEARCH_CASE(14); /* fall through */
-    LINEAR_SEARCH_CASE(13); /* fall through */
-    LINEAR_SEARCH_CASE(12); /* fall through */
-    LINEAR_SEARCH_CASE(11); /* fall through */
-    LINEAR_SEARCH_CASE(10); /* fall through */
-    LINEAR_SEARCH_CASE(9);  /* fall through */
-    LINEAR_SEARCH_CASE(8);  /* fall through */
-    LINEAR_SEARCH_CASE(7);  /* fall through */
-    LINEAR_SEARCH_CASE(6);  /* fall through */
-    LINEAR_SEARCH_CASE(5);  /* fall through */
-    LINEAR_SEARCH_CASE(4);  /* fall through */
-    LINEAR_SEARCH_CASE(3);  /* fall through */
-    LINEAR_SEARCH_CASE(2);  /* fall through */
+    /* use linear scan until the threshold */
+    LINEAR_SEARCH_CASE(7); /* fall through */
+    LINEAR_SEARCH_CASE(6); /* fall through */
+    LINEAR_SEARCH_CASE(5); /* fall through */
+    LINEAR_SEARCH_CASE(4); /* fall through */
+    LINEAR_SEARCH_CASE(3); /* fall through */
+    LINEAR_SEARCH_CASE(2); /* fall through */
   case 1:
     if (dl->items[dl->length].pgno == pgno)
       return dl->length;
@@ -3714,7 +3060,7 @@ static __inline bool mdbx_dpl_intersect(const MDBX_txn *txn, pgno_t pgno,
   MDBX_dpl *dl = txn->tw.dirtylist;
   assert(dl->sorted == dl->length);
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
-  unsigned const n = mdbx_dpl_search(txn, pgno);
+  unsigned const n = dpl_search(txn, pgno);
   assert(n >= 1 && n <= dl->length + 1);
   assert(pgno <= dl->items[n].pgno);
   assert(pgno > dl->items[n - 1].pgno);
@@ -3736,7 +3082,7 @@ static __inline bool mdbx_dpl_intersect(const MDBX_txn *txn, pgno_t pgno,
 
 static __always_inline unsigned mdbx_dpl_exist(MDBX_txn *txn, pgno_t pgno) {
   MDBX_dpl *dl = txn->tw.dirtylist;
-  unsigned i = mdbx_dpl_search(txn, pgno);
+  unsigned i = dpl_search(txn, pgno);
   assert((int)i > 0);
   return (dl->items[i].pgno == pgno) ? i : 0;
 }
@@ -3914,10 +3260,10 @@ static int __must_check_result mdbx_page_merge(MDBX_cursor *csrc,
                                                MDBX_cursor *cdst);
 
 #define MDBX_SPLIT_REPLACE MDBX_APPENDDUP /* newkey is not new */
-static int __must_check_result mdbx_page_split(MDBX_cursor *mc,
-                                               const MDBX_val *const newkey,
-                                               MDBX_val *const newdata,
-                                               pgno_t newpgno, unsigned nflags);
+static int __must_check_result page_split(MDBX_cursor *mc,
+                                          const MDBX_val *const newkey,
+                                          MDBX_val *const newdata,
+                                          pgno_t newpgno, const unsigned naf);
 
 static bool meta_checktxnid(const MDBX_env *env, const volatile MDBX_meta *meta,
                             bool report);
@@ -3943,20 +3289,16 @@ struct node_result {
 static struct node_result mdbx_node_search(MDBX_cursor *mc,
                                            const MDBX_val *key);
 
-static int __must_check_result mdbx_node_add_branch(MDBX_cursor *mc,
-                                                    unsigned indx,
-                                                    const MDBX_val *key,
-                                                    pgno_t pgno);
-static int __must_check_result mdbx_node_add_leaf(MDBX_cursor *mc,
-                                                  unsigned indx,
-                                                  const MDBX_val *key,
-                                                  MDBX_val *data,
-                                                  unsigned flags);
-static int __must_check_result mdbx_node_add_leaf2(MDBX_cursor *mc,
-                                                   unsigned indx,
-                                                   const MDBX_val *key);
+static int __must_check_result node_add_branch(MDBX_cursor *mc, unsigned indx,
+                                               const MDBX_val *key,
+                                               pgno_t pgno);
+static int __must_check_result node_add_leaf(MDBX_cursor *mc, unsigned indx,
+                                             const MDBX_val *key,
+                                             MDBX_val *data, unsigned flags);
+static int __must_check_result node_add_leaf2(MDBX_cursor *mc, unsigned indx,
+                                              const MDBX_val *key);
 
-static void mdbx_node_del(MDBX_cursor *mc, size_t ksize);
+static void node_del(MDBX_cursor *mc, size_t ksize);
 static void mdbx_node_shrink(MDBX_page *mp, unsigned indx);
 static int __must_check_result mdbx_node_move(MDBX_cursor *csrc,
                                               MDBX_cursor *cdst, bool fromleft);
@@ -4597,8 +3939,8 @@ static void mdbx_refund_reclaimed(MDBX_txn *txn) {
   mdbx_verbose("refunded %" PRIaPGNO " pages: %" PRIaPGNO " -> %" PRIaPGNO,
                txn->mt_next_pgno - next_pgno, txn->mt_next_pgno, next_pgno);
   txn->mt_next_pgno = next_pgno;
-  mdbx_tassert(txn, mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                          txn->mt_next_pgno - 1));
+  mdbx_tassert(txn, pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                        txn->mt_next_pgno - 1));
 }
 
 static void mdbx_refund_loose(MDBX_txn *txn) {
@@ -4688,7 +4030,7 @@ static void mdbx_refund_loose(MDBX_txn *txn) {
     }
   } else {
     /* Dirtylist is mostly sorted, just refund loose pages at the end. */
-    mdbx_dpl_sort(txn);
+    dpl_sort(txn);
     mdbx_tassert(txn, dl->length < 2 ||
                           dl->items[1].pgno < dl->items[dl->length].pgno);
     mdbx_tassert(txn, dl->sorted == dl->length);
@@ -5079,8 +4421,8 @@ status_done:
     mdbx_debug("reclaim %u %s page %" PRIaPGNO, npages, "dirty", pgno);
     rc = mdbx_pnl_insert_range(&txn->tw.reclaimed_pglist, pgno, npages);
     mdbx_tassert(txn,
-                 mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                       txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+                 pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
     mdbx_tassert(txn, mdbx_dirtylist_check(txn));
     return rc;
   }
@@ -5307,7 +4649,7 @@ static unsigned mdbx_cursor_keep(MDBX_txn *txn, MDBX_cursor *mc) {
     for (unsigned i = 0; i < mc->mc_snum; ++i) {
       const MDBX_page *mp = mc->mc_pg[i];
       if (IS_MODIFIABLE(txn, mp) && !IS_SUBP(mp)) {
-        unsigned const n = mdbx_dpl_search(txn, mp->mp_pgno);
+        unsigned const n = dpl_search(txn, mp->mp_pgno);
         if (txn->tw.dirtylist->items[n].pgno == mp->mp_pgno &&
             mdbx_dpl_age(txn, n)) {
           txn->tw.dirtylist->items[n].lru = txn->tw.dirtylru;
@@ -5503,7 +4845,7 @@ static int mdbx_txn_spill(MDBX_txn *const txn, MDBX_cursor *const m0,
   }
 
   /* Сортируем чтобы запись на диск была полее последовательна */
-  MDBX_dpl *const dl = mdbx_dpl_sort(txn);
+  MDBX_dpl *const dl = dpl_sort(txn);
 
   /* Preserve pages which may soon be dirtied again */
   const unsigned unspillable = mdbx_txn_keep(txn, m0);
@@ -5735,7 +5077,6 @@ static bool meta_weak_acceptable(const MDBX_env *env, const MDBX_meta *meta,
 
 MDBX_NOTHROW_PURE_FUNCTION static __inline txnid_t
 constmeta_txnid(const MDBX_env *env, const MDBX_meta *meta) {
-  mdbx_memory_fence(mo_AcquireRelease, false);
   txnid_t a = unaligned_peek_u64(4, &meta->mm_txnid_a);
   txnid_t b = unaligned_peek_u64(4, &meta->mm_txnid_b);
   mdbx_assert(env, a == b);
@@ -5755,7 +5096,6 @@ static __inline void meta_cache_clear(MDBX_env *env) {
 static __inline txnid_t meta_txnid(const MDBX_env *env,
                                    volatile const MDBX_meta *meta) {
   (void)env;
-  mdbx_memory_fence(mo_AcquireRelease, false);
   txnid_t a = unaligned_peek_u64_volatile(4, &meta->mm_txnid_a);
   txnid_t b = unaligned_peek_u64_volatile(4, &meta->mm_txnid_b);
   return (a == b) ? a : 0;
@@ -5807,9 +5147,9 @@ static __inline uint64_t meta_sign(const MDBX_meta *meta) {
   return (sign > MDBX_DATASIGN_WEAK) ? sign : ~sign;
 }
 
-enum meta_choise_mode { prefer_last, prefer_steady };
+enum meta_choice_mode { prefer_last, prefer_steady };
 
-static __inline bool meta_ot(const enum meta_choise_mode mode,
+static __inline bool meta_ot(const enum meta_choice_mode mode,
                              const MDBX_env *env, volatile const MDBX_meta *a,
                              volatile const MDBX_meta *b) {
   mdbx_jitter4testing(true);
@@ -5861,7 +5201,7 @@ static int meta_eq_mask(const MDBX_env *env) {
 }
 
 static __always_inline volatile const MDBX_meta *
-meta_recent(const enum meta_choise_mode mode, const MDBX_env *env,
+meta_recent(const enum meta_choice_mode mode, const MDBX_env *env,
             volatile const MDBX_meta *a, volatile const MDBX_meta *b) {
   const bool a_older_that_b = meta_ot(mode, env, a, b);
   mdbx_assert(env, !meta_eq(env, a, b));
@@ -5877,7 +5217,7 @@ static const MDBX_meta *meta_ancient_prefer_weak(const MDBX_env *env,
 }
 
 static __always_inline volatile const MDBX_meta *
-meta_mostrecent(const enum meta_choise_mode mode, const MDBX_env *env) {
+meta_mostrecent(const enum meta_choice_mode mode, const MDBX_env *env) {
   volatile const MDBX_meta *m0 = METAPAGE(env, 0);
   volatile const MDBX_meta *m1 = METAPAGE(env, 1);
   volatile const MDBX_meta *m2 = METAPAGE(env, 2);
@@ -5887,7 +5227,8 @@ meta_mostrecent(const enum meta_choise_mode mode, const MDBX_env *env) {
   return head;
 }
 
-static volatile const MDBX_meta *meta_prefer_steady(const MDBX_env *env) {
+static __noinline volatile const MDBX_meta *
+meta_prefer_steady(const MDBX_env *env) {
   return
 #if MDBX_CACHE_METAPTR
       ((MDBX_env *)env)->cache_steady_meta =
@@ -5895,7 +5236,7 @@ static volatile const MDBX_meta *meta_prefer_steady(const MDBX_env *env) {
           meta_mostrecent(prefer_steady, env);
 }
 
-MDBX_NOTHROW_PURE_FUNCTION static const MDBX_meta *
+MDBX_NOTHROW_PURE_FUNCTION static __inline const MDBX_meta *
 constmeta_prefer_steady(const MDBX_env *env) {
 #if MDBX_CACHE_METAPTR
   if (likely(env->cache_steady_meta)) {
@@ -5907,7 +5248,8 @@ constmeta_prefer_steady(const MDBX_env *env) {
   return (const MDBX_meta *)meta_prefer_steady(env);
 }
 
-static volatile const MDBX_meta *meta_prefer_last(const MDBX_env *env) {
+__hot static __noinline volatile const MDBX_meta *
+meta_prefer_last(const MDBX_env *env) {
   return
 #if MDBX_CACHE_METAPTR
       ((MDBX_env *)env)->cache_last_meta =
@@ -5915,7 +5257,7 @@ static volatile const MDBX_meta *meta_prefer_last(const MDBX_env *env) {
           meta_mostrecent(prefer_last, env);
 }
 
-MDBX_NOTHROW_PURE_FUNCTION static const MDBX_meta *
+MDBX_NOTHROW_PURE_FUNCTION static __inline const MDBX_meta *
 constmeta_prefer_last(const MDBX_env *env) {
 #if MDBX_CACHE_METAPTR
   if (likely(env->cache_last_meta)) {
@@ -5926,11 +5268,11 @@ constmeta_prefer_last(const MDBX_env *env) {
   return (const MDBX_meta *)meta_prefer_last(env);
 }
 
-static txnid_t mdbx_recent_committed_txnid(const MDBX_env *env) {
+__cold static txnid_t mdbx_recent_committed_txnid(const MDBX_env *env) {
   while (true) {
     volatile const MDBX_meta *head = meta_prefer_last(env);
     const txnid_t recent = meta_txnid(env, head);
-    mdbx_memory_barrier();
+    mdbx_memory_fence(mo_AcquireRelease, false);
     if (likely(head == meta_prefer_last(env) &&
                recent == meta_txnid(env, head)))
       return recent;
@@ -6059,7 +5401,7 @@ static int __must_check_result mdbx_page_dirty(MDBX_txn *txn, MDBX_page *mp,
       rc = mdbx_pnl_insert_range(&txn->tw.reclaimed_pglist, loose->mp_pgno, 1);
       if (unlikely(rc != MDBX_SUCCESS))
         goto bailout;
-      unsigned di = mdbx_dpl_search(txn, loose->mp_pgno);
+      unsigned di = dpl_search(txn, loose->mp_pgno);
       mdbx_tassert(txn, txn->tw.dirtylist->items[di].ptr == loose);
       mdbx_dpl_remove(txn, di);
       txn->tw.loose_pages = loose->mp_next;
@@ -6541,62 +5883,317 @@ __cold static int mdbx_wipe_steady(MDBX_env *env, const txnid_t last_steady) {
   return MDBX_SUCCESS;
 }
 
-__hot static pgno_t *scan4range(const MDBX_PNL pnl, const unsigned len,
-                                const int num) {
-  assert(num > 0 && len >= (unsigned)num && len == MDBX_PNL_SIZE(pnl));
+//------------------------------------------------------------------------------
+
+MDBX_MAYBE_UNUSED __hot static pgno_t *
+scan4seq_fallback(pgno_t *range, const size_t len, const unsigned seq) {
+  assert(seq > 0 && len > seq);
 #if MDBX_PNL_ASCENDING
-  const pgno_t *const detent = pnl + len - num;
-  pgno_t *scan = pnl + 1;
-  while (likely(scan + 7 <= detent)) {
-    if (unlikely(scan[num] == *scan + num))
-      return scan;
-    if (unlikely(scan[num + 1] == scan[1] + num))
-      return scan + 1;
-    if (unlikely(scan[num + 2] == scan[2] + num))
-      return scan + 2;
-    if (unlikely(scan[num + 3] == scan[3] + num))
-      return scan + 3;
-    if (unlikely(scan[num + 4] == scan[4] + num))
-      return scan + 4;
-    if (unlikely(scan[num + 5] == scan[5] + num))
-      return scan + 5;
-    if (unlikely(scan[num + 6] == scan[6] + num))
-      return scan + 6;
-    if (unlikely(scan[num + 7] == scan[7] + num))
-      return scan + 7;
-    scan += 8;
+  assert(range[-1] == len);
+  const pgno_t *const detent = range + len - seq;
+  const ptrdiff_t offset = (ptrdiff_t)seq;
+  const pgno_t target = (pgno_t)offset;
+  if (likely(len > seq + 3)) {
+    do {
+      const pgno_t diff0 = range[offset + 0] - range[0];
+      const pgno_t diff1 = range[offset + 1] - range[1];
+      const pgno_t diff2 = range[offset + 2] - range[2];
+      const pgno_t diff3 = range[offset + 3] - range[3];
+      if (diff0 == target)
+        return range + 0;
+      if (diff1 == target)
+        return range + 1;
+      if (diff2 == target)
+        return range + 2;
+      if (diff3 == target)
+        return range + 3;
+      range += 4;
+    } while (range + 3 < detent);
+    if (range == detent)
+      return nullptr;
   }
-  for (; scan <= detent; ++scan)
-    if (scan[num] == *scan + num)
-      return scan;
+  do
+    if (range[offset] - *range == target)
+      return range;
+  while (++range < detent);
 #else
-  const pgno_t *const detent = pnl + num;
-  pgno_t *scan = pnl + len;
-  while (likely(scan - 7 >= detent)) {
-    if (unlikely(scan[-num] == *scan + num))
-      return scan;
-    if (unlikely(scan[-num - 1] == scan[-1] + num))
-      return scan - 1;
-    if (unlikely(scan[-num - 2] == scan[-2] + num))
-      return scan - 2;
-    if (unlikely(scan[-num - 3] == scan[-3] + num))
-      return scan - 3;
-    if (unlikely(scan[-num - 4] == scan[-4] + num))
-      return scan - 4;
-    if (unlikely(scan[-num - 5] == scan[-5] + num))
-      return scan - 5;
-    if (unlikely(scan[-num - 6] == scan[-6] + num))
-      return scan - 6;
-    if (unlikely(scan[-num - 7] == scan[-7] + num))
-      return scan - 7;
-    scan -= 8;
+  assert(range[-(ptrdiff_t)len] == len);
+  const pgno_t *const detent = range - len + seq;
+  const ptrdiff_t offset = -(ptrdiff_t)seq;
+  const pgno_t target = (pgno_t)offset;
+  if (likely(len > seq + 3)) {
+    do {
+      const pgno_t diff0 = range[-0] - range[offset - 0];
+      const pgno_t diff1 = range[-1] - range[offset - 1];
+      const pgno_t diff2 = range[-2] - range[offset - 2];
+      const pgno_t diff3 = range[-3] - range[offset - 3];
+      /* Смысл вычислений до ветвлений в том, чтобы позволить компилятору
+       * загружать и вычислять все значения параллельно. */
+      if (diff0 == target)
+        return range - 0;
+      if (diff1 == target)
+        return range - 1;
+      if (diff2 == target)
+        return range - 2;
+      if (diff3 == target)
+        return range - 3;
+      range -= 4;
+    } while (range > detent + 3);
+    if (range == detent)
+      return nullptr;
   }
-  for (; scan >= detent; --scan)
-    if (scan[-num] == *scan + num)
-      return scan;
+  do
+    if (*range - range[offset] == target)
+      return range;
+  while (--range > detent);
 #endif /* MDBX_PNL sort-order */
   return nullptr;
 }
+
+MDBX_MAYBE_UNUSED static const pgno_t *scan4range_checker(const MDBX_PNL pnl,
+                                                          const unsigned seq) {
+  size_t begin = MDBX_PNL_ASCENDING ? 1 : MDBX_PNL_SIZE(pnl);
+#if MDBX_PNL_ASCENDING
+  while (seq <= MDBX_PNL_SIZE(pnl) - begin) {
+    if (pnl[begin + seq] - pnl[begin] == seq)
+      return pnl + begin;
+    ++begin;
+  }
+#else
+  while (begin > seq) {
+    if (pnl[begin - seq] - pnl[begin] == seq)
+      return pnl + begin;
+    --begin;
+  }
+#endif /* MDBX_PNL sort-order */
+  return nullptr;
+}
+
+#if !defined(MDBX_ATTRIBUTE_TARGET) &&                                         \
+    (__has_attribute(__target__) || __GNUC_PREREQ(5, 0))
+#define MDBX_ATTRIBUTE_TARGET(target) __attribute__((__target__(target)))
+#endif /* MDBX_ATTRIBUTE_TARGET */
+
+#ifdef MDBX_ATTRIBUTE_TARGET_AVX512BW
+MDBX_MAYBE_UNUSED
+__hot MDBX_ATTRIBUTE_TARGET_AVX512BW static pgno_t *static pgno_t *
+scan4seq_avx512bw(pgno_t *range, const size_t len, const unsigned seq) {
+  return nullptr;
+}
+#endif /* MDBX_ATTRIBUTE_TARGET_AVX512BW */
+
+#if defined(__AVX2__)
+#define MDBX_ATTRIBUTE_TARGET_AVX2 /* nope */
+#elif defined(MDBX_ATTRIBUTE_TARGET) && defined(__ia32__)
+#define MDBX_ATTRIBUTE_TARGET_AVX2 MDBX_ATTRIBUTE_TARGET("avx2")
+#endif /* __AVX2__ */
+
+#ifdef MDBX_ATTRIBUTE_TARGET_AVX2
+
+MDBX_ATTRIBUTE_TARGET_AVX2 static __always_inline unsigned
+diffcmp2mask_avx2(const pgno_t *const ptr, const ptrdiff_t offset,
+                  const __m256i pattern) {
+  const __m256i f = _mm256_loadu_si256((const __m256i *)ptr);
+  const __m256i l = _mm256_loadu_si256((const __m256i *)(ptr + offset));
+  const __m256i cmp = _mm256_cmpeq_epi32(_mm256_sub_epi32(f, l), pattern);
+  return _mm256_movemask_ps(*(const __m256 *)&cmp);
+}
+
+MDBX_MAYBE_UNUSED __hot MDBX_ATTRIBUTE_TARGET_AVX2 static pgno_t *
+scan4seq_avx2(pgno_t *range, const size_t len, const unsigned seq) {
+  assert(seq > 0 && len > seq);
+#if MDBX_PNL_ASCENDING
+#error "FIXME: Not implemented"
+#endif /* MDBX_PNL_ASCENDING */
+  assert(range[-(ptrdiff_t)len] == len);
+  pgno_t *const detent = range - len + seq;
+  const ptrdiff_t offset = -(ptrdiff_t)seq;
+  const pgno_t target = (pgno_t)offset;
+  const __m256i pattern = _mm256_set1_epi32(target);
+  uint8_t mask;
+  if (likely(len > seq + 7)) {
+    do {
+      mask = (uint8_t)diffcmp2mask_avx2(range - 7, offset, pattern);
+      if (mask)
+        goto found;
+      range -= 8;
+    } while (range > detent + 7);
+    if (range == detent)
+      return nullptr;
+  }
+
+  /* Далее происходит чтение от 4 до 28 лишних байт, которые могут быть не
+   * только за пределами региона выделенного под PNL, но и пересекать границу
+   * страницы памяти. Что может приводить как к ошибкам ASAN, так и к падению.
+   * Поэтому проверяем смещение на странице, а с ASAN всегда страхуемся. */
+#ifdef __SANITIZE_ADDRESS__
+  const unsigned on_page_safe_mask = 0;
+#else
+  const unsigned on_page_safe_mask = 0xfe0 /* enough for '-31' bytes offset */;
+#endif
+  if (likely(on_page_safe_mask & (uintptr_t)(range + offset))) {
+    const unsigned extra = (unsigned)(detent + 8 - range);
+    assert(extra > 0 && extra < 8);
+    mask = 0xFF << extra;
+    mask &= diffcmp2mask_avx2(range - 7, offset, pattern);
+    if (mask) {
+    found:;
+#ifdef _MSC_VER
+      unsigned long index;
+      _BitScanReverse(&index, mask);
+#else
+      const unsigned index = __builtin_clz(mask);
+#endif /* _MSC_VER */
+      range = range + 24 - index;
+      return range;
+    }
+    return nullptr;
+  }
+  do
+    if (*range - range[offset] == target)
+      return range;
+  while (--range != detent);
+  return nullptr;
+}
+#endif /* MDBX_ATTRIBUTE_TARGET_AVX2 */
+
+#if defined(__SSE2__)
+#define MDBX_ATTRIBUTE_TARGET_SSE2 /* nope */
+#elif (defined(_M_IX86_FP) && _M_IX86_FP >= 2) || defined(__amd64__)
+#define __SSE2__
+#define MDBX_ATTRIBUTE_TARGET_SSE2 /* nope */
+#elif defined(MDBX_ATTRIBUTE_TARGET) && defined(__ia32__)
+#define MDBX_ATTRIBUTE_TARGET_SSE2 MDBX_ATTRIBUTE_TARGET("sse2")
+#endif /* __SSE2__ */
+
+#ifdef MDBX_ATTRIBUTE_TARGET_SSE2
+MDBX_ATTRIBUTE_TARGET_SSE2 static __always_inline unsigned
+diffcmp2mask_sse2(const pgno_t *const ptr, const ptrdiff_t offset,
+                  const __m128i pattern) {
+  const __m128i f = _mm_loadu_si128((const __m128i *)ptr);
+  const __m128i l = _mm_loadu_si128((const __m128i *)(ptr + offset));
+  const __m128i cmp = _mm_cmpeq_epi32(_mm_sub_epi32(f, l), pattern);
+  return _mm_movemask_ps(*(const __m128 *)&cmp);
+}
+
+MDBX_MAYBE_UNUSED __hot MDBX_ATTRIBUTE_TARGET_SSE2 static pgno_t *
+scan4seq_sse2(pgno_t *range, const size_t len, const unsigned seq) {
+  assert(seq > 0 && len > seq);
+#if MDBX_PNL_ASCENDING
+#error "FIXME: Not implemented"
+#endif /* MDBX_PNL_ASCENDING */
+  assert(range[-(ptrdiff_t)len] == len);
+  pgno_t *const detent = range - len + seq;
+  const ptrdiff_t offset = -(ptrdiff_t)seq;
+  const pgno_t target = (pgno_t)offset;
+  const __m128i pattern = _mm_set_epi32(target, target, target, target);
+  uint8_t mask;
+  if (likely(len > seq + 3)) {
+    do {
+      mask = (uint8_t)diffcmp2mask_sse2(range - 3, offset, pattern);
+      if (mask)
+        goto found;
+      range -= 4;
+    } while (range > detent + 3);
+    if (range == detent)
+      return nullptr;
+  }
+
+  /* Далее происходит чтение от 4 до 12 лишних байт, которые могут быть не
+   * только за пределами региона выделенного под PNL, но и пересекать границу
+   * страницы памяти. Что может приводить как к ошибкам ASAN, так и к падению.
+   * Поэтому проверяем смещение на странице, а с ASAN всегда страхуемся. */
+#ifdef __SANITIZE_ADDRESS__
+  const unsigned on_page_safe_mask = 0;
+#else
+  const unsigned on_page_safe_mask = 0xff0 /* enough for '-15' bytes offset */;
+#endif
+  if (likely(on_page_safe_mask & (uintptr_t)(range + offset))) {
+    const unsigned extra = (unsigned)(detent + 4 - range);
+    assert(extra > 0 && extra < 4);
+    mask = 0xF << extra;
+    mask &= diffcmp2mask_sse2(range - 3, offset, pattern);
+    if (mask) {
+    found:;
+#ifdef _MSC_VER
+      unsigned long index;
+      _BitScanReverse(&index, mask);
+#else
+      const unsigned index = __builtin_clz(mask);
+#endif /* _MSC_VER */
+      range = range + 28 - index;
+      return range;
+    }
+    return nullptr;
+  }
+  do
+    if (*range - range[offset] == target)
+      return range;
+  while (--range != detent);
+  return nullptr;
+}
+#endif /* MDBX_ATTRIBUTE_TARGET_SSE2 */
+
+#if defined(__AVX512BW__) && defined(MDBX_ATTRIBUTE_TARGET_AVX512)
+#define scan4seq_default scan4seq_avx512bw
+#define scan4seq scan4seq_default
+#elif defined(__AVX2__) && defined(MDBX_ATTRIBUTE_TARGET_AVX2)
+#define scan4seq_default scan4seq_avx2
+#elif defined(__SSE2__) && defined(MDBX_ATTRIBUTE_TARGET_SSE2)
+#define scan4seq_default scan4seq_sse2
+/* Choosing of another variants should be added here. */
+#endif /* scan4seq_default */
+
+#ifndef scan4seq_default
+#define scan4seq_default scan4seq_fallback
+#endif /* scan4seq_default */
+
+#ifdef scan4seq
+/* The scan4seq() is the best or no alternatives */
+#else
+#if !(__has_builtin(__builtin_cpu_supports) ||                                 \
+      defined(__BUILTIN_CPU_SUPPORTS__) ||                                     \
+      (defined(__ia32__) && __GNUC_PREREQ(4, 8) && __GLIBC_PREREQ(2, 23)))
+/* The scan4seq_default() will be used  since no cpu-features detection support
+ * from compiler. Please don't ask to implement cpuid-based detection and don't
+ * make such PRs. */
+#define scan4seq scan4seq_default
+#else
+/* Selecting the most appropriate implementation at runtime,
+ * depending on the available CPU features. */
+static pgno_t *scan4seq_resolver(pgno_t *range, const size_t len,
+                                 const unsigned seq);
+static pgno_t *(*scan4seq)(pgno_t *range, const size_t len,
+                           const unsigned seq) = scan4seq_resolver;
+
+static pgno_t *scan4seq_resolver(pgno_t *range, const size_t len,
+                                 const unsigned seq) {
+  pgno_t *(*choice)(pgno_t * range, const size_t len, const unsigned seq) =
+      nullptr;
+#if __has_builtin(__builtin_cpu_init) || defined(__BUILTIN_CPU_INIT__) ||      \
+    __GNUC_PREREQ(4, 8)
+  __builtin_cpu_init();
+#endif /* __builtin_cpu_init() */
+#ifdef MDBX_ATTRIBUTE_TARGET_SSE2
+  if (__builtin_cpu_supports("sse2"))
+    choice = scan4seq_sse2;
+#endif /* MDBX_ATTRIBUTE_TARGET_SSE2 */
+#ifdef MDBX_ATTRIBUTE_TARGET_AVX2
+  if (__builtin_cpu_supports("avx2"))
+    choice = scan4seq_avx2;
+#endif /* MDBX_ATTRIBUTE_TARGET_AVX2 */
+#ifdef MDBX_ATTRIBUTE_TARGET_AVX512BW
+  if (__builtin_cpu_supports("avx512bw"))
+    choice = scan4seq_avx512;
+#endif /* MDBX_ATTRIBUTE_TARGET_AVX512BW */
+  /* Choosing of another variants should be added here. */
+  scan4seq = choice ? choice : scan4seq_default;
+  return scan4seq(range, len, seq);
+}
+#endif /* __has_builtin(__builtin_cpu_supports */
+#endif /* scan4seq */
+
+//------------------------------------------------------------------------------
 
 /* Allocate page numbers and memory for writing.  Maintain mt_last_reclaimed,
  * mt_reclaimed_pglist and mt_next_pgno.  Set MDBX_TXN_ERROR on failure.
@@ -6622,19 +6219,18 @@ __hot static pgno_t *scan4range(const MDBX_PNL pnl, const unsigned len,
 #define MDBX_ALLOC_NOLOG 32
 #define MDBX_ALLOC_ALL (MDBX_ALLOC_GC | MDBX_ALLOC_NEW)
 
-__cold static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num,
-                                        int flags) {
+static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num, int flags) {
   pgr_t ret;
   MDBX_txn *const txn = mc->mc_txn;
   MDBX_env *const env = txn->mt_env;
   mdbx_assert(env, num == 0 || !(flags & MDBX_ALLOC_SLOT));
   mdbx_assert(env, num > 0 || !(flags & MDBX_ALLOC_NEW));
 
-  const unsigned coalesce_threshold =
-      env->me_maxgc_ov1page - env->me_maxgc_ov1page / 4;
+  const unsigned coalesce_threshold = env->me_maxgc_ov1page >> 2;
   if (likely(flags & MDBX_ALLOC_GC)) {
     flags |= env->me_flags & MDBX_LIFORECLAIM;
-    if (MDBX_PNL_SIZE(txn->tw.reclaimed_pglist) < coalesce_threshold)
+    if (txn->mt_dbs[FREE_DBI].md_branch_pages &&
+        MDBX_PNL_SIZE(txn->tw.reclaimed_pglist) < coalesce_threshold)
       flags |= MDBX_ALLOC_COALESCE;
     if (unlikely(
             /* If mc is updating the GC, then the retired-list cannot play
@@ -6649,9 +6245,8 @@ __cold static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num,
       flags &= ~(MDBX_ALLOC_GC | MDBX_ALLOC_COALESCE);
   }
 
-  mdbx_assert(env,
-              mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                    txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+  mdbx_assert(env, pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                       txn->mt_next_pgno - MDBX_ENABLE_REFUND));
   pgno_t pgno, *re_list = txn->tw.reclaimed_pglist;
   unsigned re_len = MDBX_PNL_SIZE(re_list);
   pgno_t *range = nullptr;
@@ -6668,12 +6263,17 @@ __cold static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num,
 
       /* Seek a big enough contiguous page range.
        * Prefer pages with lower pgno. */
-      mdbx_assert(env, mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                             txn->mt_next_pgno));
+      mdbx_assert(env, pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                           txn->mt_next_pgno));
       if (!(flags & (MDBX_ALLOC_COALESCE | MDBX_ALLOC_SLOT)) && re_len >= num) {
         mdbx_assert(env, MDBX_PNL_LAST(re_list) < txn->mt_next_pgno &&
                              MDBX_PNL_FIRST(re_list) < txn->mt_next_pgno);
-        range = scan4range(re_list, re_len, num);
+        range = re_list + (MDBX_PNL_ASCENDING ? 1 : re_len);
+        pgno = *range;
+        if (num == 1)
+          goto done;
+        range = scan4seq(range, re_len, num - 1);
+        mdbx_tassert(txn, range == scan4range_checker(re_list, num - 1));
         if (likely(range)) {
           pgno = *range;
           goto done;
@@ -6787,7 +6387,7 @@ __cold static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num,
       mdbx_tassert(txn, data.iov_len >= MDBX_PNL_SIZEOF(gc_pnl));
       if (unlikely(data.iov_len % sizeof(pgno_t) ||
                    data.iov_len < MDBX_PNL_SIZEOF(gc_pnl) ||
-                   !mdbx_pnl_check(gc_pnl, txn->mt_next_pgno))) {
+                   !pnl_check(gc_pnl, txn->mt_next_pgno))) {
         ret.err = MDBX_CORRUPTED;
         goto fail;
       }
@@ -6835,10 +6435,9 @@ __cold static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num,
       }
 
       /* Merge in descending sorted order */
-      const unsigned prev_re_len = MDBX_PNL_SIZE(re_list);
-      mdbx_pnl_xmerge(re_list, gc_pnl);
+      pnl_merge(re_list, gc_pnl);
       if (mdbx_audit_enabled() &&
-          unlikely(!mdbx_pnl_check(re_list, txn->mt_next_pgno))) {
+          unlikely(!pnl_check(re_list, txn->mt_next_pgno))) {
         ret.err = MDBX_CORRUPTED;
         goto fail;
       }
@@ -6868,15 +6467,11 @@ __cold static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num,
       }
 
       /* Don't try to coalesce too much. */
-      if (flags & MDBX_ALLOC_COALESCE) {
-        if (re_len /* current size */ > coalesce_threshold ||
-            (re_len > prev_re_len &&
-             re_len - prev_re_len /* delta from prev */ >=
-                 coalesce_threshold / 2)) {
+      if (re_len /* current size */ > coalesce_threshold) {
+        if (flags & MDBX_ALLOC_COALESCE)
           mdbx_trace("clear %s %s", "MDBX_ALLOC_COALESCE",
                      "since got threshold");
-          flags &= ~MDBX_ALLOC_COALESCE;
-        }
+        flags &= ~MDBX_ALLOC_COALESCE;
       }
     }
 
@@ -7005,8 +6600,8 @@ __cold static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num,
           mdbx_osal_monotime() - timestamp;
 #endif /* MDBX_ENABLE_PGOP_STAT */
     mdbx_assert(env,
-                mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                      txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+                pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                    txn->mt_next_pgno - MDBX_ENABLE_REFUND));
     int level;
     const char *what;
     if (likely(!(flags & MDBX_ALLOC_FAKE))) {
@@ -7069,8 +6664,8 @@ done:
 #endif
     MDBX_PNL_SIZE(re_list) = re_len -= num;
     mdbx_tassert(txn,
-                 mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                       txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+                 pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
   } else {
     txn->mt_next_pgno = pgno + num;
     mdbx_assert(env, txn->mt_next_pgno <= txn->mt_end_pgno);
@@ -7092,8 +6687,8 @@ done:
     goto fail;
 
   mdbx_tassert(txn,
-               mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+               pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                   txn->mt_next_pgno - MDBX_ENABLE_REFUND));
   return ret;
 }
 
@@ -7157,9 +6752,9 @@ __hot static pgr_t page_alloc(MDBX_cursor *mc) {
       mdbx_tassert(txn, ret.page->mp_pgno >= NUM_METAS);
 
       ret.err = mdbx_page_dirty(txn, ret.page, 1);
-      mdbx_tassert(
-          txn, mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+      mdbx_tassert(txn,
+                   pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                       txn->mt_next_pgno - MDBX_ENABLE_REFUND));
       return ret;
     }
   }
@@ -7418,7 +7013,9 @@ retry:;
   if (!inside_txn) {
     if (!locked) {
       int err;
+#if MDBX_ENABLE_PGOP_STAT
       unsigned wops = 0;
+#endif /* MDBX_ENABLE_PGOP_STAT */
       /* pre-sync to avoid latency for writer */
       if (unsynced_pages > /* FIXME: define threshold */ 16 &&
           (flags & MDBX_SAFE_NOSYNC) == 0) {
@@ -7447,8 +7044,10 @@ retry:;
         if (unlikely(err != MDBX_SUCCESS))
           return err;
 
-        /* pre-sync done */
+#if MDBX_ENABLE_PGOP_STAT
         wops = 1;
+#endif /* MDBX_ENABLE_PGOP_STAT */
+        /* pre-sync done */
         rc = MDBX_SUCCESS /* means "some data was synced" */;
       }
 
@@ -7787,7 +7386,7 @@ static bind_rslot_result bind_rslot(MDBX_env *env, const uintptr_t tid) {
    * slot, next publish it in lck->mti_numreaders.  After
    * that, it is safe for mdbx_env_close() to touch it.
    * When it will be closed, we can finally claim it. */
-  atomic_store32(&result.rslot->mr_pid, 0, mo_SequentialConsistency);
+  atomic_store32(&result.rslot->mr_pid, 0, mo_AcquireRelease);
   safe64_reset(&result.rslot->mr_txnid, true);
   if (slot == nreaders)
     env->me_lck->mti_numreaders.weak = ++nreaders;
@@ -7918,9 +7517,9 @@ static bool meta_checktxnid(const MDBX_env *env, const volatile MDBX_meta *meta,
     if (unlikely(root_txnid != freedb_mod_txnid)) {
       if (report)
         mdbx_warning(
-            "catch invalid root_page_txnid %" PRIaTXN
+            "catch invalid root_page %" PRIaPGNO " mod_txnid %" PRIaTXN
             " for %sdb.mod_txnid %" PRIaTXN " %s",
-            root_txnid, "free", freedb_mod_txnid,
+            freedb_root_pgno, root_txnid, "free", freedb_mod_txnid,
             "(workaround for incoherent flaw of unified page/buffer cache)");
       ok = false;
     }
@@ -7933,9 +7532,9 @@ static bool meta_checktxnid(const MDBX_env *env, const volatile MDBX_meta *meta,
     if (unlikely(root_txnid != maindb_mod_txnid)) {
       if (report)
         mdbx_warning(
-            "catch invalid root_page_txnid %" PRIaTXN
+            "catch invalid root_page %" PRIaPGNO " mod_txnid %" PRIaTXN
             " for %sdb.mod_txnid %" PRIaTXN " %s",
-            root_txnid, "main", maindb_mod_txnid,
+            maindb_root_pgno, root_txnid, "main", maindb_mod_txnid,
             "(workaround for incoherent flaw of unified page/buffer cache)");
       ok = false;
     }
@@ -7959,6 +7558,7 @@ static int meta_waittxnid(const MDBX_env *env, const volatile MDBX_meta *meta,
     return MDBX_SUCCESS;
 
   if (likely(!is_timeout(timestamp))) {
+    mdbx_memory_fence(mo_AcquireRelease, true);
 #if defined(_WIN32) || defined(_WIN64)
     SwitchToThread();
 #elif defined(__linux__) || defined(__gnu_linux__) || defined(_UNIX03_SOURCE)
@@ -8095,11 +7695,8 @@ static int mdbx_txn_renew0(MDBX_txn *txn, const unsigned flags) {
       txn->mt_dbs[1] = meta->mm_dbs[1];
       txn->mt_canary = meta->mm_canary;
 
-      /* LY: Retry on a race, ITS#7970.
-       * The barrier is not needed here since C11-atomics are used,
-       * but it is reasonable paranoia to avoid compiler misoptimization
-       * and makes clarity for code readers. */
-      mdbx_compiler_barrier();
+      /* LY: Retry on a race, ITS#7970. */
+      mdbx_memory_fence(mo_AcquireRelease, false);
       const txnid_t oldest =
           atomic_load64(&env->me_lck->mti_oldest_reader, mo_AcquireRelease);
       if (unlikely(target_txnid < oldest ||
@@ -8297,13 +7894,17 @@ static __always_inline int check_txn(const MDBX_txn *txn, int bad_bits) {
   if (unlikely(txn->mt_flags & bad_bits))
     return MDBX_BAD_TXN;
 
+  mdbx_tassert(txn, (txn->mt_flags & MDBX_NOTLS) ==
+                        ((txn->mt_flags & MDBX_TXN_RDONLY)
+                             ? txn->mt_env->me_flags & MDBX_NOTLS
+                             : 0));
 #if MDBX_TXN_CHECKOWNER
-  if ((txn->mt_flags & MDBX_NOTLS) == 0 &&
-      unlikely(txn->mt_owner != mdbx_thread_self()))
+  if (unlikely(txn->mt_owner != mdbx_thread_self()) &&
+      (txn->mt_flags & (MDBX_NOTLS | MDBX_TXN_FINISHED)) == 0)
     return txn->mt_owner ? MDBX_THREAD_MISMATCH : MDBX_BAD_TXN;
 #endif /* MDBX_TXN_CHECKOWNER */
 
-  if (unlikely(!txn->mt_env->me_map))
+  if (bad_bits && unlikely(!txn->mt_env->me_map))
     return MDBX_EPERM;
 
   return MDBX_SUCCESS;
@@ -8485,7 +8086,7 @@ int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags,
     txn->tw.dirtyroom = parent->tw.dirtyroom;
     txn->tw.dirtylru = parent->tw.dirtylru;
 
-    mdbx_dpl_sort(parent);
+    dpl_sort(parent);
     if (parent->tw.spill_pages)
       mdbx_spill_purge(parent);
 
@@ -8493,7 +8094,7 @@ int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags,
                           MDBX_PNL_SIZE(parent->tw.reclaimed_pglist));
     memcpy(txn->tw.reclaimed_pglist, parent->tw.reclaimed_pglist,
            MDBX_PNL_SIZEOF(parent->tw.reclaimed_pglist));
-    mdbx_assert(env, mdbx_pnl_check4assert(
+    mdbx_assert(env, pnl_check_allocated(
                          txn->tw.reclaimed_pglist,
                          (txn->mt_next_pgno /* LY: intentional assignment here,
                                                    only for assertion */
@@ -8610,7 +8211,7 @@ int mdbx_txn_info(const MDBX_txn *txn, MDBX_txn_info *info, bool scan_rlt) {
       info->txn_space_limit_hard = pgno2bytes(env, head_meta->mm_geo.upper);
       info->txn_space_leftover =
           pgno2bytes(env, head_meta->mm_geo.now - head_meta->mm_geo.next);
-      mdbx_compiler_barrier();
+      mdbx_memory_fence(mo_AcquireRelease, false);
     } while (unlikely(head_meta != meta_prefer_last(env) ||
                       head_txnid != meta_txnid(env, head_meta)));
 
@@ -8843,9 +8444,9 @@ static void dbi_update(MDBX_txn *txn, int keep) {
 static void mdbx_dpl_sift(MDBX_txn *const txn, MDBX_PNL pl,
                           const bool spilled) {
   if (MDBX_PNL_SIZE(pl) && txn->tw.dirtylist->length) {
-    mdbx_tassert(
-        txn, mdbx_pnl_check4assert(pl, (size_t)txn->mt_next_pgno << spilled));
-    MDBX_dpl *dl = mdbx_dpl_sort(txn);
+    mdbx_tassert(txn,
+                 pnl_check_allocated(pl, (size_t)txn->mt_next_pgno << spilled));
+    MDBX_dpl *dl = dpl_sort(txn);
 
     /* Scanning in ascend order */
     const int step = MDBX_PNL_ASCENDING ? 1 : -1;
@@ -8853,7 +8454,7 @@ static void mdbx_dpl_sift(MDBX_txn *const txn, MDBX_PNL pl,
     const int end = MDBX_PNL_ASCENDING ? MDBX_PNL_SIZE(pl) + 1 : 0;
     mdbx_tassert(txn, pl[begin] <= pl[end - step]);
 
-    unsigned r = mdbx_dpl_search(txn, pl[begin] >> spilled);
+    unsigned r = dpl_search(txn, pl[begin] >> spilled);
     mdbx_tassert(txn, dl->sorted == dl->length);
     for (int i = begin; r <= dl->length;) { /* scan loop */
       assert(i != end);
@@ -8996,9 +8597,9 @@ static int mdbx_txn_end(MDBX_txn *txn, const unsigned mode) {
       mdbx_assert(env, parent->mt_signature == MDBX_MT_SIGNATURE);
       mdbx_assert(env, parent->mt_child == txn &&
                            (parent->mt_flags & MDBX_TXN_HAS_CHILD) != 0);
-      mdbx_assert(
-          env, mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+      mdbx_assert(env,
+                  pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                      txn->mt_next_pgno - MDBX_ENABLE_REFUND));
 
       if (txn->tw.lifo_reclaimed) {
         mdbx_assert(env, MDBX_PNL_SIZE(txn->tw.lifo_reclaimed) >=
@@ -9392,8 +8993,8 @@ retry:
   mdbx_trace("%s", " >> restart");
   int rc = MDBX_SUCCESS;
   mdbx_tassert(txn,
-               mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+               pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                   txn->mt_next_pgno - MDBX_ENABLE_REFUND));
   mdbx_tassert(txn, mdbx_dirtylist_check(txn));
   if (unlikely(/* paranoia */ ctx->loop > ((MDBX_DEBUG > 0) ? 12 : 42))) {
     mdbx_error("too more loops %u, bailout", ctx->loop);
@@ -9427,8 +9028,8 @@ retry:
     }
 
     mdbx_tassert(txn,
-                 mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                       txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+                 pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
     if (ctx->lifo) {
       if (ctx->cleaned_slot < (txn->tw.lifo_reclaimed
                                    ? MDBX_PNL_SIZE(txn->tw.lifo_reclaimed)
@@ -9504,8 +9105,8 @@ retry:
     }
 
     mdbx_tassert(txn,
-                 mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                       txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+                 pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
     mdbx_tassert(txn, mdbx_dirtylist_check(txn));
     if (mdbx_audit_enabled()) {
       rc = mdbx_audit_ex(txn, ctx->retired_stored, false);
@@ -9515,9 +9116,9 @@ retry:
 
     /* return suitable into unallocated space */
     if (mdbx_refund(txn)) {
-      mdbx_tassert(
-          txn, mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+      mdbx_tassert(txn,
+                   pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                       txn->mt_next_pgno - MDBX_ENABLE_REFUND));
       if (mdbx_audit_enabled()) {
         rc = mdbx_audit_ex(txn, ctx->retired_stored, false);
         if (unlikely(rc != MDBX_SUCCESS))
@@ -9571,7 +9172,7 @@ retry:
         mdbx_tassert(txn, count == txn->tw.loose_count);
         MDBX_PNL_SIZE(loose) = count;
         mdbx_pnl_sort(loose, txn->mt_next_pgno);
-        mdbx_pnl_xmerge(txn->tw.reclaimed_pglist, loose);
+        pnl_merge(txn->tw.reclaimed_pglist, loose);
         mdbx_trace("%s: append %u loose-pages to reclaimed-pages",
                    dbg_prefix_mode, txn->tw.loose_count);
       }
@@ -9722,8 +9323,8 @@ retry:
 
     /* handle reclaimed and lost pages - merge and store both into gc */
     mdbx_tassert(txn,
-                 mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                       txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+                 pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
     mdbx_tassert(txn, txn->tw.loose_count == 0);
 
     mdbx_trace("%s", " >> reserving");
@@ -9998,8 +9599,8 @@ retry:
     rc = mdbx_cursor_put(&ctx->cursor.outer, &key, &data,
                          MDBX_RESERVE | MDBX_NOOVERWRITE);
     mdbx_tassert(txn,
-                 mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                       txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+                 pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
     if (unlikely(rc != MDBX_SUCCESS))
       goto bailout;
 
@@ -10033,8 +9634,8 @@ retry:
           : ctx->reused_slot;
   rc = MDBX_SUCCESS;
   mdbx_tassert(txn,
-               mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
-                                     txn->mt_next_pgno - MDBX_ENABLE_REFUND));
+               pnl_check_allocated(txn->tw.reclaimed_pglist,
+                                   txn->mt_next_pgno - MDBX_ENABLE_REFUND));
   mdbx_tassert(txn, mdbx_dirtylist_check(txn));
   if (MDBX_PNL_SIZE(txn->tw.reclaimed_pglist)) {
     MDBX_val key, data;
@@ -10202,7 +9803,7 @@ bailout:
 
 static int mdbx_txn_write(MDBX_txn *txn, struct mdbx_iov_ctx *ctx) {
   MDBX_dpl *const dl =
-      (txn->mt_flags & MDBX_WRITEMAP) ? txn->tw.dirtylist : mdbx_dpl_sort(txn);
+      (txn->mt_flags & MDBX_WRITEMAP) ? txn->tw.dirtylist : dpl_sort(txn);
   int rc = MDBX_SUCCESS;
   unsigned r, w;
   for (w = 0, r = 1; r <= dl->length; ++r) {
@@ -10254,10 +9855,10 @@ int mdbx_txn_commit(MDBX_txn *txn) { return __inline_mdbx_txn_commit(txn); }
 /* Merge child txn into parent */
 static __inline void mdbx_txn_merge(MDBX_txn *const parent, MDBX_txn *const txn,
                                     const unsigned parent_retired_len) {
-  MDBX_dpl *const src = mdbx_dpl_sort(txn);
+  MDBX_dpl *const src = dpl_sort(txn);
 
   /* Remove refunded pages from parent's dirty list */
-  MDBX_dpl *const dst = mdbx_dpl_sort(parent);
+  MDBX_dpl *const dst = dpl_sort(parent);
   if (MDBX_ENABLE_REFUND) {
     unsigned n = dst->length;
     while (n && dst->items[n].pgno >= parent->mt_next_pgno) {
@@ -10368,8 +9969,8 @@ static __inline void mdbx_txn_merge(MDBX_txn *const parent, MDBX_txn *const txn,
         memmove(sl + 1, sl + 1 + i, len * sizeof(sl[0]));
 #endif
       }
-      mdbx_tassert(
-          txn, mdbx_pnl_check4assert(sl, (size_t)parent->mt_next_pgno << 1));
+      mdbx_tassert(txn,
+                   pnl_check_allocated(sl, (size_t)parent->mt_next_pgno << 1));
 
       /* Remove reclaimed pages from parent's spill list */
       s = MDBX_PNL_SIZE(sl), r = MDBX_PNL_SIZE(reclaimed_list);
@@ -10430,8 +10031,8 @@ static __inline void mdbx_txn_merge(MDBX_txn *const parent, MDBX_txn *const txn,
 
   /* Remove anything in our spill list from parent's dirty list */
   if (txn->tw.spill_pages) {
-    mdbx_tassert(txn, mdbx_pnl_check4assert(txn->tw.spill_pages,
-                                            (size_t)parent->mt_next_pgno << 1));
+    mdbx_tassert(txn, pnl_check_allocated(txn->tw.spill_pages,
+                                          (size_t)parent->mt_next_pgno << 1));
     mdbx_dpl_sift(parent, txn->tw.spill_pages, true);
     mdbx_tassert(parent,
                  parent->tw.dirtyroom + parent->tw.dirtylist->length ==
@@ -10583,7 +10184,7 @@ static __inline void mdbx_txn_merge(MDBX_txn *const parent, MDBX_txn *const txn,
   if (txn->tw.spill_pages) {
     if (parent->tw.spill_pages) {
       /* Must not fail since space was preserved above. */
-      mdbx_pnl_xmerge(parent->tw.spill_pages, txn->tw.spill_pages);
+      pnl_merge(parent->tw.spill_pages, txn->tw.spill_pages);
       mdbx_pnl_free(txn->tw.spill_pages);
     } else {
       parent->tw.spill_pages = txn->tw.spill_pages;
@@ -10594,8 +10195,8 @@ static __inline void mdbx_txn_merge(MDBX_txn *const parent, MDBX_txn *const txn,
 
   parent->mt_flags &= ~MDBX_TXN_HAS_CHILD;
   if (parent->tw.spill_pages) {
-    assert(mdbx_pnl_check4assert(parent->tw.spill_pages,
-                                 (size_t)parent->mt_next_pgno << 1));
+    assert(pnl_check_allocated(parent->tw.spill_pages,
+                               (size_t)parent->mt_next_pgno << 1));
     if (MDBX_PNL_SIZE(parent->tw.spill_pages))
       parent->mt_flags |= MDBX_TXN_SPILLS;
   }
@@ -12557,6 +12158,7 @@ __cold static int mdbx_setup_dxb(MDBX_env *env, const int lck_rc,
     }
   } else /* not recovery mode */
     while (1) {
+      mdbx_memory_fence(mo_AcquireRelease, false);
       const unsigned meta_clash_mask = meta_eq_mask(env);
       if (unlikely(meta_clash_mask)) {
         mdbx_error("meta-pages are clashed: mask 0x%d", meta_clash_mask);
@@ -12591,7 +12193,7 @@ __cold static int mdbx_setup_dxb(MDBX_env *env, const int lck_rc,
       MDBX_meta clone;
       const MDBX_meta *const steady = constmeta_prefer_steady(env);
       const MDBX_meta *const head = constmeta_prefer_last(env);
-      const txnid_t steady_txnid = meta_txnid(env, steady);
+      const txnid_t steady_txnid = constmeta_txnid(env, steady);
       if (META_IS_STEADY(steady)) {
         err = mdbx_validate_meta_copy(env, steady, &clone);
         if (unlikely(err != MDBX_SUCCESS)) {
@@ -12606,7 +12208,7 @@ __cold static int mdbx_setup_dxb(MDBX_env *env, const int lck_rc,
       }
 
       const pgno_t pgno = bytes2pgno(env, (uint8_t *)head - env->me_map);
-      const txnid_t head_txnid = meta_txnid(env, head);
+      const txnid_t head_txnid = constmeta_txnid(env, head);
       const bool head_valid =
           mdbx_validate_meta_copy(env, head, &clone) == MDBX_SUCCESS;
       mdbx_assert(env, !META_IS_STEADY(steady) || head_txnid != steady_txnid);
@@ -12750,7 +12352,7 @@ __cold static int mdbx_setup_dxb(MDBX_env *env, const int lck_rc,
         MDBX_meta *const pmeta = METAPAGE(env, n);
         if (unlikely(unaligned_peek_u64(4, &pmeta->mm_magic_and_version) !=
                      MDBX_DATA_MAGIC)) {
-          const txnid_t txnid = meta_txnid(env, pmeta);
+          const txnid_t txnid = constmeta_txnid(env, pmeta);
           mdbx_notice("%s %s"
                       "meta[%u], txnid %" PRIaTXN,
                       "updating db-format signature for",
@@ -12826,7 +12428,7 @@ __cold static int mdbx_setup_dxb(MDBX_env *env, const int lck_rc,
 /******************************************************************************/
 
 /* Open and/or initialize the lock region for the environment. */
-__cold static int mdbx_setup_lck(MDBX_env *env, char *lck_pathname,
+__cold static int mdbx_setup_lck(MDBX_env *env, pathchar_t *lck_pathname,
                                  mdbx_mode_t mode) {
   mdbx_assert(env, env->me_lazy_fd != INVALID_HANDLE_VALUE);
   mdbx_assert(env, env->me_lfd == INVALID_HANDLE_VALUE);
@@ -13209,6 +12811,16 @@ __cold int mdbx_env_turn_for_recovery(MDBX_env *env, unsigned target) {
 
 __cold int mdbx_env_open_for_recovery(MDBX_env *env, const char *pathname,
                                       unsigned target_meta, bool writeable) {
+#if defined(_WIN32) || defined(_WIN64)
+  const wchar_t *pathnameW = nullptr;
+  MUSTDIE_MB2WIDE(pathname, pathnameW);
+  return mdbx_env_open_for_recoveryW(env, pathnameW, target_meta, writeable);
+}
+
+__cold int mdbx_env_open_for_recoveryW(MDBX_env *env, const wchar_t *pathname,
+                                       unsigned target_meta, bool writeable) {
+#endif /* Windows */
+
   if (unlikely(target_meta >= NUM_METAS))
     return MDBX_EINVAL;
   int rc = check_env(env, false);
@@ -13218,35 +12830,49 @@ __cold int mdbx_env_open_for_recovery(MDBX_env *env, const char *pathname,
     return MDBX_EPERM;
 
   env->me_stuck_meta = (int8_t)target_meta;
-  return mdbx_env_open(
-      env, pathname, writeable ? MDBX_EXCLUSIVE : MDBX_EXCLUSIVE | MDBX_RDONLY,
-      0);
+  return
+#if defined(_WIN32) || defined(_WIN64)
+      mdbx_env_openW
+#else
+      mdbx_env_open
+#endif /* Windows */
+      (env, pathname, writeable ? MDBX_EXCLUSIVE : MDBX_EXCLUSIVE | MDBX_RDONLY,
+       0);
 }
 
 typedef struct {
   void *buffer_for_free;
-  char *lck, *dxb;
+  pathchar_t *lck, *dxb;
   size_t ent_len;
 } MDBX_handle_env_pathname;
 
+static bool path_equal(const pathchar_t *l, const pathchar_t *r, size_t len) {
+#if defined(_WIN32) || defined(_WIN64)
+  while (len > 0) {
+    pathchar_t a = *l++;
+    pathchar_t b = *r++;
+    a = (a == '\\') ? '/' : a;
+    b = (b == '\\') ? '/' : b;
+    if (a != b)
+      return false;
+  }
+  return true;
+#else
+  return memcmp(l, r, len * sizeof(pathchar_t)) == 0;
+#endif
+}
+
 __cold static int mdbx_handle_env_pathname(MDBX_handle_env_pathname *ctx,
-                                           const char *pathname,
+                                           const pathchar_t *pathname,
                                            MDBX_env_flags_t *flags,
                                            const mdbx_mode_t mode) {
-  int rc;
   memset(ctx, 0, sizeof(*ctx));
-  if (unlikely(!pathname))
+  if (unlikely(!pathname || !*pathname))
     return MDBX_EINVAL;
 
+  int rc;
 #if defined(_WIN32) || defined(_WIN64)
-  const size_t wlen = mbstowcs(nullptr, pathname, INT_MAX);
-  if (wlen < 1 || wlen > /* MAX_PATH */ INT16_MAX)
-    return ERROR_INVALID_NAME;
-  wchar_t *const pathnameW = _alloca((wlen + 1) * sizeof(wchar_t));
-  if (wlen != mbstowcs(pathnameW, pathname, wlen + 1))
-    return ERROR_INVALID_NAME;
-
-  const DWORD dwAttrib = GetFileAttributesW(pathnameW);
+  const DWORD dwAttrib = GetFileAttributesW(pathname);
   if (dwAttrib == INVALID_FILE_ATTRIBUTES) {
     rc = GetLastError();
     if (rc != MDBX_ENOFILE)
@@ -13256,8 +12882,7 @@ __cold static int mdbx_handle_env_pathname(MDBX_handle_env_pathname *ctx,
       return rc;
 
     /* auto-create directory if requested */
-    if ((*flags & MDBX_NOSUBDIR) == 0 &&
-        !CreateDirectoryW(pathnameW, nullptr)) {
+    if ((*flags & MDBX_NOSUBDIR) == 0 && !CreateDirectoryW(pathname, nullptr)) {
       rc = GetLastError();
       if (rc != ERROR_ALREADY_EXISTS)
         return rc;
@@ -13298,41 +12923,61 @@ __cold static int mdbx_handle_env_pathname(MDBX_handle_env_pathname *ctx,
   }
 #endif
 
-  static const char dxb_name[] = MDBX_DATANAME;
-  static const size_t dxb_name_len = sizeof(dxb_name) - 1;
-  static const char lck_name[] = MDBX_LOCKNAME;
-  static const char lock_suffix[] = MDBX_LOCK_SUFFIX;
+  static const pathchar_t dxb_name[] = MDBX_DATANAME;
+  static const pathchar_t lck_name[] = MDBX_LOCKNAME;
+  static const pathchar_t lock_suffix[] = MDBX_LOCK_SUFFIX;
 
-  ctx->ent_len = strlen(pathname);
-  if ((*flags & MDBX_NOSUBDIR) && ctx->ent_len >= dxb_name_len &&
-      !memcmp(dxb_name, pathname + ctx->ent_len - dxb_name_len, dxb_name_len)) {
+#if defined(_WIN32) || defined(_WIN64)
+  assert(dxb_name[0] == '\\' && lck_name[0] == '\\');
+  const size_t pathname_len = wcslen(pathname);
+#else
+  assert(dxb_name[0] == '/' && lck_name[0] == '/');
+  const size_t pathname_len = strlen(pathname);
+#endif
+  assert(lock_suffix[0] != '\\' && lock_suffix[0] != '/');
+  ctx->ent_len = pathname_len;
+  static const size_t dxb_name_len = ARRAY_LENGTH(dxb_name) - 1;
+  if ((*flags & MDBX_NOSUBDIR) && ctx->ent_len > dxb_name_len &&
+      path_equal(pathname + ctx->ent_len - dxb_name_len, dxb_name,
+                 dxb_name_len)) {
     *flags -= MDBX_NOSUBDIR;
     ctx->ent_len -= dxb_name_len;
   }
 
   const size_t bytes_needed =
-      ctx->ent_len * 2 + ((*flags & MDBX_NOSUBDIR)
-                              ? sizeof(lock_suffix) + 1
-                              : sizeof(lck_name) + sizeof(dxb_name));
+      sizeof(pathchar_t) * ctx->ent_len * 2 +
+      ((*flags & MDBX_NOSUBDIR) ? sizeof(lock_suffix) + sizeof(pathchar_t)
+                                : sizeof(lck_name) + sizeof(dxb_name));
   ctx->buffer_for_free = mdbx_malloc(bytes_needed);
   if (!ctx->buffer_for_free)
     return MDBX_ENOMEM;
 
-  ctx->lck = ctx->buffer_for_free;
+  ctx->dxb = ctx->buffer_for_free;
+  ctx->lck = ctx->dxb + ctx->ent_len + 1;
+  memcpy(ctx->dxb, pathname, sizeof(pathchar_t) * (ctx->ent_len + 1));
   if (*flags & MDBX_NOSUBDIR) {
-    ctx->dxb = ctx->lck + ctx->ent_len + sizeof(lock_suffix);
-    sprintf(ctx->lck, "%s%s", pathname, lock_suffix);
-    strcpy(ctx->dxb, pathname);
+    memcpy(ctx->lck + ctx->ent_len, lock_suffix, sizeof(lock_suffix));
   } else {
-    ctx->dxb = ctx->lck + ctx->ent_len + sizeof(lck_name);
-    sprintf(ctx->lck, "%.*s%s", (int)ctx->ent_len, pathname, lck_name);
-    sprintf(ctx->dxb, "%.*s%s", (int)ctx->ent_len, pathname, dxb_name);
+    ctx->lck += dxb_name_len;
+    memcpy(ctx->lck + ctx->ent_len, lck_name, sizeof(lck_name));
+    memcpy(ctx->dxb + ctx->ent_len, dxb_name, sizeof(dxb_name));
   }
+  memcpy(ctx->lck, pathname, sizeof(pathchar_t) * ctx->ent_len);
 
   return MDBX_SUCCESS;
 }
 
 __cold int mdbx_env_delete(const char *pathname, MDBX_env_delete_mode_t mode) {
+#if defined(_WIN32) || defined(_WIN64)
+  const wchar_t *pathnameW = nullptr;
+  MUSTDIE_MB2WIDE(pathname, pathnameW);
+  return mdbx_env_deleteW(pathnameW, mode);
+}
+
+__cold int mdbx_env_deleteW(const wchar_t *pathname,
+                            MDBX_env_delete_mode_t mode) {
+#endif /* Windows */
+
   switch (mode) {
   default:
     return MDBX_EINVAL;
@@ -13352,7 +12997,7 @@ __cold int mdbx_env_delete(const char *pathname, MDBX_env_delete_mode_t mode) {
       (mode == MDBX_ENV_ENSURE_UNUSED) ? MDBX_EXCLUSIVE : MDBX_ENV_DEFAULTS;
   dummy_env->me_os_psize = (unsigned)mdbx_syspagesize();
   dummy_env->me_psize = (unsigned)mdbx_default_pagesize();
-  dummy_env->me_pathname = (char *)pathname;
+  dummy_env->me_pathname = (pathchar_t *)pathname;
 
   MDBX_handle_env_pathname env_pathname;
   STATIC_ASSERT(sizeof(dummy_env->me_flags) == sizeof(MDBX_env_flags_t));
@@ -13414,6 +13059,16 @@ __cold int mdbx_env_delete(const char *pathname, MDBX_env_delete_mode_t mode) {
 
 __cold int mdbx_env_open(MDBX_env *env, const char *pathname,
                          MDBX_env_flags_t flags, mdbx_mode_t mode) {
+#if defined(_WIN32) || defined(_WIN64)
+  const wchar_t *pathnameW = nullptr;
+  MUSTDIE_MB2WIDE(pathname, pathnameW);
+  return mdbx_env_openW(env, pathnameW, flags, mode);
+}
+
+__cold int mdbx_env_openW(MDBX_env *env, const wchar_t *pathname,
+                          MDBX_env_flags_t flags, mdbx_mode_t mode) {
+#endif /* Windows */
+
   int rc = check_env(env, false);
   if (unlikely(rc != MDBX_SUCCESS))
     return rc;
@@ -13459,7 +13114,7 @@ __cold int mdbx_env_open(MDBX_env *env, const char *pathname,
     goto bailout;
 
   env->me_flags = (flags & ~MDBX_FATAL_ERROR) | MDBX_ENV_ACTIVE;
-  env->me_pathname = mdbx_calloc(env_pathname.ent_len + 1, 1);
+  env->me_pathname = mdbx_calloc(env_pathname.ent_len + 1, sizeof(pathchar_t));
   env->me_dbxs = mdbx_calloc(env->me_maxdbs, sizeof(MDBX_dbx));
   env->me_dbflags = mdbx_calloc(env->me_maxdbs, sizeof(env->me_dbflags[0]));
   env->me_dbiseqs = mdbx_calloc(env->me_maxdbs, sizeof(env->me_dbiseqs[0]));
@@ -13468,7 +13123,8 @@ __cold int mdbx_env_open(MDBX_env *env, const char *pathname,
     rc = MDBX_ENOMEM;
     goto bailout;
   }
-  memcpy(env->me_pathname, env_pathname.dxb, env_pathname.ent_len);
+  memcpy(env->me_pathname, env_pathname.dxb,
+         env_pathname.ent_len * sizeof(pathchar_t));
   env->me_dbxs[FREE_DBI].md_cmp = cmp_int_align4; /* aligned MDBX_INTEGERKEY */
   env->me_dbxs[FREE_DBI].md_dcmp = cmp_lenfast;
 
@@ -14067,29 +13723,71 @@ static __inline int mdbx_cursor_push(MDBX_cursor *mc, MDBX_page *mp) {
   return MDBX_SUCCESS;
 }
 
-__hot static __noinline MDBX_page *page_lookup_spilled(MDBX_txn *const txn,
-                                                       const pgno_t pgno) {
-  const MDBX_txn *spiller = txn;
-  do {
-    /* Spilled pages were dirtied in this txn and flushed
-     * because the dirty list got full. Bring this page
-     * back in from the map (but don't unspill it here,
-     * leave that unless page_touch happens again). */
-    if (unlikely(spiller->mt_flags & MDBX_TXN_SPILLS) &&
-        mdbx_search_spilled(spiller, pgno))
-      break;
-
-    const unsigned i = mdbx_dpl_search(spiller, pgno);
-    mdbx_tassert(txn, (int)i > 0);
-    if (spiller->tw.dirtylist->items[i].pgno == pgno) {
-      spiller->tw.dirtylist->items[i].lru = txn->tw.dirtylru++;
-      return spiller->tw.dirtylist->items[i].ptr;
+__hot static __always_inline int page_get_checker_lite(const uint16_t ILL,
+                                                       const MDBX_page *page,
+                                                       MDBX_txn *const txn,
+                                                       const txnid_t front) {
+  if (unlikely(page->mp_flags & ILL)) {
+    if (ILL == P_ILL_BITS || (page->mp_flags & P_ILL_BITS))
+      return bad_page(page, "invalid page's flags (%u)\n", page->mp_flags);
+    else if (ILL & P_OVERFLOW) {
+      assert((ILL & (P_BRANCH | P_LEAF | P_LEAF2)) == 0);
+      assert(page->mp_flags & (P_BRANCH | P_LEAF | P_LEAF2));
+      return bad_page(page, "unexpected %s instead of %s (%u)\n",
+                      "large/overlow", "branch/leaf/leaf2", page->mp_flags);
+    } else if (ILL & (P_BRANCH | P_LEAF | P_LEAF2)) {
+      assert((ILL & P_BRANCH) && (ILL & P_LEAF) && (ILL & P_LEAF2));
+      assert(page->mp_flags & (P_BRANCH | P_LEAF | P_LEAF2));
+      return bad_page(page, "unexpected %s instead of %s (%u)\n",
+                      "branch/leaf/leaf2", "large/overlow", page->mp_flags);
+    } else {
+      assert(false);
     }
+  }
 
-    spiller = spiller->mt_parent;
-  } while (spiller);
+  if (unlikely(page->mp_txnid > front) &&
+      unlikely(page->mp_txnid > txn->mt_front || front < txn->mt_txnid))
+    return bad_page(
+        page,
+        "invalid page' txnid (%" PRIaTXN ") for %s' txnid (%" PRIaTXN ")\n",
+        page->mp_txnid,
+        (front == txn->mt_front && front != txn->mt_txnid) ? "front-txn"
+                                                           : "parent-page",
+        front);
 
-  return pgno2page(txn->mt_env, pgno);
+  if (((ILL & P_OVERFLOW) || !IS_OVERFLOW(page)) &&
+      (ILL & (P_BRANCH | P_LEAF | P_LEAF2)) == 0) {
+    if (unlikely(page->mp_upper < page->mp_lower ||
+                 ((page->mp_lower | page->mp_upper) & 1) ||
+                 PAGEHDRSZ + page->mp_upper > txn->mt_env->me_psize))
+      return bad_page(page, "invalid page' lower(%u)/upper(%u) with limit %u\n",
+                      page->mp_lower, page->mp_upper, page_space(txn->mt_env));
+
+  } else if ((ILL & P_OVERFLOW) == 0) {
+    const pgno_t npages = page->mp_pages;
+    if (unlikely(npages < 1) || unlikely(npages >= MAX_PAGENO / 2))
+      return bad_page(page, "invalid n-pages (%u) for large-page\n", npages);
+    if (unlikely(page->mp_pgno + npages > txn->mt_next_pgno))
+      return bad_page(
+          page,
+          "end of large-page beyond (%u) allocated space (%u next-pgno)\n",
+          page->mp_pgno + npages, txn->mt_next_pgno);
+  } else {
+    assert(false);
+  }
+  return MDBX_SUCCESS;
+}
+
+__cold static __noinline pgr_t page_get_checker_full(const uint16_t ILL,
+                                                     MDBX_page *page,
+                                                     MDBX_cursor *const mc,
+                                                     const txnid_t front) {
+  pgr_t r = {page, page_get_checker_lite(ILL, page, mc->mc_txn, front)};
+  if (likely(r.err == MDBX_SUCCESS))
+    r.err = mdbx_page_check(mc, page);
+  if (unlikely(r.err != MDBX_SUCCESS))
+    mc->mc_txn->mt_flags |= MDBX_TXN_ERROR;
+  return r;
 }
 
 __hot static __always_inline pgr_t page_get_inline(const uint16_t ILL,
@@ -14102,93 +13800,56 @@ __hot static __always_inline pgr_t page_get_inline(const uint16_t ILL,
   pgr_t r;
   if (unlikely(pgno >= txn->mt_next_pgno)) {
     mdbx_error("page #%" PRIaPGNO " beyond next-pgno", pgno);
-  notfound:
     r.page = nullptr;
     r.err = MDBX_PAGE_NOTFOUND;
   bailout:
-    mc->mc_txn->mt_flags |= MDBX_TXN_ERROR;
+    txn->mt_flags |= MDBX_TXN_ERROR;
     return r;
   }
 
+  mdbx_assert(txn->mt_env,
+              ((txn->mt_flags ^ txn->mt_env->me_flags) & MDBX_WRITEMAP) == 0);
   r.page = pgno2page(txn->mt_env, pgno);
-  if (unlikely((txn->mt_flags & (MDBX_TXN_RDONLY | MDBX_WRITEMAP)) == 0))
-    r.page = page_lookup_spilled(txn, pgno);
+  if ((txn->mt_flags & (MDBX_TXN_RDONLY | MDBX_WRITEMAP)) == 0) {
+    const MDBX_txn *spiller = txn;
+    do {
+      /* Spilled pages were dirtied in this txn and flushed
+       * because the dirty list got full. Bring this page
+       * back in from the map (but don't unspill it here,
+       * leave that unless page_touch happens again). */
+      if (unlikely(spiller->mt_flags & MDBX_TXN_SPILLS) &&
+          mdbx_search_spilled(spiller, pgno))
+        break;
 
-  MDBX_env *const env = txn->mt_env;
-  mdbx_assert(env, ((txn->mt_flags ^ env->me_flags) & MDBX_WRITEMAP) == 0);
+      const unsigned i = dpl_search(spiller, pgno);
+      mdbx_tassert(txn, (int)i > 0);
+      if (spiller->tw.dirtylist->items[i].pgno == pgno) {
+        spiller->tw.dirtylist->items[i].lru = txn->tw.dirtylru++;
+        r.page = spiller->tw.dirtylist->items[i].ptr;
+        break;
+      }
+
+      spiller = spiller->mt_parent;
+    } while (spiller);
+  }
 
   if (unlikely(r.page->mp_pgno != pgno)) {
     r.err = bad_page(
         r.page, "pgno mismatch (%" PRIaPGNO ") != expected (%" PRIaPGNO ")\n",
         r.page->mp_pgno, pgno);
-    goto notfound;
-  }
-
-#if !MDBX_DISABLE_VALIDATION
-  if (unlikely(r.page->mp_flags & ILL)) {
-    if (ILL == P_ILL_BITS || (r.page->mp_flags & P_ILL_BITS))
-      r.err = bad_page(r.page, "invalid page's flags (%u)\n", r.page->mp_flags);
-    else if (ILL & P_OVERFLOW) {
-      assert((ILL & (P_BRANCH | P_LEAF | P_LEAF2)) == 0);
-      assert(r.page->mp_flags & (P_BRANCH | P_LEAF | P_LEAF2));
-      r.err = bad_page(r.page, "unexpected %s instead of %s (%u)\n",
-                       "large/overlow", "branch/leaf/leaf2", r.page->mp_flags);
-    } else if (ILL & (P_BRANCH | P_LEAF | P_LEAF2)) {
-      assert((ILL & P_BRANCH) && (ILL & P_LEAF) && (ILL & P_LEAF2));
-      assert(r.page->mp_flags & (P_BRANCH | P_LEAF | P_LEAF2));
-      r.err = bad_page(r.page, "unexpected %s instead of %s (%u)\n",
-                       "branch/leaf/leaf2", "large/overlow", r.page->mp_flags);
-    } else {
-      assert(false);
-    }
     goto bailout;
   }
 
-  if (unlikely(r.page->mp_txnid > front) &&
-      unlikely(r.page->mp_txnid > txn->mt_front || front < txn->mt_txnid)) {
-    r.err = bad_page(
-        r.page,
-        "invalid page' txnid (%" PRIaTXN ") for %s' txnid (%" PRIaTXN ")\n",
-        r.page->mp_txnid,
-        (front == txn->mt_front && front != txn->mt_txnid) ? "front-txn"
-                                                           : "parent-page",
-        front);
-    goto bailout;
-  }
+  if (unlikely(mc->mc_checking & CC_PAGECHECK))
+    return page_get_checker_full(ILL, r.page, mc, front);
 
-  if (((ILL & P_OVERFLOW) || !IS_OVERFLOW(r.page)) &&
-      (ILL & (P_BRANCH | P_LEAF | P_LEAF2)) == 0) {
-    if (unlikely(r.page->mp_upper < r.page->mp_lower ||
-                 ((r.page->mp_lower | r.page->mp_upper) & 1) ||
-                 PAGEHDRSZ + r.page->mp_upper > env->me_psize)) {
-      r.err =
-          bad_page(r.page, "invalid page' lower(%u)/upper(%u) with limit %u\n",
-                   r.page->mp_lower, r.page->mp_upper, page_space(env));
-      goto bailout;
-    }
-  } else if ((ILL & P_OVERFLOW) == 0) {
-    const pgno_t npages = r.page->mp_pages;
-    if (unlikely(npages < 1 || npages >= MAX_PAGENO / 2)) {
-      r.err = bad_page(r.page, "invalid n-pages (%u) for large-page\n", npages);
-      goto bailout;
-    }
-    if (unlikely(r.page->mp_pgno + npages > txn->mt_next_pgno)) {
-      r.err = bad_page(
-          r.page,
-          "end of large-page beyond (%u) allocated space (%u next-pgno)\n",
-          r.page->mp_pgno + npages, txn->mt_next_pgno);
-      goto bailout;
-    }
-  } else {
-    assert(false);
-  }
-#endif /* !MDBX_DISABLE_VALIDATION */
-
-  if (unlikely(mc->mc_checking & CC_PAGECHECK) &&
-      unlikely(MDBX_SUCCESS != (r.err = mdbx_page_check(mc, r.page))))
-    goto bailout;
-
+#if MDBX_DISABLE_VALIDATION
   r.err = MDBX_SUCCESS;
+#else
+  r.err = page_get_checker_lite(ILL, r.page, txn, front);
+  if (unlikely(r.err != MDBX_SUCCESS))
+    goto bailout;
+#endif /* MDBX_DISABLE_VALIDATION */
   return r;
 }
 
@@ -16255,7 +15916,7 @@ int mdbx_cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
         flags |= F_DUPDATA;
         do_sub = true;
         if (!insert_key)
-          mdbx_node_del(mc, 0);
+          node_del(mc, 0);
         goto new_sub;
       }
 
@@ -16294,29 +15955,28 @@ int mdbx_cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
         return MDBX_SUCCESS;
       }
     }
-    mdbx_node_del(mc, 0);
+    node_del(mc, 0);
   }
 
   rdata = data;
 
 new_sub:;
-  unsigned nflags = flags & NODE_ADD_FLAGS;
+  const unsigned naf = flags & NODE_ADD_FLAGS;
   size_t nsize = IS_LEAF2(mc->mc_pg[mc->mc_top]) ? key->iov_len
                                                  : leaf_size(env, key, rdata);
   if (page_room(mc->mc_pg[mc->mc_top]) < nsize) {
-    if (!insert_key)
-      nflags |= MDBX_SPLIT_REPLACE;
-    rc = mdbx_page_split(mc, key, rdata, P_INVALID, nflags);
+    rc = page_split(mc, key, rdata, P_INVALID,
+                    insert_key ? naf : naf | MDBX_SPLIT_REPLACE);
     if (rc == MDBX_SUCCESS && mdbx_audit_enabled())
       rc = insert_key ? mdbx_cursor_check(mc) : mdbx_cursor_check_updating(mc);
   } else {
     /* There is room already in this leaf page. */
     if (IS_LEAF2(mc->mc_pg[mc->mc_top])) {
-      mdbx_cassert(mc, (nflags & (F_BIGDATA | F_SUBDATA | F_DUPDATA)) == 0 &&
+      mdbx_cassert(mc, !(naf & (F_BIGDATA | F_SUBDATA | F_DUPDATA)) &&
                            rdata->iov_len == 0);
-      rc = mdbx_node_add_leaf2(mc, mc->mc_ki[mc->mc_top], key);
+      rc = node_add_leaf2(mc, mc->mc_ki[mc->mc_top], key);
     } else
-      rc = mdbx_node_add_leaf(mc, mc->mc_ki[mc->mc_top], key, rdata, nflags);
+      rc = node_add_leaf(mc, mc->mc_ki[mc->mc_top], key, rdata, naf);
     if (likely(rc == 0)) {
       /* Adjust other cursors pointing to mp */
       const MDBX_dbi dbi = mc->mc_dbi;
@@ -16621,9 +16281,9 @@ static pgr_t page_new_large(MDBX_cursor *mc, const unsigned npages) {
   return ret;
 }
 
-static int __must_check_result mdbx_node_add_leaf2(MDBX_cursor *mc,
-                                                   unsigned indx,
-                                                   const MDBX_val *key) {
+__hot static int __must_check_result node_add_leaf2(MDBX_cursor *mc,
+                                                    unsigned indx,
+                                                    const MDBX_val *key) {
   MDBX_page *mp = mc->mc_pg[mc->mc_top];
   DKBUF_DEBUG;
   mdbx_debug("add to leaf2-%spage %" PRIaPGNO " index %i, "
@@ -16658,10 +16318,9 @@ static int __must_check_result mdbx_node_add_leaf2(MDBX_cursor *mc,
   return MDBX_SUCCESS;
 }
 
-static int __must_check_result mdbx_node_add_branch(MDBX_cursor *mc,
-                                                    unsigned indx,
-                                                    const MDBX_val *key,
-                                                    pgno_t pgno) {
+static int __must_check_result node_add_branch(MDBX_cursor *mc, unsigned indx,
+                                               const MDBX_val *key,
+                                               pgno_t pgno) {
   MDBX_page *mp = mc->mc_pg[mc->mc_top];
   DKBUF_DEBUG;
   mdbx_debug("add to branch-%spage %" PRIaPGNO " index %i, node-pgno %" PRIaPGNO
@@ -16702,11 +16361,11 @@ static int __must_check_result mdbx_node_add_branch(MDBX_cursor *mc,
   return MDBX_SUCCESS;
 }
 
-static int __must_check_result mdbx_node_add_leaf(MDBX_cursor *mc,
-                                                  unsigned indx,
-                                                  const MDBX_val *key,
-                                                  MDBX_val *data,
-                                                  unsigned flags) {
+__hot static int __must_check_result node_add_leaf(MDBX_cursor *mc,
+                                                   unsigned indx,
+                                                   const MDBX_val *key,
+                                                   MDBX_val *data,
+                                                   unsigned flags) {
   MDBX_page *mp = mc->mc_pg[mc->mc_top];
   DKBUF_DEBUG;
   mdbx_debug("add to leaf-%spage %" PRIaPGNO " index %i, data size %" PRIuPTR
@@ -16779,22 +16438,19 @@ static int __must_check_result mdbx_node_add_leaf(MDBX_cursor *mc,
 
   void *nodedata = node_data(node);
   if (likely(largepage == NULL)) {
-    if (unlikely(flags & F_BIGDATA))
+    if (unlikely(flags & F_BIGDATA)) {
       memcpy(nodedata, data->iov_base, sizeof(pgno_t));
-    else if (unlikely(flags & MDBX_RESERVE))
-      data->iov_base = nodedata;
-    else if (likely(nodedata != data->iov_base &&
-                    data->iov_len /* to avoid UBSAN traps*/ != 0))
-      memcpy(nodedata, data->iov_base, data->iov_len);
+      return MDBX_SUCCESS;
+    }
   } else {
     poke_pgno(nodedata, largepage->mp_pgno);
     nodedata = page_data(largepage);
-    if (unlikely(flags & MDBX_RESERVE))
-      data->iov_base = nodedata;
-    else if (likely(nodedata != data->iov_base &&
-                    data->iov_len /* to avoid UBSAN traps*/ != 0))
-      memcpy(nodedata, data->iov_base, data->iov_len);
   }
+  if (unlikely(flags & MDBX_RESERVE))
+    data->iov_base = nodedata;
+  else if (likely(nodedata != data->iov_base &&
+                  data->iov_len /* to avoid UBSAN traps*/ != 0))
+    memcpy(nodedata, data->iov_base, data->iov_len);
   return MDBX_SUCCESS;
 }
 
@@ -16802,22 +16458,19 @@ static int __must_check_result mdbx_node_add_leaf(MDBX_cursor *mc,
  * [in] mc Cursor pointing to the node to delete.
  * [in] ksize The size of a node. Only used if the page is
  * part of a MDBX_DUPFIXED database. */
-static void mdbx_node_del(MDBX_cursor *mc, size_t ksize) {
+__hot static void node_del(MDBX_cursor *mc, size_t ksize) {
   MDBX_page *mp = mc->mc_pg[mc->mc_top];
-  int indx = mc->mc_ki[mc->mc_top];
-  int i, j, nkeys, ptr;
-  MDBX_node *node;
-  char *base;
+  const unsigned hole = mc->mc_ki[mc->mc_top];
+  const unsigned nkeys = page_numkeys(mp);
 
-  mdbx_debug("delete node %u on %s page %" PRIaPGNO, indx,
+  mdbx_debug("delete node %u on %s page %" PRIaPGNO, hole,
              IS_LEAF(mp) ? "leaf" : "branch", mp->mp_pgno);
-  nkeys = page_numkeys(mp);
-  mdbx_cassert(mc, indx < nkeys);
+  mdbx_cassert(mc, hole < nkeys);
 
   if (IS_LEAF2(mp)) {
     mdbx_cassert(mc, ksize >= sizeof(indx_t));
-    unsigned diff = nkeys - 1 - indx;
-    base = page_leaf2key(mp, indx, ksize);
+    unsigned diff = nkeys - 1 - hole;
+    char *base = page_leaf2key(mp, hole, ksize);
     if (diff)
       memmove(base, base + ksize, diff * ksize);
     mdbx_cassert(mc, mp->mp_lower >= sizeof(indx_t));
@@ -16828,36 +16481,29 @@ static void mdbx_node_del(MDBX_cursor *mc, size_t ksize) {
     return;
   }
 
-  node = page_node(mp, indx);
-  mdbx_cassert(mc, !IS_BRANCH(mp) || indx || node_ks(node) == 0);
-  size_t sz = NODESIZE + node_ks(node);
-  if (IS_LEAF(mp)) {
-    if (F_ISSET(node_flags(node), F_BIGDATA))
-      sz += sizeof(pgno_t);
-    else
-      sz += node_ds(node);
-  }
-  sz = EVEN(sz);
+  MDBX_node *node = page_node(mp, hole);
+  mdbx_cassert(mc, !IS_BRANCH(mp) || hole || node_ks(node) == 0);
+  size_t hole_size = NODESIZE + node_ks(node);
+  if (IS_LEAF(mp))
+    hole_size +=
+        (node_flags(node) & F_BIGDATA) ? sizeof(pgno_t) : node_ds(node);
+  hole_size = EVEN(hole_size);
 
-  ptr = mp->mp_ptrs[indx];
-  for (i = j = 0; i < nkeys; i++) {
-    if (i != indx) {
-      mp->mp_ptrs[j] = mp->mp_ptrs[i];
-      if (mp->mp_ptrs[i] < ptr) {
-        mdbx_cassert(mc, (size_t)UINT16_MAX - mp->mp_ptrs[j] >= sz);
-        mp->mp_ptrs[j] += (indx_t)sz;
-      }
-      j++;
-    }
-  }
+  const indx_t hole_offset = mp->mp_ptrs[hole];
+  unsigned r, w;
+  for (r = w = 0; r < nkeys; r++)
+    if (r != hole)
+      mp->mp_ptrs[w++] = (mp->mp_ptrs[r] < hole_offset)
+                             ? mp->mp_ptrs[r] + (indx_t)hole_size
+                             : mp->mp_ptrs[r];
 
-  base = (char *)mp + mp->mp_upper + PAGEHDRSZ;
-  memmove(base + sz, base, ptr - mp->mp_upper);
+  char *base = (char *)mp + mp->mp_upper + PAGEHDRSZ;
+  memmove(base + hole_size, base, hole_offset - mp->mp_upper);
 
   mdbx_cassert(mc, mp->mp_lower >= sizeof(indx_t));
   mp->mp_lower -= sizeof(indx_t);
-  mdbx_cassert(mc, (size_t)UINT16_MAX - mp->mp_upper >= sz);
-  mp->mp_upper += (indx_t)sz;
+  mdbx_cassert(mc, (size_t)UINT16_MAX - mp->mp_upper >= hole_size);
+  mp->mp_upper += (indx_t)hole_size;
 
   if (mdbx_audit_enabled()) {
     const uint8_t checking = mc->mc_checking;
@@ -17434,11 +17080,11 @@ static int mdbx_update_key(MDBX_cursor *mc, const MDBX_val *key) {
       /* not enough space left, do a delete and split */
       mdbx_debug("Not enough room, delta = %zd, splitting...", delta);
       pgno_t pgno = node_pgno(node);
-      mdbx_node_del(mc, 0);
-      int rc = mdbx_page_split(mc, key, NULL, pgno, MDBX_SPLIT_REPLACE);
-      if (rc == MDBX_SUCCESS && mdbx_audit_enabled())
-        rc = mdbx_cursor_check_updating(mc);
-      return rc;
+      node_del(mc, 0);
+      int err = page_split(mc, key, NULL, pgno, MDBX_SPLIT_REPLACE);
+      if (err == MDBX_SUCCESS && mdbx_audit_enabled())
+        err = mdbx_cursor_check_updating(mc);
+      return err;
     }
 
     nkeys = page_numkeys(mp);
@@ -17588,8 +17234,7 @@ static int mdbx_node_move(MDBX_cursor *csrc, MDBX_cursor *cdst, bool fromleft) {
                "branch", csrc->mc_ki[csrc->mc_top], DKEY_DEBUG(&key4move),
                psrc->mp_pgno, cdst->mc_ki[cdst->mc_top], pdst->mp_pgno);
     /* Add the node to the destination page. */
-    rc =
-        mdbx_node_add_branch(cdst, cdst->mc_ki[cdst->mc_top], &key4move, srcpg);
+    rc = node_add_branch(cdst, cdst->mc_ki[cdst->mc_top], &key4move, srcpg);
   } break;
 
   case P_LEAF: {
@@ -17609,8 +17254,8 @@ static int mdbx_node_move(MDBX_cursor *csrc, MDBX_cursor *cdst, bool fromleft) {
                "leaf", csrc->mc_ki[csrc->mc_top], DKEY_DEBUG(&key4move),
                psrc->mp_pgno, cdst->mc_ki[cdst->mc_top], pdst->mp_pgno);
     /* Add the node to the destination page. */
-    rc = mdbx_node_add_leaf(cdst, cdst->mc_ki[cdst->mc_top], &key4move, &data,
-                            node_flags(srcnode));
+    rc = node_add_leaf(cdst, cdst->mc_ki[cdst->mc_top], &key4move, &data,
+                       node_flags(srcnode));
   } break;
 
   case P_LEAF | P_LEAF2: {
@@ -17627,7 +17272,7 @@ static int mdbx_node_move(MDBX_cursor *csrc, MDBX_cursor *cdst, bool fromleft) {
                "leaf2", csrc->mc_ki[csrc->mc_top], DKEY_DEBUG(&key4move),
                psrc->mp_pgno, cdst->mc_ki[cdst->mc_top], pdst->mp_pgno);
     /* Add the node to the destination page. */
-    rc = mdbx_node_add_leaf2(cdst, cdst->mc_ki[cdst->mc_top], &key4move);
+    rc = node_add_leaf2(cdst, cdst->mc_ki[cdst->mc_top], &key4move);
   } break;
 
   default:
@@ -17639,7 +17284,7 @@ static int mdbx_node_move(MDBX_cursor *csrc, MDBX_cursor *cdst, bool fromleft) {
     return rc;
 
   /* Delete the node from the source page. */
-  mdbx_node_del(csrc, key4move.iov_len);
+  node_del(csrc, key4move.iov_len);
 
   mdbx_cassert(csrc, psrc == csrc->mc_pg[csrc->mc_top]);
   mdbx_cassert(cdst, pdst == cdst->mc_pg[cdst->mc_top]);
@@ -17815,7 +17460,7 @@ static int mdbx_page_merge(MDBX_cursor *csrc, MDBX_cursor *cdst) {
       key.iov_base = page_data(psrc);
       unsigned i = 0;
       do {
-        rc = mdbx_node_add_leaf2(cdst, j++, &key);
+        rc = node_add_leaf2(cdst, j++, &key);
         if (unlikely(rc != MDBX_SUCCESS))
           return rc;
         key.iov_base = (char *)key.iov_base + key.iov_len;
@@ -17863,10 +17508,10 @@ static int mdbx_page_merge(MDBX_cursor *csrc, MDBX_cursor *cdst) {
           MDBX_val data;
           data.iov_len = node_ds(srcnode);
           data.iov_base = node_data(srcnode);
-          rc = mdbx_node_add_leaf(cdst, j++, &key, &data, node_flags(srcnode));
+          rc = node_add_leaf(cdst, j++, &key, &data, node_flags(srcnode));
         } else {
           mdbx_cassert(csrc, node_flags(srcnode) == 0);
-          rc = mdbx_node_add_branch(cdst, j++, &key, node_pgno(srcnode));
+          rc = node_add_branch(cdst, j++, &key, node_pgno(srcnode));
         }
         if (unlikely(rc != MDBX_SUCCESS))
           return rc;
@@ -17890,7 +17535,7 @@ static int mdbx_page_merge(MDBX_cursor *csrc, MDBX_cursor *cdst) {
 
   /* Unlink the src page from parent and add to free list. */
   csrc->mc_top--;
-  mdbx_node_del(csrc, 0);
+  node_del(csrc, 0);
   if (csrc->mc_ki[csrc->mc_top] == 0) {
     const MDBX_val nullkey = {0, 0};
     rc = mdbx_update_key(csrc, &nullkey);
@@ -18779,7 +18424,7 @@ static int mdbx_cursor_del0(MDBX_cursor *mc) {
   mdbx_cassert(mc, IS_LEAF(mc->mc_pg[mc->mc_top]));
   ki = mc->mc_ki[mc->mc_top];
   mp = mc->mc_pg[mc->mc_top];
-  mdbx_node_del(mc, mc->mc_db->md_xsize);
+  node_del(mc, mc->mc_db->md_xsize);
   mc->mc_db->md_entries--;
 
   /* Adjust other cursors pointing to mp */
@@ -18951,11 +18596,11 @@ static int mdbx_del0(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key,
  * [in] newkey The key for the newly inserted node.
  * [in] newdata The data for the newly inserted node.
  * [in] newpgno The page number, if the new node is a branch node.
- * [in] nflags The NODE_ADD_FLAGS for the new node.
+ * [in] naf The NODE_ADD_FLAGS for the new node.
  * Returns 0 on success, non-zero on failure. */
-static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
-                           MDBX_val *const newdata, pgno_t newpgno,
-                           unsigned nflags) {
+static int page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
+                      MDBX_val *const newdata, pgno_t newpgno,
+                      const unsigned naf) {
   unsigned flags;
   int rc = MDBX_SUCCESS, foliage = 0;
   unsigned i, ptop;
@@ -19017,7 +18662,7 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
     foliage = mc->mc_db->md_depth++;
 
     /* Add left (implicit) pointer. */
-    rc = mdbx_node_add_branch(mc, 0, NULL, mp->mp_pgno);
+    rc = node_add_branch(mc, 0, NULL, mp->mp_pgno);
     if (unlikely(rc != MDBX_SUCCESS)) {
       /* undo the pre-push */
       mc->mc_pg[0] = mc->mc_pg[1];
@@ -19047,7 +18692,7 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
 
   unsigned split_indx =
       (newindx < nkeys)
-          ? /* split at the middle */ (nkeys + 1) / 2
+          ? /* split at the middle */ (nkeys + 1) >> 1
           : /* split at the end (i.e. like append-mode ) */ nkeys - minkeys + 1;
   mdbx_assert(env, split_indx >= minkeys && split_indx <= nkeys - minkeys + 1);
 
@@ -19055,7 +18700,7 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
   /* It is reasonable and possible to split the page at the begin */
   if (unlikely(newindx < minkeys)) {
     split_indx = minkeys;
-    if (newindx == 0 && foliage == 0 && !(nflags & MDBX_SPLIT_REPLACE)) {
+    if (newindx == 0 && foliage == 0 && !(naf & MDBX_SPLIT_REPLACE)) {
       split_indx = 0;
       /* Checking for ability of splitting by the left-side insertion
        * of a pure page with the new key */
@@ -19099,7 +18744,7 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
       char *split, *ins;
       unsigned lsize, rsize, ksize;
       /* Move half of the keys to the right sibling */
-      const int x = mc->mc_ki[mc->mc_top] - split_indx;
+      const int distance = mc->mc_ki[mc->mc_top] - split_indx;
       ksize = mc->mc_db->md_xsize;
       split = page_leaf2key(mp, split_indx, ksize);
       rsize = (nkeys - split_indx) * ksize;
@@ -19114,7 +18759,7 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
       sister->mp_upper -= (indx_t)(rsize - lsize);
       sepkey.iov_len = ksize;
       sepkey.iov_base = (newindx != split_indx) ? split : newkey->iov_base;
-      if (x < 0) {
+      if (distance < 0) {
         mdbx_cassert(mc, ksize >= sizeof(indx_t));
         ins = page_leaf2key(mp, mc->mc_ki[mc->mc_top], ksize);
         memcpy(sister->mp_ptrs, split, rsize);
@@ -19126,16 +18771,16 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
         mdbx_cassert(mc, mp->mp_upper >= ksize - sizeof(indx_t));
         mp->mp_upper -= (indx_t)(ksize - sizeof(indx_t));
       } else {
-        memcpy(sister->mp_ptrs, split, x * ksize);
-        ins = page_leaf2key(sister, x, ksize);
+        memcpy(sister->mp_ptrs, split, distance * ksize);
+        ins = page_leaf2key(sister, distance, ksize);
         memcpy(ins, newkey->iov_base, ksize);
-        memcpy(ins + ksize, split + x * ksize, rsize - x * ksize);
+        memcpy(ins + ksize, split + distance * ksize, rsize - distance * ksize);
         mdbx_cassert(mc, UINT16_MAX - sister->mp_lower >= (int)sizeof(indx_t));
         sister->mp_lower += sizeof(indx_t);
         mdbx_cassert(mc, sister->mp_upper >= ksize - sizeof(indx_t));
         sister->mp_upper -= (indx_t)(ksize - sizeof(indx_t));
-        mdbx_cassert(mc, x <= (int)UINT16_MAX);
-        mc->mc_ki[mc->mc_top] = (indx_t)x;
+        mdbx_cassert(mc, distance <= (int)UINT16_MAX);
+        mc->mc_ki[mc->mc_top] = (indx_t)distance;
       }
 
       if (mdbx_audit_enabled()) {
@@ -19159,11 +18804,11 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
                                           : branch_size(env, newkey);
 
       /* prepare to insert */
-      for (unsigned j = i = 0; i < nkeys; ++i, ++j) {
-        tmp_ki_copy->mp_ptrs[j] = 0;
-        j += (i == newindx);
-        tmp_ki_copy->mp_ptrs[j] = mp->mp_ptrs[i];
-      }
+      for (i = 0; i < newindx; ++i)
+        tmp_ki_copy->mp_ptrs[i] = mp->mp_ptrs[i];
+      tmp_ki_copy->mp_ptrs[i] = (indx_t)-1;
+      while (++i <= nkeys)
+        tmp_ki_copy->mp_ptrs[i] = mp->mp_ptrs[i - 1];
       tmp_ki_copy->mp_pgno = mp->mp_pgno;
       tmp_ki_copy->mp_flags = mp->mp_flags;
       tmp_ki_copy->mp_txnid = INVALID_TXNID;
@@ -19185,20 +18830,22 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
        * будет в каждом ключе, в худшем случае кроме одного, который может быть
        * нулевого размера. */
 
-      if (newindx == split_indx && split_indx + minkeys <= nkeys)
-        split_indx += 1;
+      if (newindx == split_indx && nkeys >= 5) {
+        STATIC_ASSERT(P_BRANCH == 1);
+        split_indx += mp->mp_flags & P_BRANCH;
+      }
       mdbx_assert(env,
-                  split_indx >= minkeys && split_indx <= nkeys - minkeys + 1);
+                  split_indx >= minkeys && split_indx <= nkeys + 1 - minkeys);
       const unsigned dim_nodes =
           (newindx >= split_indx) ? split_indx : nkeys - split_indx;
       const unsigned dim_used = (sizeof(indx_t) + NODESIZE + 1) * dim_nodes;
       if (new_size >= dim_used) {
-        /* Find split point */
+        /* Search for best acceptable split point */
         i = (newindx < split_indx) ? 0 : nkeys;
         int dir = (newindx < split_indx) ? 1 : -1;
         size_t before = 0, after = new_size + page_used(env, mp);
         unsigned best_split = split_indx;
-        unsigned best_offset = INT_MAX;
+        unsigned best_shift = INT_MAX;
 
         mdbx_trace("seek separator from %u, step %i, default %u, new-idx %u, "
                    "new-size %zu",
@@ -19224,11 +18871,13 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
           if (before <= max_space && after <= max_space) {
             const unsigned split = i + (dir > 0);
             if (split >= minkeys && split <= nkeys + 1 - minkeys) {
-              const unsigned offset = branchless_abs(split_indx - split);
-              if (offset >= best_offset)
+              const unsigned shift = branchless_abs(split_indx - split);
+              if (shift >= best_shift)
                 break;
-              best_offset = offset;
+              best_shift = shift;
               best_split = split;
+              if (!best_shift)
+                break;
             }
           }
           i += dir;
@@ -19238,10 +18887,9 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
         mdbx_trace("chosen %u", split_indx);
       }
       mdbx_assert(env,
-                  split_indx >= minkeys && split_indx <= nkeys - minkeys + 1);
+                  split_indx >= minkeys && split_indx <= nkeys + 1 - minkeys);
 
-      sepkey.iov_len = newkey->iov_len;
-      sepkey.iov_base = newkey->iov_base;
+      sepkey = *newkey;
       if (split_indx != newindx) {
         MDBX_node *node =
             (MDBX_node *)((char *)mp + tmp_ki_copy->mp_ptrs[split_indx] +
@@ -19266,7 +18914,7 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
     did_split_parent = true;
     /* We want other splits to find mn when doing fixups */
     WITH_CURSOR_TRACKING(
-        mn, rc = mdbx_page_split(&mn, &sepkey, NULL, sister->mp_pgno, 0));
+        mn, rc = page_split(&mn, &sepkey, NULL, sister->mp_pgno, 0));
     if (unlikely(rc != MDBX_SUCCESS))
       goto done;
     mdbx_cassert(mc, (int)mc->mc_snum - snum == mc->mc_db->md_depth - depth);
@@ -19309,8 +18957,8 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
                ptop_page->mp_pgno, mc->mc_ki[ptop], sister->mp_pgno,
                DKEY(mc->mc_ki[ptop] ? newkey : NULL));
     mc->mc_top--;
-    rc = mdbx_node_add_branch(mc, mc->mc_ki[ptop],
-                              mc->mc_ki[ptop] ? newkey : NULL, sister->mp_pgno);
+    rc = node_add_branch(mc, mc->mc_ki[ptop], mc->mc_ki[ptop] ? newkey : NULL,
+                         sister->mp_pgno);
     mdbx_cassert(mc, mp == mc->mc_pg[ptop + 1] &&
                          newindx == mc->mc_ki[ptop + 1] && ptop == mc->mc_top);
 
@@ -19338,7 +18986,7 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
     mn.mc_top--;
     mdbx_trace("add-to-parent the right-entry[%u] for new sibling-page",
                mn.mc_ki[ptop]);
-    rc = mdbx_node_add_branch(&mn, mn.mc_ki[ptop], &sepkey, sister->mp_pgno);
+    rc = node_add_branch(&mn, mn.mc_ki[ptop], &sepkey, sister->mp_pgno);
     mn.mc_top++;
     if (unlikely(rc != MDBX_SUCCESS))
       goto done;
@@ -19350,12 +18998,12 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
     switch (PAGETYPE_WHOLE(sister)) {
     case P_LEAF: {
       mdbx_cassert(mc, newpgno == 0 || newpgno == P_INVALID);
-      rc = mdbx_node_add_leaf(mc, 0, newkey, newdata, nflags);
+      rc = node_add_leaf(mc, 0, newkey, newdata, naf);
     } break;
     case P_LEAF | P_LEAF2: {
-      mdbx_cassert(mc, (nflags & (F_BIGDATA | F_SUBDATA | F_DUPDATA)) == 0);
+      mdbx_cassert(mc, (naf & (F_BIGDATA | F_SUBDATA | F_DUPDATA)) == 0);
       mdbx_cassert(mc, newpgno == 0 || newpgno == P_INVALID);
-      rc = mdbx_node_add_leaf2(mc, 0, newkey);
+      rc = node_add_leaf2(mc, 0, newkey);
     } break;
     default:
       rc = bad_page(sister, "wrong page-type %u\n", PAGETYPE_WHOLE(sister));
@@ -19390,19 +19038,18 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
     mc->mc_pg[mc->mc_top] = sister;
     i = split_indx;
     unsigned n = 0;
-    pgno_t pgno = 0;
     do {
       mdbx_trace("i %u, nkeys %u => n %u, rp #%u", i, nkeys, n,
                  sister->mp_pgno);
+      pgno_t pgno = 0;
       MDBX_val *rdata = NULL;
       if (i == newindx) {
-        rkey.iov_base = newkey->iov_base;
-        rkey.iov_len = newkey->iov_len;
+        rkey = *newkey;
         if (IS_LEAF(mp))
           rdata = newdata;
         else
           pgno = newpgno;
-        flags = nflags;
+        flags = naf;
         /* Update index for the new key. */
         mc->mc_ki[mc->mc_top] = (indx_t)n;
       } else {
@@ -19423,12 +19070,12 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
       case P_BRANCH: {
         mdbx_cassert(mc, 0 == (uint16_t)flags);
         /* First branch index doesn't need key data. */
-        rc = mdbx_node_add_branch(mc, n, n ? &rkey : NULL, pgno);
+        rc = node_add_branch(mc, n, n ? &rkey : NULL, pgno);
       } break;
       case P_LEAF: {
         mdbx_cassert(mc, pgno == 0);
         mdbx_cassert(mc, rdata != NULL);
-        rc = mdbx_node_add_leaf(mc, n, &rkey, rdata, flags);
+        rc = node_add_leaf(mc, n, &rkey, rdata, flags);
       } break;
       /* case P_LEAF | P_LEAF2: {
         mdbx_cassert(mc, (nflags & (F_BIGDATA | F_SUBDATA | F_DUPDATA)) == 0);
@@ -19507,14 +19154,14 @@ static int mdbx_page_split(MDBX_cursor *mc, const MDBX_val *const newkey,
         m3->mc_ki[k + 1] = m3->mc_ki[k];
         m3->mc_pg[k + 1] = m3->mc_pg[k];
       }
-      m3->mc_ki[0] = (m3->mc_ki[0] >= nkeys) ? 1 : 0;
+      m3->mc_ki[0] = m3->mc_ki[0] >= nkeys;
       m3->mc_pg[0] = mc->mc_pg[0];
       m3->mc_snum++;
       m3->mc_top++;
     }
 
     if (m3->mc_top >= mc->mc_top && m3->mc_pg[mc->mc_top] == mp && !pure_left) {
-      if (m3->mc_ki[mc->mc_top] >= newindx && !(nflags & MDBX_SPLIT_REPLACE))
+      if (m3->mc_ki[mc->mc_top] >= newindx && !(naf & MDBX_SPLIT_REPLACE))
         m3->mc_ki[mc->mc_top]++;
       if (m3->mc_ki[mc->mc_top] >= nkeys) {
         m3->mc_pg[mc->mc_top] = sister;
@@ -19545,7 +19192,7 @@ done:
   else {
     if (mdbx_audit_enabled())
       rc = mdbx_cursor_check_updating(mc);
-    if (unlikely(nflags & MDBX_RESERVE)) {
+    if (unlikely(naf & MDBX_RESERVE)) {
       MDBX_node *node = page_node(mc->mc_pg[mc->mc_top], mc->mc_ki[mc->mc_top]);
       if (!(node_flags(node) & F_BIGDATA))
         newdata->iov_base = node_data(node);
@@ -20018,7 +19665,7 @@ __cold static int mdbx_env_compact(MDBX_env *env, MDBX_txn *read_txn,
       const MDBX_PNL pnl = data.iov_base;
       if (unlikely(data.iov_len % sizeof(pgno_t) ||
                    data.iov_len < MDBX_PNL_SIZEOF(pnl) ||
-                   !(mdbx_pnl_check(pnl, read_txn->mt_next_pgno))))
+                   !(pnl_check(pnl, read_txn->mt_next_pgno))))
         return MDBX_CORRUPTED;
       gc += MDBX_PNL_SIZE(pnl);
     }
@@ -20313,6 +19960,16 @@ __cold int mdbx_env_copy2fd(MDBX_env *env, mdbx_filehandle_t fd,
 
 __cold int mdbx_env_copy(MDBX_env *env, const char *dest_path,
                          MDBX_copy_flags_t flags) {
+#if defined(_WIN32) || defined(_WIN64)
+  const wchar_t *dest_pathW = nullptr;
+  MUSTDIE_MB2WIDE(dest_path, dest_pathW);
+  return mdbx_env_copyW(env, dest_pathW, flags);
+}
+
+LIBMDBX_API int mdbx_env_copyW(MDBX_env *env, const wchar_t *dest_path,
+                               MDBX_copy_flags_t flags) {
+#endif /* Windows */
+
   int rc = check_env(env, true);
   if (unlikely(rc != MDBX_SUCCESS))
     return rc;
@@ -20451,6 +20108,7 @@ __cold int mdbx_env_set_assert(MDBX_env *env, MDBX_assert_func *func) {
 #endif
 }
 
+#if !(defined(_WIN32) || defined(_WIN64))
 __cold int mdbx_env_get_path(const MDBX_env *env, const char **arg) {
   int rc = check_env(env, true);
   if (unlikely(rc != MDBX_SUCCESS))
@@ -20462,6 +20120,19 @@ __cold int mdbx_env_get_path(const MDBX_env *env, const char **arg) {
   *arg = env->me_pathname;
   return MDBX_SUCCESS;
 }
+#else
+__cold int mdbx_env_get_pathW(const MDBX_env *env, const wchar_t **arg) {
+  int rc = check_env(env, true);
+  if (unlikely(rc != MDBX_SUCCESS))
+    return rc;
+
+  if (unlikely(!arg))
+    return MDBX_EINVAL;
+
+  *arg = env->me_pathname;
+  return MDBX_SUCCESS;
+}
+#endif /* Windows */
 
 __cold int mdbx_env_get_fd(const MDBX_env *env, mdbx_filehandle_t *arg) {
   int rc = check_env(env, true);
@@ -20697,6 +20368,7 @@ __cold static int fetch_envinfo_ex(const MDBX_env *env, const MDBX_txn *txn,
   if (unlikely(env->me_flags & MDBX_FATAL_ERROR))
     return MDBX_PANIC;
 
+  mdbx_memory_fence(mo_AcquireRelease, false);
   volatile const MDBX_meta *const recent_meta = meta_prefer_last(env);
   arg->mi_recent_txnid = meta_txnid(env, recent_meta);
   arg->mi_meta0_txnid = meta_txnid(env, meta0);
@@ -21462,7 +21134,7 @@ __cold int mdbx_reader_list(const MDBX_env *env, MDBX_reader_list_func *func,
         const uint64_t head_pages_retired =
             unaligned_peek_u64_volatile(4, recent_meta->mm_pages_retired);
         const txnid_t head_txnid = meta_txnid(env, recent_meta);
-        mdbx_compiler_barrier();
+        mdbx_memory_fence(mo_AcquireRelease, false);
         if (unlikely(recent_meta != meta_prefer_last(env) ||
                      head_pages_retired !=
                          unaligned_peek_u64_volatile(
@@ -21669,6 +21341,7 @@ __cold static txnid_t kick_longlived_readers(MDBX_env *env,
     mdbx_assert(env, oldest >= laggard);
     mdbx_assert(env, oldest >= env->me_lck->mti_oldest_reader.weak);
 
+    mdbx_memory_fence(mo_AcquireRelease, false);
     const txnid_t steady = meta_txnid(env, meta_prefer_steady(env));
     MDBX_lockinfo *const lck = env->me_lck_mmap.lck;
     if (oldest == steady || oldest > laggard || /* without-LCK mode */ !lck)
@@ -21798,6 +21471,7 @@ int mdbx_txn_straggler(const MDBX_txn *txn, int *percent)
       const pgno_t maxpg = meta->mm_geo.now;
       *percent = (int)((meta->mm_geo.next * UINT64_C(100) + maxpg / 2) / maxpg);
     }
+    mdbx_memory_fence(mo_AcquireRelease, false);
   } while (unlikely(recent != meta_txnid(env, meta)));
 
   txnid_t lag = (recent - txn->mt_txnid) / xMDBX_TXNID_STEP;
@@ -23639,6 +23313,9 @@ __dll_export
 #endif /* MDBX_BUILD_TYPE */
     ,
     "MDBX_DEBUG=" MDBX_STRINGIFY(MDBX_DEBUG)
+#ifdef ENABLE_GPROF
+    " ENABLE_GPROF"
+#endif /* ENABLE_GPROF */
     " MDBX_WORDBITS=" MDBX_STRINGIFY(MDBX_WORDBITS)
     " BYTE_ORDER="
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__

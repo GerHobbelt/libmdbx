@@ -195,6 +195,16 @@
 #endif
 #endif /* -Walignment-reduction-ignored */
 
+#ifndef MDBX_EXCLUDE_FOR_GPROF
+#ifdef ENABLE_GPROF
+#define MDBX_EXCLUDE_FOR_GPROF                                                 \
+  __attribute__((__no_instrument_function__,                                   \
+                 __no_profile_instrument_function__))
+#else
+#define MDBX_EXCLUDE_FOR_GPROF
+#endif /* ENABLE_GPROF */
+#endif /* MDBX_EXCLUDE_FOR_GPROF */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -218,8 +228,8 @@ extern LIBMDBX_API const char *const mdbx_sourcery_anchor;
 
 enum MDBX_memory_order {
   mo_Relaxed,
-  mo_AcquireRelease,
-  mo_SequentialConsistency
+  mo_AcquireRelease
+  /* , mo_SequentialConsistency */
 };
 
 typedef union {
@@ -1109,7 +1119,7 @@ struct MDBX_env {
 #define MDBX_ENV_TXKEY UINT32_C(0x10000000)
   /* Legacy MDBX_MAPASYNC (prior v0.9) */
 #define MDBX_DEPRECATED_MAPASYNC UINT32_C(0x100000)
-  /* Legacy MDBX_MAPASYNC (prior v0.12) */
+  /* Legacy MDBX_COALESCE (prior v0.12) */
 #define MDBX_DEPRECATED_COALESCE UINT32_C(0x2000000)
 #define ENV_INTERNAL_FLAGS (MDBX_FATAL_ERROR | MDBX_ENV_ACTIVE | MDBX_ENV_TXKEY)
   uint32_t me_flags;
@@ -1133,7 +1143,7 @@ struct MDBX_env {
   MDBX_dbi me_maxdbs;         /* size of the DB table */
   uint32_t me_pid;            /* process ID of this env */
   mdbx_thread_key_t me_txkey; /* thread-key for readers */
-  char *me_pathname;          /* path to the DB files */
+  pathchar_t *me_pathname;    /* path to the DB files */
   void *me_pbuf;              /* scratch area for DUPSORT put() */
   MDBX_txn *me_txn0;          /* preallocated write transaction */
 

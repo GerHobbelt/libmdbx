@@ -157,12 +157,12 @@
 #define nullptr NULL
 #endif
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_DARWIN_C_SOURCE)
 #include <AvailabilityMacros.h>
+#include <TargetConditionals.h>
 #ifndef MAC_OS_X_VERSION_MIN_REQUIRED
 #define MAC_OS_X_VERSION_MIN_REQUIRED 1070 /* Mac OS X 10.7, 2011 */
 #endif
-#include <TargetConditionals.h>
 #endif /* Apple OSX & iOS */
 
 #if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) ||     \
@@ -306,8 +306,9 @@ __extern_C key_t ftok(const char *, int);
 /* LY: define neutral __ia32__ for x86 and x86-64 */
 #define __ia32__ 1
 #endif /* __ia32__ */
-#if !defined(__amd64__) && (defined(__x86_64) || defined(__x86_64__) ||        \
-                            defined(__amd64) || defined(_M_X64))
+#if !defined(__amd64__) &&                                                     \
+    (defined(__x86_64) || defined(__x86_64__) || defined(__amd64) ||           \
+     defined(_M_X64) || defined(_M_AMD64))
 /* LY: define trusty __amd64__ for all AMD64/x86-64 arch */
 #define __amd64__ 1
 #endif /* __amd64__ */
@@ -376,16 +377,45 @@ __extern_C key_t ftok(const char *, int);
 #endif /* __BYTE_ORDER__ || __ORDER_LITTLE_ENDIAN__ || __ORDER_BIG_ENDIAN__ */
 
 /*----------------------------------------------------------------------------*/
+/* Availability of CMOV or equivalent */
+
+#ifndef MDBX_HAVE_CMOV
+#if defined(__e2k__)
+#define MDBX_HAVE_CMOV 1
+#elif defined(__thumb2__) || defined(__thumb2)
+#define MDBX_HAVE_CMOV 1
+#elif defined(__thumb__) || defined(__thumb) || defined(__TARGET_ARCH_THUMB)
+#define MDBX_HAVE_CMOV 0
+#elif defined(_M_ARM) || defined(_M_ARM64) || defined(__aarch64__) ||          \
+    defined(__aarch64) || defined(__arm__) || defined(__arm) ||                \
+    defined(__CC_ARM)
+#define MDBX_HAVE_CMOV 1
+#elif (defined(__riscv__) || defined(__riscv64)) &&                            \
+    (defined(__riscv_b) || defined(__riscv_bitmanip))
+#define MDBX_HAVE_CMOV 1
+#elif defined(i686) || defined(__i686) || defined(__i686__) ||                 \
+    (defined(_M_IX86) && _M_IX86 > 600) || defined(__x86_64) ||                \
+    defined(__x86_64__) || defined(__amd64__) || defined(__amd64) ||           \
+    defined(_M_X64) || defined(_M_AMD64)
+#define MDBX_HAVE_CMOV 1
+#else
+#define MDBX_HAVE_CMOV 0
+#endif
+#endif /* MDBX_HAVE_CMOV */
+
+/*----------------------------------------------------------------------------*/
 /* Compiler's includes for builtins/intrinsics */
 
 #if defined(_MSC_VER) || defined(__INTEL_COMPILER)
 #include <intrin.h>
 #elif __GNUC_PREREQ(4, 4) || defined(__clang__)
-#if defined(__ia32__) || defined(__e2k__)
+#if defined(__e2k__)
+#include <e2kintrin.h>
 #include <x86intrin.h>
-#endif /* __ia32__ */
+#endif /* __e2k__ */
 #if defined(__ia32__)
 #include <cpuid.h>
+#include <x86intrin.h>
 #endif /* __ia32__ */
 #elif defined(__SUNPRO_C) || defined(__sun) || defined(sun)
 #include <mbarrier.h>
@@ -548,6 +578,8 @@ __extern_C key_t ftok(const char *, int);
     (defined(__linux__) || defined(__gnu_linux__))
 /* just put frequently used functions in separate section */
 #define __hot __attribute__((__section__("text.hot"))) __optimize("O3")
+#elif defined(__LCC__)
+#define __hot __attribute__((__hot__, __optimize__("Ofast,O4")))
 #elif defined(__GNUC__) || __has_attribute(__hot__)
 #define __hot __attribute__((__hot__)) __optimize("O3")
 #else
@@ -567,6 +599,8 @@ __extern_C key_t ftok(const char *, int);
     (defined(__linux__) || defined(__gnu_linux__))
 /* just put infrequently used functions in separate section */
 #define __cold __attribute__((__section__("text.unlikely"))) __optimize("Os")
+#elif defined(__LCC__)
+#define __hot __attribute__((__cold__, __optimize__("Osize")))
 #elif defined(__GNUC__) || __has_attribute(cold)
 #define __cold __attribute__((__cold__)) __optimize("Os")
 #else
@@ -610,6 +644,29 @@ __extern_C key_t ftok(const char *, int);
 #define __anonymous_struct_extension__
 #endif
 #endif /* __anonymous_struct_extension__ */
+
+#ifndef expect_with_probability
+#if defined(__builtin_expect_with_probability) ||                              \
+    __has_builtin(__builtin_expect_with_probability) || __GNUC_PREREQ(9, 0)
+#define expect_with_probability(expr, value, prob)                             \
+  __builtin_expect_with_probability(expr, value, prob)
+#else
+#define expect_with_probability(expr, value, prob) (expr)
+#endif
+#endif /* expect_with_probability */
+
+#ifndef MDBX_WEAK_IMPORT_ATTRIBUTE
+#ifdef WEAK_IMPORT_ATTRIBUTE
+#define MDBX_WEAK_IMPORT_ATTRIBUTE WEAK_IMPORT_ATTRIBUTE
+#elif __has_attribute(__weak__) && __has_attribute(__weak_import__)
+#define MDBX_WEAK_IMPORT_ATTRIBUTE __attribute__((__weak__, __weak_import__))
+#elif __has_attribute(__weak__) ||                                             \
+    (defined(__GNUC__) && __GNUC__ >= 4 && defined(__ELF__))
+#define MDBX_WEAK_IMPORT_ATTRIBUTE __attribute__((__weak__))
+#else
+#define MDBX_WEAK_IMPORT_ATTRIBUTE
+#endif
+#endif /* MDBX_WEAK_IMPORT_ATTRIBUTE */
 
 /*----------------------------------------------------------------------------*/
 
