@@ -175,14 +175,35 @@ __cold static void choice_fcntl() {
 
 #ifndef OFF_T_MAX
 #define OFF_T_MAX                                                              \
-  ((sizeof(off_t) > 4 ? INT64_MAX : INT32_MAX) & ~(size_t)0xffff)
+  (((sizeof(off_t) > 4) ? INT64_MAX : INT32_MAX) & ~(size_t)0xffff)
 #endif
 
-static int lck_op(mdbx_filehandle_t fd, int cmd, int lck, off_t offset,
-                  off_t len) {
+static int lck_op(const mdbx_filehandle_t fd, int cmd, const int lck,
+                  const off_t offset, off_t len) {
+  STATIC_ASSERT(sizeof(off_t) >= sizeof(void *) &&
+                sizeof(off_t) >= sizeof(size_t));
+#ifdef __ANDROID_API__
+  STATIC_ASSERT_MSG((sizeof(off_t) * 8 == MDBX_WORDBITS),
+                    "The bitness of system `off_t` type is mismatch. Please "
+                    "fix build and/or NDK configuration.");
+#endif /* Android */
   mdbx_jitter4testing(true);
+  assert(offset >= 0 && len > 0);
+  assert((uint64_t)offset < (uint64_t)INT64_MAX &&
+         (uint64_t)len < (uint64_t)INT64_MAX &&
+         (uint64_t)(offset + len) > (uint64_t)offset);
+
+  assert((uint64_t)offset < (uint64_t)OFF_T_MAX &&
+         (uint64_t)len <= (uint64_t)OFF_T_MAX &&
+         (uint64_t)(offset + len) <= (uint64_t)OFF_T_MAX);
+
+  assert((uint64_t)((off_t)((uint64_t)offset + (uint64_t)len)) ==
+         ((uint64_t)offset + (uint64_t)len));
   for (;;) {
     struct flock lock_op;
+    STATIC_ASSERT(sizeof(off_t) <= sizeof(lock_op.l_start) &&
+                  sizeof(off_t) <= sizeof(lock_op.l_len) &&
+                  OFF_T_MAX == (off_t)OFF_T_MAX);
     memset(&lock_op, 0, sizeof(lock_op));
     lock_op.l_type = lck;
     lock_op.l_whence = SEEK_SET;
@@ -218,7 +239,7 @@ static int lck_op(mdbx_filehandle_t fd, int cmd, int lck, off_t offset,
     }
 #endif /* MDBX_USE_OFDLOCKS */
     if (rc != EINTR || cmd == op_setlkw) {
-      mdbx_assert(nullptr, MDBX_IS_ERROR(rc));
+      assert(MDBX_IS_ERROR(rc));
       return rc;
     }
   }
@@ -791,11 +812,32 @@ __cold static int mdbx_ipclock_failed(MDBX_env *env, mdbx_ipclock_t *ipc,
   return rc;
 }
 
+#if defined(__ANDROID_API__) || defined(ANDROID) || defined(BIONIC)
+MDBX_INTERNAL_FUNC int mdbx_check_tid4bionic(void) {
+  /* avoid 32-bit Bionic bug/hang with 32-pit TID */
+  if (sizeof(pthread_mutex_t) < sizeof(pid_t) + sizeof(unsigned)) {
+    pid_t tid = gettid();
+    if (unlikely(tid > 0xffff)) {
+      mdbx_fatal("Raise the ENOSYS(%d) error to avoid hang due "
+                 "the 32-bit Bionic/Android bug with tid/thread_id 0x%08x(%i) "
+                 "that don’t fit in 16 bits, see "
+                 "https://android.googlesource.com/platform/bionic/+/master/"
+                 "docs/32-bit-abi.md#is-too-small-for-large-pids",
+                 ENOSYS, tid, tid);
+      return ENOSYS;
+    }
+  }
+  return 0;
+}
+#endif /* __ANDROID_API__ || ANDROID) || BIONIC */
+
 static int mdbx_ipclock_lock(MDBX_env *env, mdbx_ipclock_t *ipc,
                              const bool dont_wait) {
 #if MDBX_LOCKING == MDBX_LOCKING_POSIX2001 ||                                  \
     MDBX_LOCKING == MDBX_LOCKING_POSIX2008
-  int rc = dont_wait ? pthread_mutex_trylock(ipc) : pthread_mutex_lock(ipc);
+  int rc = mdbx_check_tid4bionic();
+  if (likely(rc == 0))
+    rc = dont_wait ? pthread_mutex_trylock(ipc) : pthread_mutex_lock(ipc);
   rc = (rc == EBUSY && dont_wait) ? MDBX_BUSY : rc;
 #elif MDBX_LOCKING == MDBX_LOCKING_POSIX1988
   int rc = MDBX_SUCCESS;

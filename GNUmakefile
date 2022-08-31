@@ -325,6 +325,7 @@ else
 .PHONY: build-test build-test-with-valgrind check cross-gcc cross-qemu dist doxygen gcc-analyzer long-test
 .PHONY: reformat release-assets tags smoke test test-asan smoke-fault test-leak
 .PHONY: smoke-singleprocess test-singleprocess test-ubsan test-valgrind memcheck
+.PHONY: smoke-assertion test-assertion long-test-assertion
 
 define uname2osal
   case "$(UNAME)" in
@@ -380,11 +381,18 @@ MDBX_SMOKE_EXTRA ?=
 check: DESTDIR = $(shell pwd)/@check-install
 check: test dist install
 
+smoke-assertion: MDBX_BUILD_OPTIONS=-DMDBX_FORCE_ASSERTIONS=1
+smoke-assertion: smoke
+test-assertion: MDBX_BUILD_OPTIONS=-DMDBX_FORCE_ASSERTIONS=1
+test-assertion: smoke
+long-test-assertion: MDBX_BUILD_OPTIONS=-DMDBX_FORCE_ASSERTIONS=1
+long-test-assertion: smoke
+
 smoke: build-test
 	@echo '  SMOKE `mdbx_test basic`...'
 	$(QUIET)rm -f $(TEST_DB) $(TEST_LOG).gz && (set -o pipefail; \
 		(./mdbx_test --table=+data.integer --keygen.split=29 --datalen.min=min --datalen.max=max --progress --console=no --repeat=$(TEST_ITER) --pathname=$(TEST_DB) --dont-cleanup-after $(MDBX_SMOKE_EXTRA) basic && \
-		./mdbx_test --mode=-writemap,-nosync-safe,-lifo --progress --console=no --repeat=12 --pathname=$(TEST_DB) --dont-cleanup-after $(MDBX_SMOKE_EXTRA) basic) \
+		./mdbx_test --mode=-writemap,-nosync-safe,-lifo --progress --console=no --repeat=$(TEST_ITER) --pathname=$(TEST_DB) --dont-cleanup-after $(MDBX_SMOKE_EXTRA) basic) \
 		| tee >(gzip --stdout >$(TEST_LOG).gz) | tail -n 42) \
 	&& ./mdbx_chk -vvn $(TEST_DB) && ./mdbx_chk -vvn $(TEST_DB)-copy
 
