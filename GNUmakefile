@@ -371,9 +371,10 @@ MDBX_GIT_VERSION = $(shell set -o pipefail; git describe --tags '--match=v[0-9]*
 MDBX_GIT_REVISION = $(shell set -o pipefail; git rev-list `git describe --tags --abbrev=0`..HEAD --count 2>&- || echo 'Please fetch tags and/or use non-obsolete git version')
 MDBX_GIT_TIMESTAMP = $(shell git show --no-patch --format=%cI HEAD 2>&- || echo 'Please install latest get version')
 MDBX_GIT_DESCRIBE = $(shell git describe --tags --long --dirty=-dirty '--match=v[0-9]*' 2>&- || echo 'Please fetch tags and/or install non-obsolete git version')
-MDBX_VERSION_SUFFIX = $(shell set -o pipefail; echo -n '$(MDBX_GIT_DESCRIBE)' | tr -c -s '[a-zA-Z0-9]' _)
-MDBX_BUILD_SOURCERY = $(shell set -o pipefail; $(MAKE) IOARENA=false CXXSTD= -s src/version.c >/dev/null && (openssl dgst -r -sha256 src/version.c || sha256sum src/version.c || shasum -a 256 src/version.c) 2>/dev/null | cut -d ' ' -f 1 || (echo 'Please install openssl or sha256sum or shasum' >&2 && echo sha256sum_is_no_available))_$(MDBX_VERSION_SUFFIX)
-MDBX_DIST_DIR = libmdbx-$(MDBX_VERSION_SUFFIX)
+MDBX_VERSION_IDENT = $(shell set -o pipefail; echo -n '$(MDBX_GIT_DESCRIBE)' | tr -c -s '[a-zA-Z0-9.]' _)
+MDBX_VERSION_NODOT = $(subst .,_,$(MDBX_VERSION_IDENT))
+MDBX_BUILD_SOURCERY = $(shell set -o pipefail; $(MAKE) IOARENA=false CXXSTD= -s src/version.c >/dev/null && (openssl dgst -r -sha256 src/version.c || sha256sum src/version.c || shasum -a 256 src/version.c) 2>/dev/null | cut -d ' ' -f 1 || (echo 'Please install openssl or sha256sum or shasum' >&2 && echo sha256sum_is_no_available))_$(MDBX_VERSION_NODOT)
+MDBX_DIST_DIR = libmdbx-$(MDBX_VERSION_NODOT)
 
 # Extra options mdbx_test utility
 MDBX_SMOKE_EXTRA ?=
@@ -531,7 +532,7 @@ mdbx-static.o: src/config.h src/version.c src/alloy.c $(ALLOY_DEPS) $(lastword $
 	@echo '  CC $@'
 	$(QUIET)$(CC) $(CFLAGS) $(MDBX_BUILD_OPTIONS) '-DMDBX_CONFIG_H="config.h"' -ULIBMDBX_EXPORTS -c src/alloy.c -o $@
 
-docs/Doxyfile: docs/Doxyfile.in src/version.c
+docs/Doxyfile: docs/Doxyfile.in src/version.c $(lastword $(MAKEFILE_LIST))
 	@echo '  MAKE $@'
 	$(QUIET)sed \
 		-e "s|@MDBX_GIT_TIMESTAMP@|$(MDBX_GIT_TIMESTAMP)|" \
@@ -545,26 +546,26 @@ docs/Doxyfile: docs/Doxyfile.in src/version.c
 	docs/Doxyfile.in >$@
 
 define md-extract-section
-docs/__$(1).md: $(2)
+docs/__$(1).md: $(2) $(lastword $(MAKEFILE_LIST))
 	@echo '  EXTRACT $1'
-	$(QUIET)sed -n '/<!-- section-begin $(1) -->/,/<!-- section-end -->/p' $$< >$$@ && test -s $$@
+	$(QUIET)sed -n '/<!-- section-begin $(1) -->/,/<!-- section-end -->/p' $(2) >$$@ && test -s $$@
 
 endef
 $(foreach section,overview mithril characteristics improvements history usage performance bindings,$(eval $(call md-extract-section,$(section),README.md)))
 
-docs/overall.md: docs/__overview.md docs/_toc.md docs/__mithril.md docs/__history.md AUTHORS LICENSE
+docs/overall.md: docs/__overview.md docs/_toc.md docs/__mithril.md docs/__history.md AUTHORS LICENSE $(lastword $(MAKEFILE_LIST))
 	@echo '  MAKE $@'
 	$(QUIET)echo -e "\\mainpage Overall\n\\section brief Brief" | cat - $(filter %.md, $^) >$@ && echo -e "\n\n\nLicense\n=======\n" | cat AUTHORS - LICENSE >>$@
 
 docs/intro.md: docs/_preface.md docs/__characteristics.md docs/__improvements.md docs/_restrictions.md docs/__performance.md
 	@echo '  MAKE $@'
-	$(QUIET)cat $^ | sed 's/^Performance comparison$$/Performance comparison {#performance}/' >$@
+	$(QUIET)cat $^ | sed 's/^Performance comparison$$/Performance comparison {#performance}/;s/^Improvements beyond LMDB$$/Improvements beyond LMDB {#improvements}/' >$@
 
 docs/usage.md: docs/__usage.md docs/_starting.md docs/__bindings.md
 	@echo '  MAKE $@'
 	$(QUIET)echo -e "\\page usage Usage\n\\section getting Building & Embedding" | cat - $^ | sed 's/^Bindings$$/Bindings {#bindings}/' >$@
 
-doxygen: docs/Doxyfile docs/overall.md docs/intro.md docs/usage.md mdbx.h mdbx.h++ src/options.h ChangeLog.md AUTHORS LICENSE
+doxygen: docs/Doxyfile docs/overall.md docs/intro.md docs/usage.md mdbx.h mdbx.h++ src/options.h ChangeLog.md AUTHORS LICENSE $(lastword $(MAKEFILE_LIST))
 	@echo '  RUNNING doxygen...'
 	$(QUIET)rm -rf docs/html && \
 	cat mdbx.h | tr '\n' '\r' | sed -e 's/LIBMDBX_INLINE_API\s*(\s*\([^,]\+\),\s*\([^,]\+\),\s*(\s*\([^)]\+\)\s*)\s*)\s*{/inline \1 \2(\3) {/g' | tr '\r' '\n' >docs/mdbx.h && \
@@ -578,15 +579,24 @@ mdbx++-static.o: src/config.h src/mdbx.c++ mdbx.h mdbx.h++ $(lastword $(MAKEFILE
 	@echo '  CC $@'
 	$(QUIET)$(CXX) $(CXXFLAGS) $(MDBX_BUILD_OPTIONS) '-DMDBX_CONFIG_H="config.h"' -ULIBMDBX_EXPORTS -c src/mdbx.c++ -o $@
 
-dist: tags dist-checked.tag libmdbx-sources-$(MDBX_VERSION_SUFFIX).tar.gz $(lastword $(MAKEFILE_LIST))
+dist: tags dist-checked.tag libmdbx-sources-$(MDBX_VERSION_IDENT).tar.gz $(lastword $(MAKEFILE_LIST))
 	@echo '  AMALGAMATION is done'
 
 tags:
 	@echo '  FETCH git tags...'
 	$(QUIET)git fetch --tags --force
 
-release-assets: libmdbx-sources-$(MDBX_VERSION_SUFFIX).tar.gz libmdbx-sources-$(MDBX_VERSION_SUFFIX).zip
-	@echo '  RELEASE ASSETS are done'
+release-assets: libmdbx-amalgamated-$(MDBX_GIT_VERSION).zpaq \
+	libmdbx-amalgamated-$(MDBX_GIT_VERSION).tar.xz \
+	libmdbx-amalgamated-$(MDBX_GIT_VERSION).tar.bz2 \
+	libmdbx-amalgamated-$(MDBX_GIT_VERSION).tar.gz \
+	libmdbx-amalgamated-$(subst .,_,$(MDBX_GIT_VERSION)).zip
+	$(QUIET)([ \
+		"$$(set -o pipefail; git describe | sed -n '/^v[0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}$$/p' || echo fail-left)" \
+	== \
+		"$$(git describe --tags --dirty=-dirty || echo fail-right)" ] \
+		|| (echo 'ERROR: Is not a valid release because not in the clean state with a suitable annotated tag!!!' >&2 && false)) \
+	&& echo '  RELEASE ASSETS are done'
 
 dist-checked.tag: $(addprefix dist/, $(DIST_SRC) $(DIST_EXTRA))
 	@echo -n '  VERIFY amalgamated sources...'
@@ -595,13 +605,26 @@ dist-checked.tag: $(addprefix dist/, $(DIST_SRC) $(DIST_EXTRA))
 	&& rm -rf dist-check && cp -r -p dist dist-check && ($(MAKE) IOARENA=false CXXSTD=$(CXXSTD) -C dist-check >dist-check.log 2>dist-check.err || (cat dist-check.err && exit 1)) \
 	&& touch $@ || (echo " FAILED! See dist-check.log and dist-check.err" >&2; exit 2) && echo " Ok"
 
-libmdbx-sources-$(MDBX_VERSION_SUFFIX).tar.gz: dist-checked.tag
+%.tar.gz: dist-checked.tag
 	@echo '  CREATE $@'
 	$(QUIET)$(TAR) -c $(shell LC_ALL=C $(TAR) --help | grep -q -- '--owner' && echo '--owner=0 --group=0') -f - -C dist $(DIST_SRC) $(DIST_EXTRA) | gzip -c -9 >$@
 
-libmdbx-sources-$(MDBX_VERSION_SUFFIX).zip: dist-checked.tag
+%.tar.xz: dist-checked.tag
 	@echo '  CREATE $@'
-	$(QUIET)rm -rf $@ && (cd dist && $(ZIP) -9 ../$@ $(DIST_SRC) $(DIST_EXTRA))
+	$(QUIET)$(TAR) -c $(shell LC_ALL=C $(TAR) --help | grep -q -- '--owner' && echo '--owner=0 --group=0') -f - -C dist $(DIST_SRC) $(DIST_EXTRA) | xz -9 -z >$@
+
+%.tar.bz2: dist-checked.tag
+	@echo '  CREATE $@'
+	$(QUIET)$(TAR) -c $(shell LC_ALL=C $(TAR) --help | grep -q -- '--owner' && echo '--owner=0 --group=0') -f - -C dist $(DIST_SRC) $(DIST_EXTRA) | bzip2 -9 -z >$@
+
+
+%.zip: dist-checked.tag
+	@echo '  CREATE $@'
+	$(QUIET)rm -rf $@ && (cd dist && $(ZIP) -9 ../$@ $(DIST_SRC) $(DIST_EXTRA)) &>zip.log
+
+%.zpaq: dist-checked.tag
+	@echo '  CREATE $@'
+	$(QUIET)rm -rf $@ && (cd dist && zpaq a ../$@ $(DIST_SRC) $(DIST_EXTRA) -m59) &>zpaq.log
 
 dist/mdbx.h: mdbx.h src/version.c $(lastword $(MAKEFILE_LIST))
 	@echo '  COPY $@'
@@ -621,6 +644,7 @@ dist/@tmp-shared_internals.inc: src/version.c $(ALLOY_DEPS) $(lastword $(MAKEFIL
 		-e '/#include "defs.h"/r src/defs.h' \
 		-e '/#include "osal.h"/r src/osal.h' \
 		-e '/#include "options.h"/r src/options.h' \
+		-e '/ clang-format o/d' -e '/ \*INDENT-O/d' \
 		src/internals.h >$@ \
 	&& rm -rf dist/@tmp-sed.inc
 
@@ -630,12 +654,14 @@ dist/mdbx.c: dist/@tmp-shared_internals.inc $(lastword $(MAKEFILE_LIST))
 	&& cat src/core.c src/osal.c src/version.c src/lck-windows.c src/lck-posix.c | sed \
 		-e '/#include "debug_begin.h"/r src/debug_begin.h' \
 		-e '/#include "debug_end.h"/r src/debug_end.h' \
-	) | grep -v -e '#include "' -e '#pragma once' | sed 's|@INCLUDE|#include|' >$@
+	) | sed -e '/#include "/d;/#pragma once/d' -e 's|@INCLUDE|#include|' \
+		-e '/ clang-format o/d;/ \*INDENT-O/d' >$@
 
 dist/mdbx.c++: dist/@tmp-shared_internals.inc src/mdbx.c++ $(lastword $(MAKEFILE_LIST))
 	@echo '  MAKE $@'
 	$(QUIET)mkdir -p dist && (cat dist/@tmp-shared_internals.inc && cat src/mdbx.c++) \
-	| grep -v -e '#include "' -e '#pragma once' | sed 's|@INCLUDE|#include|;s|"mdbx.h"|"mdbx.h++"|' >$@
+	| sed -e '/#include "/d;/#pragma once/d' -e 's|@INCLUDE|#include|;s|"mdbx.h"|"mdbx.h++"|' \
+		-e '/ clang-format o/d;/ \*INDENT-O/d' >$@
 
 define dist-tool-rule
 dist/$(1).c: src/$(1).c src/wingetopt.h src/wingetopt.c \
@@ -644,9 +670,10 @@ dist/$(1).c: src/$(1).c src/wingetopt.h src/wingetopt.c \
 	$(QUIET)mkdir -p dist && sed \
 		-e '/#include "internals.h"/r dist/@tmp-shared_internals.inc' \
 		-e '/#include "wingetopt.h"/r src/wingetopt.c' \
+		-e '/ clang-format o/d' -e '/ \*INDENT-O/d' \
 		src/$(1).c \
-	| grep -v -e '#include "' -e '#pragma once' -e '#define xMDBX_ALLOY' \
-	| sed 's|@INCLUDE|#include|' >$$@
+	| sed -e '/#include "/d;/#pragma once/d;/#define xMDBX_ALLOY/d' -e 's|@INCLUDE|#include|' \
+		-e '/ clang-format o/d;/ \*INDENT-O/d' >$$@
 
 endef
 $(foreach file,$(TOOLS),$(eval $(call dist-tool-rule,$(file))))

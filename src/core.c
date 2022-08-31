@@ -5790,8 +5790,10 @@ static txnid_t mdbx_find_oldest(const MDBX_txn *txn) {
   mdbx_tassert(txn, edge <= txn->mt_txnid);
 
   MDBX_lockinfo *const lck = env->me_lck_mmap.lck;
-  if (unlikely(lck == NULL /* exclusive mode */))
-    return atomic_store64(&lck->mti_oldest_reader, edge, mo_Relaxed);
+  if (unlikely(lck == NULL /* exclusive mode */)) {
+    mdbx_assert(env, env->me_lck == (void *)&env->x_lckless_stub);
+    return env->me_lck->mti_oldest_reader.weak = edge;
+  }
 
   const txnid_t last_oldest =
       atomic_load64(&lck->mti_oldest_reader, mo_AcquireRelease);
@@ -6003,7 +6005,10 @@ __cold static int mdbx_set_readahead(MDBX_env *env, const pgno_t edge,
 #if defined(F_RDADVISE)
       struct radvisory hint;
       hint.ra_offset = offset;
-      hint.ra_count = length;
+      hint.ra_count =
+          unlikely(length > INT_MAX && sizeof(length) > sizeof(hint.ra_count))
+              ? INT_MAX
+              : (int)length;
       (void)/* Ignore ENOTTY for DB on the ram-disk and so on */ fcntl(
           env->me_lazy_fd, F_RDADVISE, &hint);
 #elif defined(MADV_WILLNEED)
@@ -6808,14 +6813,24 @@ no_loose:
     mdbx_assert(env,
                 mdbx_pnl_check4assert(txn->tw.reclaimed_pglist,
                                       txn->mt_next_pgno - MDBX_ENABLE_REFUND));
-    if (likely(!(flags & MDBX_ALLOC_FAKE)))
+    int level;
+    const char *what;
+    if (likely(!(flags & MDBX_ALLOC_FAKE))) {
       txn->mt_flags |= MDBX_TXN_ERROR;
-    if (num != 1 || ret.err != MDBX_NOTFOUND)
-      mdbx_notice("alloc %u pages failed, flags 0x%x, errcode %d", num, flags,
-                  ret.err);
-    else
-      mdbx_trace("alloc %u pages failed, flags 0x%x, errcode %d", num, flags,
-                 ret.err);
+      level = MDBX_LOG_ERROR;
+      what = "pages";
+    } else if (flags & MDBX_ALLOC_SLOT) {
+      level = MDBX_LOG_NOTICE;
+      what = "gc-slot/backlog";
+    } else {
+      level = MDBX_LOG_NOTICE;
+      what = "backlog-pages";
+    }
+    if (mdbx_log_enabled(level))
+      mdbx_debug_log(level, __func__, __LINE__,
+                     "unable alloc %u %s, flags 0x%x, errcode %d\n", num, what,
+                     flags, ret.err);
+
     mdbx_assert(env, ret.err != MDBX_SUCCESS);
     ret.page = NULL;
     return ret;
@@ -6825,8 +6840,8 @@ done:
   mdbx_assert(env, !(flags & MDBX_ALLOC_SLOT));
   mdbx_ensure(env, pgno >= NUM_METAS);
   if (unlikely(flags & MDBX_ALLOC_FAKE)) {
-    mdbx_debug("return NULL-page for %u pages of %s mode", num,
-               "MDBX_ALLOC_FAKE");
+    mdbx_debug("return NULL-page for %u pages %s allocation", num,
+               "gc-slot/backlog");
     ret.page = NULL;
     ret.err = MDBX_SUCCESS;
     return ret;
@@ -8434,8 +8449,11 @@ uint64_t mdbx_txn_id(const MDBX_txn *txn) {
 }
 
 int mdbx_txn_flags(const MDBX_txn *txn) {
-  if (unlikely(!txn || txn->mt_signature != MDBX_MT_SIGNATURE))
+  if (unlikely(!txn || txn->mt_signature != MDBX_MT_SIGNATURE)) {
+    assert((-1 & (int)MDBX_TXN_INVALID) != 0);
     return -1;
+  }
+  assert(0 == (int)(txn->mt_flags & MDBX_TXN_INVALID));
   return txn->mt_flags;
 }
 
@@ -10377,8 +10395,15 @@ int mdbx_txn_commit_ex(MDBX_txn *txn, MDBX_commit_latency *latency) {
       (txn->mt_flags & (MDBX_TXN_DIRTY | MDBX_TXN_SPILLS)) == 0) {
     for (int i = txn->mt_numdbs; --i >= 0;)
       mdbx_tassert(txn, (txn->mt_dbistate[i] & DBI_DIRTY) == 0);
-    rc = MDBX_SUCCESS;
+#if defined(MDBX_NOSUCCESS_EMPTY_COMMIT) && MDBX_NOSUCCESS_EMPTY_COMMIT
+    rc = mdbx_txn_end(txn, end_mode);
+    if (unlikely(rc != MDBX_SUCCESS))
+      goto fail;
+    rc = MDBX_RESULT_TRUE;
+    goto provide_latency;
+#else
     goto done;
+#endif /* MDBX_NOSUCCESS_EMPTY_COMMIT */
   }
 
   mdbx_debug("committing txn %" PRIaTXN " %p on mdbenv %p, root page %" PRIaPGNO
@@ -13807,23 +13832,38 @@ static int mdbx_setup_dbx(MDBX_dbx *const dbx, const MDBX_db *const db,
 
 static int mdbx_fetch_sdb(MDBX_txn *txn, MDBX_dbi dbi) {
   MDBX_cursor_couple couple;
-  if (unlikely(TXN_DBI_CHANGED(txn, dbi)))
+  if (unlikely(TXN_DBI_CHANGED(txn, dbi))) {
+    mdbx_notice("dbi %u was changed for txn %" PRIaTXN, dbi, txn->mt_txnid);
     return MDBX_BAD_DBI;
+  }
   int rc = mdbx_cursor_init(&couple.outer, txn, MAIN_DBI);
   if (unlikely(rc != MDBX_SUCCESS))
     return rc;
 
   MDBX_dbx *const dbx = &txn->mt_dbxs[dbi];
   rc = mdbx_page_search(&couple.outer, &dbx->md_name, 0);
-  if (unlikely(rc != MDBX_SUCCESS))
+  if (unlikely(rc != MDBX_SUCCESS)) {
+  notfound:
+    mdbx_notice("dbi %u refs to inaccessible subDB `%*s` for txn %" PRIaTXN
+                " (err %d)",
+                dbi, (int)dbx->md_name.iov_len,
+                (const char *)dbx->md_name.iov_base, txn->mt_txnid, rc);
     return (rc == MDBX_NOTFOUND) ? MDBX_BAD_DBI : rc;
+  }
 
   MDBX_val data;
   struct node_result nsr = mdbx_node_search(&couple.outer, &dbx->md_name);
-  if (unlikely(!nsr.exact))
-    return MDBX_BAD_DBI;
-  if (unlikely((node_flags(nsr.node) & (F_DUPDATA | F_SUBDATA)) != F_SUBDATA))
+  if (unlikely(!nsr.exact)) {
+    rc = MDBX_NOTFOUND;
+    goto notfound;
+  }
+  if (unlikely((node_flags(nsr.node) & (F_DUPDATA | F_SUBDATA)) != F_SUBDATA)) {
+    mdbx_notice(
+        "dbi %u refs to not a named subDB `%*s` for txn %" PRIaTXN " (%s)", dbi,
+        (int)dbx->md_name.iov_len, (const char *)dbx->md_name.iov_base,
+        txn->mt_txnid, "wrong flags");
     return MDBX_INCOMPATIBLE; /* not a named DB */
+  }
 
   const txnid_t pp_txnid =
       pp_txnid4chk(couple.outer.mc_pg[couple.outer.mc_top], txn);
@@ -13831,15 +13871,26 @@ static int mdbx_fetch_sdb(MDBX_txn *txn, MDBX_dbi dbi) {
   if (unlikely(rc != MDBX_SUCCESS))
     return rc;
 
-  if (unlikely(data.iov_len != sizeof(MDBX_db)))
+  if (unlikely(data.iov_len != sizeof(MDBX_db))) {
+    mdbx_notice(
+        "dbi %u refs to not a named subDB `%*s` for txn %" PRIaTXN " (%s)", dbi,
+        (int)dbx->md_name.iov_len, (const char *)dbx->md_name.iov_base,
+        txn->mt_txnid, "wrong rec-size");
     return MDBX_INCOMPATIBLE; /* not a named DB */
+  }
 
   uint16_t md_flags = UNALIGNED_PEEK_16(data.iov_base, MDBX_db, md_flags);
   /* The txn may not know this DBI, or another process may
    * have dropped and recreated the DB with other flags. */
   MDBX_db *const db = &txn->mt_dbs[dbi];
-  if (unlikely((db->md_flags & DB_PERSISTENT_FLAGS) != md_flags))
+  if (unlikely((db->md_flags & DB_PERSISTENT_FLAGS) != md_flags)) {
+    mdbx_notice("dbi %u refs to the re-created subDB `%*s` for txn %" PRIaTXN
+                " with different flags (present 0x%X != wanna 0x%X)",
+                dbi, (int)dbx->md_name.iov_len,
+                (const char *)dbx->md_name.iov_base, txn->mt_txnid,
+                db->md_flags & DB_PERSISTENT_FLAGS, md_flags);
     return MDBX_INCOMPATIBLE;
+  }
 
   memcpy(db, data.iov_base, sizeof(MDBX_db));
 #if !MDBX_DISABLE_PAGECHECKS
@@ -16863,7 +16914,7 @@ static int mdbx_update_key(MDBX_cursor *mc, const MDBX_val *key) {
   MDBX_node *node;
   char *base;
   size_t len;
-  int delta, ksize, oksize;
+  ptrdiff_t delta, ksize, oksize;
   int ptr, i, nkeys, indx;
   DKBUF_DEBUG;
 
@@ -16889,7 +16940,7 @@ static int mdbx_update_key(MDBX_cursor *mc, const MDBX_val *key) {
   if (delta) {
     if (delta > (int)page_room(mp)) {
       /* not enough space left, do a delete and split */
-      mdbx_debug("Not enough room, delta = %d, splitting...", delta);
+      mdbx_debug("Not enough room, delta = %zd, splitting...", delta);
       pgno_t pgno = node_pgno(node);
       mdbx_node_del(mc, 0);
       int rc = mdbx_page_split(mc, key, NULL, pgno, MDBX_SPLIT_REPLACE);

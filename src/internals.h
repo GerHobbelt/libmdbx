@@ -895,24 +895,14 @@ struct MDBX_txn {
   /* Additional flag for mdbx_sync_locked() */
 #define MDBX_SHRINK_ALLOWED UINT32_C(0x40000000)
 
-  /* internal txn flags */
-#define MDBX_TXN_FINISHED 0x01  /* txn is finished or never began */
-#define MDBX_TXN_ERROR 0x02     /* txn is unusable after an error */
-#define MDBX_TXN_DIRTY 0x04     /* must write, even if dirty list is empty */
-#define MDBX_TXN_SPILLS 0x08    /* txn or a parent has spilled pages */
-#define MDBX_TXN_HAS_CHILD 0x10 /* txn has an MDBX_txn.mt_child */
-  /* most operations on the txn are currently illegal */
-#define MDBX_TXN_BLOCKED                                                       \
-  (MDBX_TXN_FINISHED | MDBX_TXN_ERROR | MDBX_TXN_HAS_CHILD)
-
 #define TXN_FLAGS                                                              \
   (MDBX_TXN_FINISHED | MDBX_TXN_ERROR | MDBX_TXN_DIRTY | MDBX_TXN_SPILLS |     \
-   MDBX_TXN_HAS_CHILD)
+   MDBX_TXN_HAS_CHILD | MDBX_TXN_INVALID)
 
 #if (TXN_FLAGS & (MDBX_TXN_RW_BEGIN_FLAGS | MDBX_TXN_RO_BEGIN_FLAGS)) ||       \
     ((MDBX_TXN_RW_BEGIN_FLAGS | MDBX_TXN_RO_BEGIN_FLAGS | TXN_FLAGS) &         \
      MDBX_SHRINK_ALLOWED)
-#error "Oops, some flags overlapped or wrong"
+#error "Oops, some txn flags overlapped or wrong"
 #endif
   uint32_t mt_flags;
 
@@ -1427,7 +1417,7 @@ MDBX_INTERNAL_FUNC void mdbx_rthc_thread_dtor(void *ptr);
 #define F_ISSET(w, f) (((w) & (f)) == (f))
 
 /* Round n up to an even number. */
-#define EVEN(n) (((n) + 1U) & -2) /* sign-extending -2 to match n+1U */
+#define EVEN(n) (((n) + 1UL) & -2L) /* sign-extending -2 to match n+1U */
 
 /* Default size of memory map.
  * This is certainly too small for any actual applications. Apps should
