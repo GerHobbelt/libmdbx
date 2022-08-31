@@ -2721,6 +2721,7 @@ static __always_inline void dpl_clear(MDBX_dpl *dl) {
   static const MDBX_page dpl_stub_pageB = {{0}, 0, P_BAD, {0}, /* pgno */ 0};
   assert(dpl_stub_pageB.mp_flags == P_BAD && dpl_stub_pageB.mp_pgno == 0);
   dl->sorted = dpl_setlen(dl, 0);
+  dl->pages_including_loose = 0;
   dl->items[0].ptr = (MDBX_page *)&dpl_stub_pageB;
   dl->items[0].pgno = 0;
   dl->items[0].extra = 0;
@@ -2944,15 +2945,20 @@ MDBX_MAYBE_UNUSED static const MDBX_page *debug_dpl_find(const MDBX_txn *txn,
   return nullptr;
 }
 
-static void dpl_remove(const MDBX_txn *txn, unsigned i) {
+static void dpl_remove_ex(const MDBX_txn *txn, unsigned i, unsigned npages) {
   MDBX_dpl *dl = txn->tw.dirtylist;
   assert((int)i > 0 && i <= dl->length);
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
+  dl->pages_including_loose -= npages;
   dl->sorted -= dl->sorted >= i;
   dl->length -= 1;
   memmove(dl->items + i, dl->items + i + 1,
           (dl->length - i + 2) * sizeof(dl->items[0]));
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
+}
+
+static void dpl_remove(const MDBX_txn *txn, unsigned i) {
+  dpl_remove_ex(txn, i, dpl_npages(txn->tw.dirtylist, i));
 }
 
 static __always_inline int __must_check_result dpl_append(MDBX_txn *txn,
@@ -3001,6 +3007,7 @@ static __always_inline int __must_check_result dpl_append(MDBX_txn *txn,
   dl->items[length].lru = txn->tw.dirtylru++;
   dl->length = length;
   dl->sorted = sorted;
+  dl->pages_including_loose += npages;
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
   return MDBX_SUCCESS;
 }
@@ -3118,7 +3125,7 @@ static int __must_check_result read_header(MDBX_env *env, MDBX_meta *meta,
                                            const mdbx_mode_t mode_bits);
 static int __must_check_result sync_locked(MDBX_env *env, unsigned flags,
                                            MDBX_meta *const pending,
-                                           meta_xyz_t *const xyz);
+                                           meta_troika_t *const troika);
 static int env_close(MDBX_env *env);
 
 struct node_result {
@@ -3449,10 +3456,9 @@ const char *mdbx_dump_val(const MDBX_val *key, char *const buf,
 static const char *leafnode_type(MDBX_node *n) {
   static const char *const tp[2][2] = {{"", ": DB"},
                                        {": sub-page", ": sub-DB"}};
-  return F_ISSET(node_flags(n), F_BIGDATA)
+  return (node_flags(n) & F_BIGDATA)
              ? ": large page"
-             : tp[F_ISSET(node_flags(n), F_DUPDATA)]
-                 [F_ISSET(node_flags(n), F_SUBDATA)];
+             : tp[!!(node_flags(n) & F_DUPDATA)][!!(node_flags(n) & F_SUBDATA)];
 }
 
 /* Display all the keys in the page. */
@@ -3512,7 +3518,7 @@ MDBX_MAYBE_UNUSED static void page_list(MDBX_page *mp) {
               DKEY(&key));
       total += nsize;
     } else {
-      if (F_ISSET(node_flags(node), F_BIGDATA))
+      if (node_flags(node) & F_BIGDATA)
         nsize += sizeof(pgno_t);
       else
         nsize += (unsigned)node_ds(node);
@@ -3656,10 +3662,8 @@ static void dlist_free(MDBX_txn *txn) {
   MDBX_env *env = txn->mt_env;
   MDBX_dpl *const dl = txn->tw.dirtylist;
 
-  for (unsigned i = 1; i <= dl->length; i++) {
-    MDBX_page *dp = dl->items[i].ptr;
-    dpage_free(env, dp, dpl_npages(dl, i));
-  }
+  for (unsigned i = 1; i <= dl->length; i++)
+    dpage_free(env, dl->items[i].ptr, dpl_npages(dl, i));
 
   dpl_clear(dl);
 }
@@ -3683,7 +3687,7 @@ MDBX_MAYBE_UNUSED __cold static bool dirtylist_check(MDBX_txn *txn) {
   if (!AUDIT_ENABLED())
     return true;
 
-  unsigned loose = 0;
+  unsigned loose = 0, pages = 0;
   for (unsigned i = dl->length; i > 0; --i) {
     const MDBX_page *const dp = dl->items[i].ptr;
     if (!dp)
@@ -3705,6 +3709,7 @@ MDBX_MAYBE_UNUSED __cold static bool dirtylist_check(MDBX_txn *txn) {
       return false;
 
     const unsigned num = dpl_npages(dl, i);
+    pages += num;
     tASSERT(txn, txn->mt_next_pgno >= dp->mp_pgno + num);
     if (unlikely(txn->mt_next_pgno < dp->mp_pgno + num))
       return false;
@@ -3733,6 +3738,10 @@ MDBX_MAYBE_UNUSED __cold static bool dirtylist_check(MDBX_txn *txn) {
 
   tASSERT(txn, loose == txn->tw.loose_count);
   if (unlikely(loose != txn->tw.loose_count))
+    return false;
+
+  tASSERT(txn, pages == dl->pages_including_loose);
+  if (unlikely(pages != dl->pages_including_loose))
     return false;
 
   for (unsigned i = 1; i <= MDBX_PNL_SIZE(txn->tw.retired_pages); ++i) {
@@ -3830,6 +3839,7 @@ static void refund_loose(MDBX_txn *txn) {
             most, txn->mt_next_pgno);
       txn->tw.loose_count -= refunded;
       txn->tw.dirtyroom += refunded;
+      dl->pages_including_loose -= refunded;
       assert(txn->tw.dirtyroom <= txn->mt_env->me_options.dp_limit);
       txn->mt_next_pgno = most;
 
@@ -3883,6 +3893,7 @@ static void refund_loose(MDBX_txn *txn) {
       dl->sorted = dl->length;
       txn->tw.loose_count -= refunded;
       txn->tw.dirtyroom += refunded;
+      dl->pages_including_loose -= refunded;
       tASSERT(txn, txn->tw.dirtyroom + txn->tw.dirtylist->length ==
                        (txn->mt_parent ? txn->mt_parent->tw.dirtyroom
                                        : txn->mt_env->me_options.dp_limit));
@@ -3982,7 +3993,7 @@ static __inline void page_wash(MDBX_txn *txn, const unsigned di,
                                MDBX_page *const mp, const unsigned npages) {
   tASSERT(txn, di && di <= txn->tw.dirtylist->length &&
                    txn->tw.dirtylist->items[di].ptr == mp);
-  dpl_remove(txn, di);
+  dpl_remove_ex(txn, di, npages);
   txn->tw.dirtyroom++;
   tASSERT(txn, txn->tw.dirtyroom + txn->tw.dirtylist->length ==
                    (txn->mt_parent ? txn->mt_parent->tw.dirtyroom
@@ -5046,10 +5057,9 @@ static __inline bool meta_choice_steady(txnid_t a_txnid, bool a_steady,
   return meta_cmp2steady(meta_cmp2int(a_txnid, b_txnid, 1), a_steady, b_steady);
 }
 
-MDBX_MAYBE_UNUSED static __inline uint8_t meta_cmp2pack(uint8_t c01,
-                                                        uint8_t c02,
-                                                        uint8_t c12, bool s0,
-                                                        bool s1, bool s2) {
+MDBX_MAYBE_UNUSED static uint8_t meta_cmp2pack(uint8_t c01, uint8_t c02,
+                                               uint8_t c12, bool s0, bool s1,
+                                               bool s2) {
   assert(c01 < 3 && c02 < 3 && c12 < 3);
   /* assert(s0 < 2 && s1 < 2 && s2 < 2); */
   const uint8_t recent = meta_cmp2recent(c01, s0, s1)
@@ -5074,7 +5084,14 @@ MDBX_MAYBE_UNUSED static __inline uint8_t meta_cmp2pack(uint8_t c01,
   return tail | recent << 2 | prefer_steady << 4 | strict << 6 | valid << 7;
 }
 
-static const uint8_t xyz_fsm_map[2 * 2 * 2 * 3 * 3 * 3] = {
+static __inline void meta_troika_unpack(meta_troika_t *troika,
+                                        const uint8_t packed) {
+  troika->recent = (packed >> 2) & 3;
+  troika->prefer_steady = (packed >> 4) & 3;
+  troika->tail_and_flags = packed & 0xC3;
+}
+
+static const uint8_t troika_fsm_map[2 * 2 * 2 * 3 * 3 * 3] = {
     232, 201, 216, 216, 232, 233, 232, 232, 168, 201, 216, 152, 168, 233, 232,
     168, 233, 201, 216, 201, 233, 233, 232, 233, 168, 201, 152, 216, 232, 169,
     232, 168, 168, 193, 152, 152, 168, 169, 232, 168, 169, 193, 152, 194, 233,
@@ -5091,27 +5108,24 @@ static const uint8_t xyz_fsm_map[2 * 2 * 2 * 3 * 3 * 3] = {
     214, 228, 198, 212, 214, 150, 194, 214, 150, 164, 193, 212, 150, 194, 194,
     210, 194, 225, 193, 210, 194};
 
-__hot static meta_xyz_t meta_tap(const MDBX_env *env) {
+__hot static meta_troika_t meta_tap(const MDBX_env *env) {
   meta_snap_t snap;
-  meta_xyz_t r;
+  meta_troika_t troika;
   snap = meta_snap(METAPAGE(env, 0));
-  r.txnid[0] = snap.txnid;
-  r.fsm = (uint8_t)snap.is_steady << 0;
+  troika.txnid[0] = snap.txnid;
+  troika.fsm = (uint8_t)snap.is_steady << 0;
   snap = meta_snap(METAPAGE(env, 1));
-  r.txnid[1] = snap.txnid;
-  r.fsm += (uint8_t)snap.is_steady << 1;
-  r.fsm += meta_cmp2int(r.txnid[0], r.txnid[1], 8);
+  troika.txnid[1] = snap.txnid;
+  troika.fsm += (uint8_t)snap.is_steady << 1;
+  troika.fsm += meta_cmp2int(troika.txnid[0], troika.txnid[1], 8);
   snap = meta_snap(METAPAGE(env, 2));
-  r.txnid[2] = snap.txnid;
-  r.fsm += (uint8_t)snap.is_steady << 2;
-  r.fsm += meta_cmp2int(r.txnid[0], r.txnid[2], 8 * 3);
-  r.fsm += meta_cmp2int(r.txnid[1], r.txnid[2], 8 * 3 * 3);
+  troika.txnid[2] = snap.txnid;
+  troika.fsm += (uint8_t)snap.is_steady << 2;
+  troika.fsm += meta_cmp2int(troika.txnid[0], troika.txnid[2], 8 * 3);
+  troika.fsm += meta_cmp2int(troika.txnid[1], troika.txnid[2], 8 * 3 * 3);
 
-  const uint8_t xyz = xyz_fsm_map[r.fsm];
-  r.recent = (xyz >> 2) & 3;
-  r.prefer_steady = (xyz >> 4) & 3;
-  r.tail_and_flags = xyz & 0xC3;
-  return r;
+  meta_troika_unpack(&troika, troika_fsm_map[troika.fsm]);
+  return troika;
 }
 
 static txnid_t recent_committed_txnid(const MDBX_env *env) {
@@ -5121,47 +5135,52 @@ static txnid_t recent_committed_txnid(const MDBX_env *env) {
   return (m0 > m1) ? ((m0 > m2) ? m0 : m2) : ((m1 > m2) ? m1 : m2);
 }
 
-static __inline bool meta_eq(const meta_xyz_t *z, unsigned y, unsigned x) {
-  assert(y < NUM_METAS && x < NUM_METAS);
-  return z->txnid[y] == z->txnid[x] && !(((z->fsm >> y) ^ (z->fsm >> x)) & 1);
+static __inline bool meta_eq(const meta_troika_t *troika, unsigned a,
+                             unsigned b) {
+  assert(a < NUM_METAS && b < NUM_METAS);
+  return troika->txnid[a] == troika->txnid[b] &&
+         (((troika->fsm >> a) ^ (troika->fsm >> b)) & 1) == 0 &&
+         troika->txnid[a];
 }
 
-static unsigned meta_eq_mask(const meta_xyz_t *xyz) {
-  return meta_eq(xyz, 0, 1) | meta_eq(xyz, 1, 2) << 1 | meta_eq(xyz, 2, 0) << 2;
+static unsigned meta_eq_mask(const meta_troika_t *troika) {
+  return meta_eq(troika, 0, 1) | meta_eq(troika, 1, 2) << 1 |
+         meta_eq(troika, 2, 0) << 2;
 }
 
-__hot static bool meta_should_retry(const MDBX_env *env, meta_xyz_t *xyz) {
-  const meta_xyz_t prev = *xyz;
-  *xyz = meta_tap(env);
-  return prev.fsm != xyz->fsm || prev.txnid[0] != xyz->txnid[0] ||
-         prev.txnid[1] != xyz->txnid[1] || prev.txnid[2] != xyz->txnid[2];
+__hot static bool meta_should_retry(const MDBX_env *env,
+                                    meta_troika_t *troika) {
+  const meta_troika_t prev = *troika;
+  *troika = meta_tap(env);
+  return prev.fsm != troika->fsm || prev.txnid[0] != troika->txnid[0] ||
+         prev.txnid[1] != troika->txnid[1] || prev.txnid[2] != troika->txnid[2];
 }
 
 static __always_inline meta_ptr_t meta_recent(const MDBX_env *env,
-                                              const meta_xyz_t *xyz) {
+                                              const meta_troika_t *troika) {
   meta_ptr_t r;
-  r.txnid = xyz->txnid[xyz->recent];
-  r.ptr_v = METAPAGE(env, xyz->recent);
-  r.is_steady = (xyz->fsm >> xyz->recent) & 1;
+  r.txnid = troika->txnid[troika->recent];
+  r.ptr_v = METAPAGE(env, troika->recent);
+  r.is_steady = (troika->fsm >> troika->recent) & 1;
   return r;
 }
 
-static __always_inline meta_ptr_t meta_prefer_steady(const MDBX_env *env,
-                                                     const meta_xyz_t *xyz) {
+static __always_inline meta_ptr_t
+meta_prefer_steady(const MDBX_env *env, const meta_troika_t *troika) {
   meta_ptr_t r;
-  r.txnid = xyz->txnid[xyz->prefer_steady];
-  r.ptr_v = METAPAGE(env, xyz->prefer_steady);
-  r.is_steady = (xyz->fsm >> xyz->prefer_steady) & 1;
+  r.txnid = troika->txnid[troika->prefer_steady];
+  r.ptr_v = METAPAGE(env, troika->prefer_steady);
+  r.is_steady = (troika->fsm >> troika->prefer_steady) & 1;
   return r;
 }
 
 static __always_inline meta_ptr_t meta_tail(const MDBX_env *env,
-                                            const meta_xyz_t *xyz) {
-  const uint8_t tail = xyz->tail_and_flags & 3;
+                                            const meta_troika_t *troika) {
+  const uint8_t tail = troika->tail_and_flags & 3;
   meta_ptr_t r;
-  r.txnid = xyz->txnid[tail];
+  r.txnid = troika->txnid[tail];
   r.ptr_v = METAPAGE(env, tail);
-  r.is_steady = (xyz->fsm >> tail) & 1;
+  r.is_steady = (troika->fsm >> tail) & 1;
   return r;
 }
 
@@ -5172,6 +5191,26 @@ static const char *durable_caption(const volatile MDBX_meta *const meta) {
                ? "Steady"
                : "Tainted";
   return "Weak";
+}
+
+__cold static void meta_troika_dump(const MDBX_env *env,
+                                    const meta_troika_t *troika) {
+  const meta_ptr_t recent = meta_recent(env, troika);
+  const meta_ptr_t prefer_steady = meta_prefer_steady(env, troika);
+  const meta_ptr_t tail = meta_tail(env, troika);
+  NOTICE("%" PRIaTXN ".%c:%" PRIaTXN ".%c:%" PRIaTXN ".%c, fsm=0x%02x, "
+         "head=%d-%" PRIaTXN ".%c, "
+         "base=%d-%" PRIaTXN ".%c, "
+         "tail=%d-%" PRIaTXN ".%c, "
+         "valid %c, strict %c",
+         troika->txnid[0], (troika->fsm & 1) ? 's' : 'w', troika->txnid[1],
+         (troika->fsm & 2) ? 's' : 'w', troika->txnid[2],
+         (troika->fsm & 4) ? 's' : 'w', troika->fsm, troika->recent,
+         recent.txnid, recent.is_steady ? 's' : 'w', troika->prefer_steady,
+         prefer_steady.txnid, prefer_steady.is_steady ? 's' : 'w',
+         troika->tail_and_flags % NUM_METAS, tail.txnid,
+         tail.is_steady ? 's' : 'w', TROIKA_VALID(troika) ? 'Y' : 'N',
+         TROIKA_STRICT_VALID(troika) ? 'Y' : 'N');
 }
 
 /*----------------------------------------------------------------------------*/
@@ -5239,7 +5278,7 @@ static txnid_t find_oldest_reader(MDBX_env *const env, const txnid_t steady) {
 
 static txnid_t txn_oldest_reader(const MDBX_txn *const txn) {
   return find_oldest_reader(txn->mt_env,
-                            txn->tw.xyz.txnid[txn->tw.xyz.prefer_steady]);
+                            txn->tw.troika.txnid[txn->tw.troika.prefer_steady]);
 }
 
 /* Find largest mvcc-snapshot still referenced. */
@@ -5764,10 +5803,10 @@ __cold static int wipe_steady(MDBX_txn *txn, const txnid_t last_steady) {
   /* force oldest refresh */
   atomic_store32(&env->me_lck->mti_readers_refresh_flag, true, mo_Relaxed);
   tASSERT(txn, (txn->mt_flags & MDBX_TXN_RDONLY) == 0);
-  txn->tw.xyz = meta_tap(env);
+  txn->tw.troika = meta_tap(env);
   for (MDBX_txn *scan = txn->mt_env->me_txn0; scan; scan = scan->mt_child)
     if (scan != txn)
-      scan->tw.xyz = txn->tw.xyz;
+      scan->tw.troika = txn->tw.troika;
   return MDBX_SUCCESS;
 }
 
@@ -5864,6 +5903,11 @@ MDBX_MAYBE_UNUSED static __always_inline size_t __builtin_clz(unsigned value) {
   _BitScanReverse(&index, value);
   return index;
 }
+#endif /* _MSC_VER */
+
+#if defined(_MSC_VER) && !defined(__builtin_clzl) &&                           \
+    !__has_builtin(__builtin_clzl)
+#define __builtin_clzl(value) __builtin_clz(value)
 #endif /* _MSC_VER */
 
 #if !defined(MDBX_ATTRIBUTE_TARGET) &&                                         \
@@ -6098,6 +6142,74 @@ scan4seq_avx512bw(pgno_t *range, const size_t len, const unsigned seq) {
 }
 #endif /* MDBX_ATTRIBUTE_TARGET_AVX512BW */
 
+#if (defined(__ARM_NEON) || defined(__ARM_NEON__)) &&                          \
+    (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+static __always_inline size_t diffcmp2mask_neon(const pgno_t *const ptr,
+                                                const ptrdiff_t offset,
+                                                const uint32x4_t pattern) {
+  const uint32x4_t f = vld1q_u32(ptr);
+  const uint32x4_t l = vld1q_u32(ptr + offset);
+  const uint16x4_t cmp = vmovn_u32(vceqq_u32(vsubq_u32(f, l), pattern));
+  if (sizeof(size_t) > 7)
+    return vget_lane_u64(vreinterpret_u64_u16(cmp), 0);
+  else
+    return vget_lane_u32(vreinterpret_u32_u8(vmovn_u16(vcombine_u16(cmp, cmp))),
+                         0);
+}
+
+__hot static pgno_t *scan4seq_neon(pgno_t *range, const size_t len,
+                                   const unsigned seq) {
+  assert(seq > 0 && len > seq);
+#if MDBX_PNL_ASCENDING
+#error "FIXME: Not implemented"
+#endif /* MDBX_PNL_ASCENDING */
+  assert(range[-(ptrdiff_t)len] == len);
+  pgno_t *const detent = range - len + seq;
+  const ptrdiff_t offset = -(ptrdiff_t)seq;
+  const pgno_t target = (pgno_t)offset;
+  const uint32x4_t pattern = vmovq_n_u32(target);
+  size_t mask;
+  if (likely(len > seq + 3)) {
+    do {
+      mask = diffcmp2mask_neon(range - 3, offset, pattern);
+      if (mask) {
+#ifndef __SANITIZE_ADDRESS__
+      found:
+#endif /* __SANITIZE_ADDRESS__ */
+        return (pgno_t *)((char *)range -
+                          (__builtin_clzl(mask) >> sizeof(size_t) / 4));
+      }
+      range -= 4;
+    } while (range > detent + 3);
+    if (range == detent)
+      return nullptr;
+  }
+
+  /* Далее происходит чтение от 4 до 12 лишних байт, которые могут быть не
+   * только за пределами региона выделенного под PNL, но и пересекать границу
+   * страницы памяти. Что может приводить как к ошибкам ASAN, так и к падению.
+   * Поэтому проверяем смещение на странице, а с ASAN всегда страхуемся. */
+#ifndef __SANITIZE_ADDRESS__
+  const unsigned on_page_safe_mask = 0xff0 /* enough for '-15' bytes offset */;
+  if (likely(on_page_safe_mask & (uintptr_t)(range + offset)) &&
+      !RUNNING_ON_VALGRIND) {
+    const unsigned extra = (unsigned)(detent + 4 - range);
+    assert(extra > 0 && extra < 4);
+    mask = (~(size_t)0) << (extra * sizeof(size_t) * 2);
+    mask &= diffcmp2mask_neon(range - 3, offset, pattern);
+    if (mask)
+      goto found;
+    return nullptr;
+  }
+#endif /* __SANITIZE_ADDRESS__ */
+  do
+    if (*range - range[offset] == target)
+      return range;
+  while (--range != detent);
+  return nullptr;
+}
+#endif /* __ARM_NEON || __ARM_NEON__ */
+
 #if defined(__AVX512BW__) && defined(MDBX_ATTRIBUTE_TARGET_AVX512BW)
 #define scan4seq_default scan4seq_avx512bw
 #define scan4seq scan4seq_default
@@ -6105,6 +6217,9 @@ scan4seq_avx512bw(pgno_t *range, const size_t len, const unsigned seq) {
 #define scan4seq_default scan4seq_avx2
 #elif defined(__SSE2__) && defined(MDBX_ATTRIBUTE_TARGET_SSE2)
 #define scan4seq_default scan4seq_sse2
+#elif (defined(__ARM_NEON) || defined(__ARM_NEON__)) &&                        \
+    (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#define scan4seq_default scan4seq_neon
 /* Choosing of another variants should be added here. */
 #endif /* scan4seq_default */
 
@@ -6454,8 +6569,8 @@ static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num, int flags) {
     const size_t next = (size_t)pgno + num;
 
     if (flags & MDBX_ALLOC_GC) {
-      const meta_ptr_t recent = meta_recent(env, &txn->tw.xyz);
-      const meta_ptr_t prefer_steady = meta_prefer_steady(env, &txn->tw.xyz);
+      const meta_ptr_t recent = meta_recent(env, &txn->tw.troika);
+      const meta_ptr_t prefer_steady = meta_prefer_steady(env, &txn->tw.troika);
       /* does reclaiming stopped at the last steady point? */
       if (recent.ptr_c != prefer_steady.ptr_c && prefer_steady.is_steady &&
           detent == prefer_steady.txnid + 1) {
@@ -6484,7 +6599,7 @@ static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num, int flags) {
           ret.err = wipe_steady(txn, detent);
           DEBUG("gc-wipe-steady, rc %d", ret.err);
           eASSERT(env, prefer_steady.ptr_c !=
-                           meta_prefer_steady(env, &txn->tw.xyz).ptr_c);
+                           meta_prefer_steady(env, &txn->tw.troika).ptr_c);
         } else if ((flags & MDBX_ALLOC_NEW) == 0 ||
                    (autosync_threshold &&
                     atomic_load32(&env->me_lck->mti_unsynced_pages,
@@ -6500,10 +6615,10 @@ static pgr_t page_alloc_slowpath(MDBX_cursor *mc, const pgno_t num, int flags) {
           /* make steady checkpoint. */
           MDBX_meta meta = *recent.ptr_c;
           ret.err = sync_locked(env, env->me_flags & MDBX_WRITEMAP, &meta,
-                                &txn->tw.xyz);
+                                &txn->tw.troika);
           DEBUG("gc-make-steady, rc %d", ret.err);
           eASSERT(env, prefer_steady.ptr_c !=
-                           meta_prefer_steady(env, &txn->tw.xyz).ptr_c);
+                           meta_prefer_steady(env, &txn->tw.troika).ptr_c);
         }
         if (likely(ret.err != MDBX_RESULT_TRUE)) {
           if (unlikely(ret.err != MDBX_SUCCESS))
@@ -6946,10 +7061,10 @@ retry:;
   const bool inside_txn = (env->me_txn0->mt_owner == osal_thread_self());
   meta_ptr_t head;
   if (inside_txn | locked)
-    head = meta_recent(env, &env->me_txn0->tw.xyz);
+    head = meta_recent(env, &env->me_txn0->tw.troika);
   else {
-    const meta_xyz_t xyz = meta_tap(env);
-    head = meta_recent(env, &xyz);
+    const meta_troika_t troika = meta_tap(env);
+    head = meta_recent(env, &troika);
   }
   const pgno_t unsynced_pages =
       atomic_load32(&env->me_lck->mti_unsynced_pages, mo_Relaxed);
@@ -7022,7 +7137,7 @@ retry:;
 #if MDBX_ENABLE_PGOP_STAT
       env->me_lck->mti_pgop_stat.wops.weak += wops;
 #endif /* MDBX_ENABLE_PGOP_STAT */
-      env->me_txn0->tw.xyz = meta_tap(env);
+      env->me_txn0->tw.troika = meta_tap(env);
       eASSERT(env, !env->me_txn && !env->me_txn0->mt_child);
       goto retry;
     }
@@ -7040,7 +7155,7 @@ retry:;
           data_page(head.ptr_c)->mp_pgno, durable_caption(head.ptr_c),
           unsynced_pages);
     MDBX_meta meta = *head.ptr_c;
-    rc = sync_locked(env, flags, &meta, &env->me_txn0->tw.xyz);
+    rc = sync_locked(env, flags, &meta, &env->me_txn0->tw.troika);
     if (unlikely(rc != MDBX_SUCCESS))
       goto bailout;
   }
@@ -7257,7 +7372,7 @@ static void txn_valgrind(MDBX_env *env, MDBX_txn *txn) {
     pgno_t last = MAX_PAGENO + 1;
     if (env->me_txn0 && env->me_txn0->mt_owner == osal_thread_self()) {
       /* inside write-txn */
-      last = meta_recent(env, &env->me_txn0->xyz).ptr_v->mm_geo.next;
+      last = meta_recent(env, &env->me_txn0->troika).ptr_v->mm_geo.next;
     } else if (env->me_flags & MDBX_RDONLY) {
       /* read-only mode, no write-txn, no wlock mutex */
       last = NUM_METAS;
@@ -7634,11 +7749,11 @@ static int txn_renew(MDBX_txn *txn, const unsigned flags) {
     /* Seek & fetch the last meta */
     uint64_t timestamp = 0;
     unsigned loop = 0;
-    meta_xyz_t xyz = meta_tap(env);
+    meta_troika_t troika = meta_tap(env);
     while (1) {
       const meta_ptr_t head =
           likely(env->me_stuck_meta < 0)
-              ? /* regular */ meta_recent(env, &xyz)
+              ? /* regular */ meta_recent(env, &troika)
               : /* recovery mode */ meta_ptr(env, env->me_stuck_meta);
       if (likely(r)) {
         safe64_reset(&r->mr_txnid, false);
@@ -7673,7 +7788,7 @@ static int txn_renew(MDBX_txn *txn, const unsigned flags) {
 
       if (unlikely(env->me_stuck_meta >= 0))
         break;
-      if (unlikely(meta_should_retry(env, &xyz) ||
+      if (unlikely(meta_should_retry(env, &troika) ||
                    head.txnid < atomic_load64(&env->me_lck->mti_oldest_reader,
                                               mo_AcquireRelease))) {
         if (unlikely(++loop > 42)) {
@@ -7742,7 +7857,7 @@ static int txn_renew(MDBX_txn *txn, const unsigned flags) {
 
     /* Not yet touching txn == env->me_txn0, it may be active */
     jitter4testing(false);
-    rc = mdbx_txn_lock(env, F_ISSET(flags, MDBX_TXN_TRY));
+    rc = mdbx_txn_lock(env, !!(flags & MDBX_TXN_TRY));
     if (unlikely(rc))
       return rc;
     if (unlikely(env->me_flags & MDBX_FATAL_ERROR)) {
@@ -7756,8 +7871,8 @@ static int txn_renew(MDBX_txn *txn, const unsigned flags) {
     }
 #endif /* Windows */
 
-    txn->tw.xyz = meta_tap(env);
-    const meta_ptr_t head = meta_recent(env, &txn->tw.xyz);
+    txn->tw.troika = meta_tap(env);
+    const meta_ptr_t head = meta_recent(env, &txn->tw.troika);
     uint64_t timestamp = 0;
     while (
         "workaround for todo4recovery://erased_by_github/libmdbx/issues/269") {
@@ -7902,7 +8017,7 @@ static __always_inline int check_txn_rw(const MDBX_txn *txn, int bad_bits) {
   if (unlikely(err))
     return err;
 
-  if (unlikely(F_ISSET(txn->mt_flags, MDBX_TXN_RDONLY)))
+  if (unlikely(txn->mt_flags & MDBX_TXN_RDONLY))
     return MDBX_EACCESS;
 
   return MDBX_SUCCESS;
@@ -8110,7 +8225,7 @@ int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags,
     txn->mt_numdbs = parent->mt_numdbs;
     txn->mt_owner = parent->mt_owner;
     memcpy(txn->mt_dbs, parent->mt_dbs, txn->mt_numdbs * sizeof(MDBX_db));
-    txn->tw.xyz = parent->tw.xyz;
+    txn->tw.troika = parent->tw.troika;
     /* Copy parent's mt_dbistate, but clear DB_NEW */
     for (unsigned i = 0; i < txn->mt_numdbs; i++)
       txn->mt_dbistate[i] =
@@ -8187,17 +8302,17 @@ int mdbx_txn_info(const MDBX_txn *txn, MDBX_txn_info *info, bool scan_rlt) {
   if (txn->mt_flags & MDBX_TXN_RDONLY) {
     meta_ptr_t head;
     uint64_t head_retired;
-    meta_xyz_t xyz = meta_tap(env);
+    meta_troika_t troika = meta_tap(env);
     do {
       /* fetch info from volatile head */
-      head = meta_recent(env, &xyz);
+      head = meta_recent(env, &troika);
       head_retired =
           unaligned_peek_u64_volatile(4, head.ptr_v->mm_pages_retired);
       info->txn_space_limit_soft = pgno2bytes(env, head.ptr_v->mm_geo.now);
       info->txn_space_limit_hard = pgno2bytes(env, head.ptr_v->mm_geo.upper);
       info->txn_space_leftover =
           pgno2bytes(env, head.ptr_v->mm_geo.now - head.ptr_v->mm_geo.next);
-    } while (unlikely(meta_should_retry(env, &xyz)));
+    } while (unlikely(meta_should_retry(env, &troika)));
 
     info->txn_reader_lag = head.txnid - info->txn_id;
     info->txn_space_dirty = info->txn_space_retired = 0;
@@ -8459,12 +8574,12 @@ static void dpl_sift(MDBX_txn *const txn, MDBX_PNL pl, const bool spilled) {
       }
 
       /* update loop */
-      unsigned w = r;
+      unsigned npages, w = r;
     remove_dl:
-      if ((txn->mt_env->me_flags & MDBX_WRITEMAP) == 0) {
-        MDBX_page *dp = dl->items[r].ptr;
-        dpage_free(txn->mt_env, dp, dpl_npages(dl, r));
-      }
+      npages = dpl_npages(dl, r);
+      dl->pages_including_loose -= npages;
+      if ((txn->mt_env->me_flags & MDBX_WRITEMAP) == 0)
+        dpage_free(txn->mt_env, dl->items[r].ptr, npages);
       ++r;
     next_i:
       i += step;
@@ -8524,11 +8639,11 @@ static int txn_end(MDBX_txn *txn, const unsigned mode) {
     cursors_eot(txn, false);
 
   int rc = MDBX_SUCCESS;
-  if (F_ISSET(txn->mt_flags, MDBX_TXN_RDONLY)) {
+  if (txn->mt_flags & MDBX_TXN_RDONLY) {
     if (txn->to.reader) {
       MDBX_reader *slot = txn->to.reader;
       eASSERT(env, slot->mr_pid.weak == env->me_pid);
-      if (likely(!F_ISSET(txn->mt_flags, MDBX_TXN_FINISHED))) {
+      if (likely(!(txn->mt_flags & MDBX_TXN_FINISHED))) {
         eASSERT(env,
                 txn->mt_txnid == slot->mr_txnid.weak &&
                     slot->mr_txnid.weak >= env->me_lck->mti_oldest_reader.weak);
@@ -8556,7 +8671,7 @@ static int txn_end(MDBX_txn *txn, const unsigned mode) {
     txn->mt_numdbs = 0; /* prevent further DBI activity */
     txn->mt_flags = MDBX_TXN_RDONLY | MDBX_TXN_FINISHED;
     txn->mt_owner = 0;
-  } else if (!F_ISSET(txn->mt_flags, MDBX_TXN_FINISHED)) {
+  } else if (!(txn->mt_flags & MDBX_TXN_FINISHED)) {
 #if defined(MDBX_USE_VALGRIND) || defined(__SANITIZE_ADDRESS__)
     if (txn == env->me_txn0)
       txn_valgrind(env, nullptr);
@@ -8585,8 +8700,8 @@ static int txn_end(MDBX_txn *txn, const unsigned mode) {
                        (parent->mt_flags & MDBX_TXN_HAS_CHILD) != 0);
       eASSERT(env, pnl_check_allocated(txn->tw.reclaimed_pglist,
                                        txn->mt_next_pgno - MDBX_ENABLE_REFUND));
-      eASSERT(env,
-              memcmp(&txn->tw.xyz, &parent->tw.xyz, sizeof(meta_xyz_t)) == 0);
+      eASSERT(env, memcmp(&txn->tw.troika, &parent->tw.troika,
+                          sizeof(meta_troika_t)) == 0);
 
       if (txn->tw.lifo_reclaimed) {
         eASSERT(env, MDBX_PNL_SIZE(txn->tw.lifo_reclaimed) >=
@@ -8687,7 +8802,7 @@ int mdbx_txn_abort(MDBX_txn *txn) {
   if (unlikely(rc != MDBX_SUCCESS))
     return rc;
 
-  if (F_ISSET(txn->mt_flags, MDBX_TXN_RDONLY))
+  if (txn->mt_flags & MDBX_TXN_RDONLY)
     /* LY: don't close DBI-handles */
     return txn_end(txn, MDBX_END_ABORT | MDBX_END_UPDATE | MDBX_END_SLOT |
                             MDBX_END_FREE);
@@ -9178,6 +9293,7 @@ retry:
       tASSERT(txn, txn->tw.loose_count == dl->length - w);
       dpl_setlen(dl, w);
       dl->sorted = 0;
+      dl->pages_including_loose -= txn->tw.loose_count;
       txn->tw.dirtyroom += txn->tw.loose_count;
       tASSERT(txn, txn->tw.dirtyroom + txn->tw.dirtylist->length ==
                        (txn->mt_parent ? txn->mt_parent->tw.dirtyroom
@@ -9831,8 +9947,8 @@ static __inline void txn_merge(MDBX_txn *const parent, MDBX_txn *const txn,
     unsigned n = dst->length;
     while (n && dst->items[n].pgno >= parent->mt_next_pgno) {
       if (!(txn->mt_env->me_flags & MDBX_WRITEMAP)) {
-        MDBX_page *dp = dst->items[n].ptr;
-        dpage_free(txn->mt_env, dp, dpl_npages(dst, n));
+        unsigned npages = dpl_npages(dst, n);
+        dpage_free(txn->mt_env, dst->items[n].ptr, npages);
       }
       --n;
     }
@@ -10143,6 +10259,13 @@ static __inline void txn_merge(MDBX_txn *const parent, MDBX_txn *const txn,
   assert(parent->tw.dirtyroom <= parent->mt_env->me_options.dp_limit);
   dpl_setlen(dst, dst->sorted);
   parent->tw.dirtylru = txn->tw.dirtylru;
+
+  /* В текущем понимании выгоднее пересчитать кол-во страниц,
+   * чем подмешивать лишние ветвления и вычисления в циклы выше. */
+  dst->pages_including_loose = 0;
+  for (r = 1; r <= dst->length; ++r)
+    dst->pages_including_loose += dpl_npages(dst, r);
+
   tASSERT(parent, dirtylist_check(parent));
   dpl_free(txn);
 
@@ -10195,7 +10318,7 @@ int mdbx_txn_commit_ex(MDBX_txn *txn, MDBX_commit_latency *latency) {
   /* txn_end() mode for a commit which writes nothing */
   unsigned end_mode =
       MDBX_END_PURE_COMMIT | MDBX_END_UPDATE | MDBX_END_SLOT | MDBX_END_FREE;
-  if (unlikely(F_ISSET(txn->mt_flags, MDBX_TXN_RDONLY)))
+  if (unlikely(txn->mt_flags & MDBX_TXN_RDONLY))
     goto done;
 
   if (txn->mt_child) {
@@ -10435,7 +10558,7 @@ int mdbx_txn_commit_ex(MDBX_txn *txn, MDBX_commit_latency *latency) {
   ts_3 = latency ? osal_monotime() : 0;
 
   if (likely(rc == MDBX_SUCCESS)) {
-    const meta_ptr_t head = meta_recent(env, &txn->tw.xyz);
+    const meta_ptr_t head = meta_recent(env, &txn->tw.troika);
     MDBX_meta meta;
     memcpy(meta.mm_magic_and_version, head.ptr_c->mm_magic_and_version, 8);
     meta.mm_extra_flags = head.ptr_c->mm_extra_flags;
@@ -10460,7 +10583,7 @@ int mdbx_txn_commit_ex(MDBX_txn *txn, MDBX_commit_latency *latency) {
     meta_set_txnid(env, &meta, commit_txnid);
 
     rc = sync_locked(env, env->me_flags | txn->mt_flags | MDBX_SHRINK_ALLOWED,
-                     &meta, &txn->tw.xyz);
+                     &meta, &txn->tw.troika);
   }
   ts_4 = latency ? osal_monotime() : 0;
   if (unlikely(rc != MDBX_SUCCESS)) {
@@ -10917,12 +11040,12 @@ static size_t madvise_threshold(const MDBX_env *env,
 #endif /* MDBX_ENABLE_MADVISE */
 
 static int sync_locked(MDBX_env *env, unsigned flags, MDBX_meta *const pending,
-                       meta_xyz_t *const xyz) {
+                       meta_troika_t *const troika) {
   eASSERT(env, ((env->me_flags ^ flags) & MDBX_WRITEMAP) == 0);
   const MDBX_meta *const meta0 = METAPAGE(env, 0);
   const MDBX_meta *const meta1 = METAPAGE(env, 1);
   const MDBX_meta *const meta2 = METAPAGE(env, 2);
-  const meta_ptr_t head = meta_recent(env, xyz);
+  const meta_ptr_t head = meta_recent(env, troika);
   int rc;
 
   eASSERT(env,
@@ -11027,7 +11150,7 @@ static int sync_locked(MDBX_env *env, unsigned flags, MDBX_meta *const pending,
         const pgno_t bottom =
             (aligned > pending->mm_geo.lower) ? aligned : pending->mm_geo.lower;
         if (pending->mm_geo.now > bottom) {
-          if (XYZ_HAVE_STEADY(xyz))
+          if (TROIKA_HAVE_STEADY(troika))
             /* force steady, but only if steady-checkpoint is present */
             flags &= MDBX_WRITEMAP | MDBX_SHRINK_ALLOWED;
           shrink = pending->mm_geo.now - bottom;
@@ -11059,7 +11182,8 @@ static int sync_locked(MDBX_env *env, unsigned flags, MDBX_meta *const pending,
     enum osal_syncmode_bits mode_bits = MDBX_SYNC_NONE;
     if ((flags & MDBX_SAFE_NOSYNC) == 0) {
       mode_bits = MDBX_SYNC_DATA;
-      if (pending->mm_geo.next > meta_prefer_steady(env, xyz).ptr_c->mm_geo.now)
+      if (pending->mm_geo.next >
+          meta_prefer_steady(env, troika).ptr_c->mm_geo.now)
         mode_bits |= MDBX_SYNC_SIZE;
       if (flags & MDBX_NOMETASYNC)
         mode_bits |= MDBX_SYNC_IODQ;
@@ -11109,10 +11233,10 @@ static int sync_locked(MDBX_env *env, unsigned flags, MDBX_meta *const pending,
       return MDBX_SUCCESS;
     }
   } else {
-    const unsigned xyz_tail = xyz->tail_and_flags & 3;
-    ENSURE(env, xyz_tail < NUM_METAS && xyz_tail != xyz->recent &&
-                    xyz_tail != xyz->prefer_steady);
-    target = (MDBX_meta *)meta_tail(env, xyz).ptr_c;
+    const unsigned troika_tail = troika->tail_and_flags & 3;
+    ENSURE(env, troika_tail < NUM_METAS && troika_tail != troika->recent &&
+                    troika_tail != troika->prefer_steady);
+    target = (MDBX_meta *)meta_tail(env, troika).ptr_c;
   }
 
   /* LY: step#2 - update meta-page. */
@@ -11241,10 +11365,10 @@ static int sync_locked(MDBX_env *env, unsigned flags, MDBX_meta *const pending,
       (uint32_t)pending->unsafe_txnid -
       ((flags & MDBX_NOMETASYNC) ? UINT32_MAX / 3 : 0);
 
-  *xyz = meta_tap(env);
+  *troika = meta_tap(env);
   for (MDBX_txn *txn = env->me_txn0; txn; txn = txn->mt_child)
-    if (xyz != &txn->tw.xyz)
-      txn->tw.xyz = *xyz;
+    if (troika != &txn->tw.troika)
+      txn->tw.troika = *troika;
 
   /* LY: shrink datafile if needed */
   if (unlikely(shrink)) {
@@ -11492,10 +11616,10 @@ mdbx_env_set_geometry(MDBX_env *env, intptr_t size_lower, intptr_t size_now,
       if (unlikely(err != MDBX_SUCCESS))
         return err;
       need_unlock = true;
-      env->me_txn0->tw.xyz = meta_tap(env);
+      env->me_txn0->tw.troika = meta_tap(env);
       eASSERT(env, !env->me_txn && !env->me_txn0->mt_child);
       env->me_txn0->mt_txnid =
-          env->me_txn0->tw.xyz.txnid[env->me_txn0->tw.xyz.recent];
+          env->me_txn0->tw.troika.txnid[env->me_txn0->tw.troika.recent];
       txn_oldest_reader(env->me_txn0);
     }
 
@@ -11504,7 +11628,7 @@ mdbx_env_set_geometry(MDBX_env *env, intptr_t size_lower, intptr_t size_now,
       pagesize = env->me_psize;
     const MDBX_geo *const geo =
         inside_txn ? &env->me_txn->mt_geo
-                   : &meta_recent(env, &env->me_txn0->tw.xyz).ptr_c->mm_geo;
+                   : &meta_recent(env, &env->me_txn0->tw.troika).ptr_c->mm_geo;
     if (size_lower < 0)
       size_lower = pgno2bytes(env, geo->lower);
     if (size_now < 0)
@@ -11718,7 +11842,7 @@ mdbx_env_set_geometry(MDBX_env *env, intptr_t size_lower, intptr_t size_now,
     const MDBX_geo *current_geo;
     if (!inside_txn) {
       eASSERT(env, need_unlock);
-      const meta_ptr_t head = meta_recent(env, &env->me_txn0->tw.xyz);
+      const meta_ptr_t head = meta_recent(env, &env->me_txn0->tw.troika);
 
       uint64_t timestamp = 0;
       while ("workaround for "
@@ -11814,7 +11938,7 @@ mdbx_env_set_geometry(MDBX_env *env, intptr_t size_lower, intptr_t size_now,
         env->me_txn->mt_flags |= MDBX_TXN_DIRTY;
       } else {
         meta.mm_geo = new_geo;
-        rc = sync_locked(env, env->me_flags, &meta, &env->me_txn0->tw.xyz);
+        rc = sync_locked(env, env->me_flags, &meta, &env->me_txn0->tw.troika);
       }
 
       if (likely(rc == MDBX_SUCCESS)) {
@@ -12094,7 +12218,10 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
                           : env->me_dxb_mmap.limit);
 #endif /* MDBX_USE_VALGRIND || __SANITIZE_ADDRESS__ */
 
-  meta_xyz_t xyz = meta_tap(env);
+  meta_troika_t troika = meta_tap(env);
+#if MDBX_DEBUG
+  meta_troika_dump(env, &troika);
+#endif
   eASSERT(env, !env->me_txn && !env->me_txn0);
   //-------------------------------- validate/rollback head & steady meta-pages
   if (unlikely(env->me_stuck_meta >= 0)) {
@@ -12105,26 +12232,29 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
     if (unlikely(err != MDBX_SUCCESS)) {
       ERROR("target meta[%u] is corrupted",
             bytes2pgno(env, (uint8_t *)data_page(target) - env->me_map));
+      meta_troika_dump(env, &troika);
       return MDBX_CORRUPTED;
     }
   } else /* not recovery mode */
     while (1) {
-      const unsigned meta_clash_mask = meta_eq_mask(&xyz);
+      const unsigned meta_clash_mask = meta_eq_mask(&troika);
       if (unlikely(meta_clash_mask)) {
         ERROR("meta-pages are clashed: mask 0x%d", meta_clash_mask);
+        meta_troika_dump(env, &troika);
         return MDBX_CORRUPTED;
       }
 
       if (lck_rc != /* lck exclusive */ MDBX_RESULT_TRUE) {
         /* non-exclusive mode,
          * meta-pages should be validated by a first process opened the DB */
-        if (xyz.recent == xyz.prefer_steady)
+        if (troika.recent == troika.prefer_steady)
           break;
 
         if (!env->me_lck_mmap.lck) {
           /* LY: without-lck (read-only) mode, so it is impossible that other
            * process made weak checkpoint. */
           ERROR("%s", "without-lck, unable recovery/rollback");
+          meta_troika_dump(env, &troika);
           return MDBX_WANNA_RECOVERY;
         }
 
@@ -12136,8 +12266,8 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
       eASSERT(env, lck_rc == MDBX_RESULT_TRUE);
       /* exclusive mode */
 
-      const meta_ptr_t recent = meta_recent(env, &xyz);
-      const meta_ptr_t prefer_steady = meta_prefer_steady(env, &xyz);
+      const meta_ptr_t recent = meta_recent(env, &troika);
+      const meta_ptr_t prefer_steady = meta_prefer_steady(env, &troika);
       MDBX_meta clone;
       if (prefer_steady.is_steady) {
         err = validate_meta_copy(env, prefer_steady.ptr_c, &clone);
@@ -12145,6 +12275,7 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
           ERROR("meta[%u] with %s txnid %" PRIaTXN " is corrupted, %s needed",
                 bytes2pgno(env, (uint8_t *)prefer_steady.ptr_c - env->me_map),
                 "steady", prefer_steady.txnid, "manual recovery");
+          meta_troika_dump(env, &troika);
           return MDBX_CORRUPTED;
         }
         if (prefer_steady.ptr_c == recent.ptr_c)
@@ -12162,11 +12293,13 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
           ERROR("%s for open or automatic rollback, %s",
                 "there are no suitable meta-pages",
                 "manual recovery is required");
+          meta_troika_dump(env, &troika);
           return MDBX_CORRUPTED;
         }
         WARNING("meta[%u] with last txnid %" PRIaTXN
                 " is corrupted, rollback needed",
                 pgno, recent.txnid);
+        meta_troika_dump(env, &troika);
         goto purge_meta_head;
       }
 
@@ -12176,6 +12309,7 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
                 "rollback NOT needed, steady-sync NEEDED%s",
                 "opening after an unclean shutdown", bootid.x, bootid.y,
                 ", but unable in read-only mode");
+          meta_troika_dump(env, &troika);
           return MDBX_WANNA_RECOVERY;
         }
         WARNING("%s, but boot-id(%016" PRIx64 "-%016" PRIx64 ") is MATCH: "
@@ -12191,6 +12325,7 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
               "opening after an unclean shutdown",
               "there are no suitable meta-pages",
               "manual recovery is required");
+        meta_troika_dump(env, &troika);
         return MDBX_CORRUPTED;
       }
       if (env->me_flags & MDBX_RDONLY) {
@@ -12198,6 +12333,7 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
               " to steady %" PRIaTXN ")%s",
               "opening after an unclean shutdown", recent.txnid,
               prefer_steady.txnid, ", but unable in read-only mode");
+        meta_troika_dump(env, &troika);
         return MDBX_WANNA_RECOVERY;
       }
 
@@ -12206,6 +12342,7 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
              "purge%s meta[%u] with%s txnid %" PRIaTXN,
              "opening after an unclean shutdown", last_valid ? "" : " invalid",
              pgno, last_valid ? " weak" : "", recent.txnid);
+      meta_troika_dump(env, &troika);
       ENSURE(env, prefer_steady.is_steady);
       err = override_meta(env, pgno, 0,
                           last_valid ? recent.ptr_c : prefer_steady.ptr_c);
@@ -12214,9 +12351,9 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
               pgno, recent.txnid, err);
         return err;
       }
-      xyz = meta_tap(env);
+      troika = meta_tap(env);
       ENSURE(env, 0 == meta_txnid(recent.ptr_v));
-      ENSURE(env, 0 == meta_eq_mask(&xyz));
+      ENSURE(env, 0 == meta_eq_mask(&troika));
     }
 
   if (lck_rc == /* lck exclusive */ MDBX_RESULT_TRUE) {
@@ -12235,7 +12372,7 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
              env->me_dxb_mmap.current, header.mm_geo.now);
     }
 
-    const meta_ptr_t recent = meta_recent(env, &xyz);
+    const meta_ptr_t recent = meta_recent(env, &troika);
     if (memcmp(&header.mm_geo, &recent.ptr_c->mm_geo, sizeof(header.mm_geo))) {
       if ((env->me_flags & MDBX_RDONLY) != 0 ||
           /* recovery mode */ env->me_stuck_meta >= 0) {
@@ -12272,7 +12409,7 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
         ENSURE(env, header.unsafe_txnid == recent.txnid);
         meta_set_txnid(env, &header, next_txnid);
         err = sync_locked(env, env->me_flags | MDBX_SHRINK_ALLOWED, &header,
-                          &xyz);
+                          &troika);
         if (err) {
           ERROR("error %d, while updating meta.geo: "
                 "from l%" PRIaPGNO "-n%" PRIaPGNO "-u%" PRIaPGNO
@@ -12316,7 +12453,7 @@ __cold static int setup_dxb(MDBX_env *env, const int lck_rc,
                   "updating db-format signature for", n, txnid, err);
             return err;
           }
-          xyz = meta_tap(env);
+          troika = meta_tap(env);
         }
       }
     }
@@ -13077,8 +13214,8 @@ __cold int mdbx_env_openW(MDBX_env *env, const wchar_t *pathname,
   env->me_dbxs[FREE_DBI].md_cmp = cmp_int_align4; /* aligned MDBX_INTEGERKEY */
   env->me_dbxs[FREE_DBI].md_dcmp = cmp_lenfast;
 
-  rc = osal_openfile(F_ISSET(flags, MDBX_RDONLY) ? MDBX_OPEN_DXB_READ
-                                                 : MDBX_OPEN_DXB_LAZY,
+  rc = osal_openfile((flags & MDBX_RDONLY) ? MDBX_OPEN_DXB_READ
+                                           : MDBX_OPEN_DXB_LAZY,
                      env, env_pathname.dxb, &env->me_lazy_fd, mode);
   if (rc != MDBX_SUCCESS)
     goto bailout;
@@ -13246,8 +13383,8 @@ __cold int mdbx_env_openW(MDBX_env *env, const wchar_t *pathname,
 
 #if MDBX_DEBUG
   if (rc == MDBX_SUCCESS) {
-    const meta_xyz_t xyz = meta_tap(env);
-    const meta_ptr_t head = meta_recent(env, &xyz);
+    const meta_troika_t troika = meta_tap(env);
+    const meta_ptr_t head = meta_recent(env, &troika);
     const MDBX_db *db = &head.ptr_c->mm_dbs[MAIN_DBI];
 
     DEBUG("opened database version %u, pagesize %u",
@@ -14198,7 +14335,7 @@ int mdbx_get_ex(MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *key, MDBX_val *data,
     if (cx.outer.mc_xcursor != NULL) {
       MDBX_node *node = page_node(cx.outer.mc_pg[cx.outer.mc_top],
                                   cx.outer.mc_ki[cx.outer.mc_top]);
-      if (F_ISSET(node_flags(node), F_DUPDATA)) {
+      if (node_flags(node) & F_DUPDATA) {
         // coverity[uninit_use : FALSE]
         tASSERT(txn, cx.outer.mc_xcursor == &cx.inner &&
                          (cx.inner.mx_cursor.mc_flags & C_INITIALIZED));
@@ -14293,7 +14430,7 @@ static int cursor_next(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data,
 
   if (mc->mc_db->md_flags & MDBX_DUPSORT) {
     node = page_node(mp, mc->mc_ki[mc->mc_top]);
-    if (F_ISSET(node_flags(node), F_DUPDATA)) {
+    if (node_flags(node) & F_DUPDATA) {
       if (op == MDBX_NEXT || op == MDBX_NEXT_DUP) {
         rc = cursor_next(&mc->mc_xcursor->mx_cursor, data, NULL, MDBX_NEXT);
         if (op != MDBX_NEXT || rc != MDBX_NOTFOUND) {
@@ -14351,7 +14488,7 @@ skip:
   }
 
   node = page_node(mp, mc->mc_ki[mc->mc_top]);
-  if (F_ISSET(node_flags(node), F_DUPDATA)) {
+  if (node_flags(node) & F_DUPDATA) {
     rc = cursor_xinit1(mc, node, mp);
     if (unlikely(rc != MDBX_SUCCESS))
       return rc;
@@ -14389,7 +14526,7 @@ static int cursor_prev(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data,
   if ((mc->mc_db->md_flags & MDBX_DUPSORT) &&
       mc->mc_ki[mc->mc_top] < page_numkeys(mp)) {
     node = page_node(mp, mc->mc_ki[mc->mc_top]);
-    if (F_ISSET(node_flags(node), F_DUPDATA)) {
+    if (node_flags(node) & F_DUPDATA) {
       if (op == MDBX_PREV || op == MDBX_PREV_DUP) {
         rc = cursor_prev(&mc->mc_xcursor->mx_cursor, data, NULL, MDBX_PREV);
         if (op != MDBX_PREV || rc != MDBX_NOTFOUND) {
@@ -14442,7 +14579,7 @@ static int cursor_prev(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data,
 
   node = page_node(mp, mc->mc_ki[mc->mc_top]);
 
-  if (F_ISSET(node_flags(node), F_DUPDATA)) {
+  if (node_flags(node) & F_DUPDATA) {
     rc = cursor_xinit1(mc, node, mp);
     if (unlikely(rc != MDBX_SUCCESS))
       return rc;
@@ -14661,7 +14798,7 @@ got_node:
     return ret;
   }
 
-  if (F_ISSET(node_flags(node), F_DUPDATA)) {
+  if (node_flags(node) & F_DUPDATA) {
     ret.err = cursor_xinit1(mc, node, mp);
     if (unlikely(ret.err != MDBX_SUCCESS))
       return ret;
@@ -14773,7 +14910,7 @@ static int cursor_first(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data) {
   }
 
   MDBX_node *node = page_node(mp, 0);
-  if (F_ISSET(node_flags(node), F_DUPDATA)) {
+  if (node_flags(node) & F_DUPDATA) {
     rc = cursor_xinit1(mc, node, mp);
     if (unlikely(rc != MDBX_SUCCESS))
       return rc;
@@ -14822,7 +14959,7 @@ static int cursor_last(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data) {
   }
 
   MDBX_node *node = page_node(mp, mc->mc_ki[mc->mc_top]);
-  if (F_ISSET(node_flags(node), F_DUPDATA)) {
+  if (node_flags(node) & F_DUPDATA) {
     rc = cursor_xinit1(mc, node, mp);
     if (unlikely(rc != MDBX_SUCCESS))
       return rc;
@@ -14882,7 +15019,7 @@ __hot int mdbx_cursor_get(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data,
       MDBX_node *node = page_node(mp, mc->mc_ki[mc->mc_top]);
       get_key_optional(node, key);
       if (data) {
-        if (F_ISSET(node_flags(node), F_DUPDATA)) {
+        if (node_flags(node) & F_DUPDATA) {
           if (unlikely(!(mc->mc_xcursor->mx_cursor.mc_flags & C_INITIALIZED))) {
             rc = cursor_xinit1(mc, node, mp);
             if (unlikely(rc != MDBX_SUCCESS))
@@ -15001,7 +15138,7 @@ __hot int mdbx_cursor_get(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data,
     }
     {
       MDBX_node *node = page_node(mc->mc_pg[mc->mc_top], mc->mc_ki[mc->mc_top]);
-      if (!F_ISSET(node_flags(node), F_DUPDATA)) {
+      if (!(node_flags(node) & F_DUPDATA)) {
         get_key_optional(node, key);
         rc = node_read(mc, node, data, mc->mc_pg[mc->mc_top]);
         break;
@@ -15264,7 +15401,7 @@ __hot int mdbx_cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
   if (unlikely(flags & MDBX_MULTIPLE)) {
     if (unlikely(flags & MDBX_RESERVE))
       return MDBX_EINVAL;
-    if (unlikely(!F_ISSET(mc->mc_db->md_flags, MDBX_DUPFIXED)))
+    if (unlikely(!(mc->mc_db->md_flags & MDBX_DUPFIXED)))
       return MDBX_INCOMPATIBLE;
     dcount = data[1].iov_len;
     if (unlikely(dcount < 2 || data->iov_len == 0))
@@ -15383,9 +15520,9 @@ __hot int mdbx_cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
     if (unlikely((flags & MDBX_MULTIPLE)))
       goto drop_current;
 
-    if (F_ISSET(mc->mc_db->md_flags, MDBX_DUPSORT)) {
+    if (mc->mc_db->md_flags & MDBX_DUPSORT) {
       MDBX_node *node = page_node(mc->mc_pg[mc->mc_top], mc->mc_ki[mc->mc_top]);
-      if (F_ISSET(node_flags(node), F_DUPDATA)) {
+      if (node_flags(node) & F_DUPDATA) {
         cASSERT(mc, mc->mc_xcursor != NULL &&
                         (mc->mc_xcursor->mx_cursor.mc_flags & C_INITIALIZED));
         /* Если за ключом более одного значения, либо если размер данных
@@ -15611,7 +15748,7 @@ __hot int mdbx_cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
     MDBX_node *node = page_node(mc->mc_pg[mc->mc_top], mc->mc_ki[mc->mc_top]);
 
     /* Large/Overflow page overwrites need special handling */
-    if (unlikely(F_ISSET(node_flags(node), F_BIGDATA))) {
+    if (unlikely(node_flags(node) & F_BIGDATA)) {
       int dpages = (node_size(key, data) > env->me_leaf_nodemax)
                        ? number_of_ovpages(env, data->iov_len)
                        : 0;
@@ -15666,7 +15803,7 @@ __hot int mdbx_cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
           }
         }
         node_set_ds(node, data->iov_len);
-        if (F_ISSET(flags, MDBX_RESERVE))
+        if (flags & MDBX_RESERVE)
           data->iov_base = page_data(lp.page);
         else
           memcpy(page_data(lp.page), data->iov_base, data->iov_len);
@@ -15688,7 +15825,7 @@ __hot int mdbx_cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
                       (char *)(mc->mc_pg[mc->mc_top]) + env->me_psize);
 
       /* DB has dups? */
-      if (F_ISSET(mc->mc_db->md_flags, MDBX_DUPSORT)) {
+      if (mc->mc_db->md_flags & MDBX_DUPSORT) {
         /* Prepare (sub-)page/sub-DB to accept the new item, if needed.
          * fp: old sub-page or a header faking it.
          * mp: new (sub-)page.  offset: growth in page size.
@@ -15699,7 +15836,7 @@ __hot int mdbx_cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
         mp->mp_pgno = mc->mc_pg[mc->mc_top]->mp_pgno;
 
         /* Was a single item before, must convert now */
-        if (!F_ISSET(node_flags(node), F_DUPDATA)) {
+        if (!(node_flags(node) & F_DUPDATA)) {
 
           /* does data match? */
           const int cmp = mc->mc_dbx->md_dcmp(data, &olddata);
@@ -15855,7 +15992,7 @@ __hot int mdbx_cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
         /* same size, just replace it. Note that we could
          * also reuse this node if the new data is smaller,
          * but instead we opt to shrink the node in that case. */
-        if (F_ISSET(flags, MDBX_RESERVE))
+        if (flags & MDBX_RESERVE)
           data->iov_base = olddata.iov_base;
         else if (!(mc->mc_flags & C_SUB))
           memcpy(olddata.iov_base, data->iov_base, data->iov_len);
@@ -16071,13 +16208,13 @@ __hot int mdbx_cursor_del(MDBX_cursor *mc, MDBX_put_flags_t flags) {
     goto del_key;
 
   MDBX_node *node = page_node(mp, mc->mc_ki[mc->mc_top]);
-  if (F_ISSET(node_flags(node), F_DUPDATA)) {
+  if (node_flags(node) & F_DUPDATA) {
     if (flags & (MDBX_ALLDUPS | /* for compatibility */ MDBX_NODUPDATA)) {
       /* cursor_del() will subtract the final entry */
       mc->mc_db->md_entries -= mc->mc_xcursor->mx_db.md_entries - 1;
       mc->mc_xcursor->mx_cursor.mc_flags &= ~C_INITIALIZED;
     } else {
-      if (!F_ISSET(node_flags(node), F_SUBDATA))
+      if (!(node_flags(node) & F_SUBDATA))
         mc->mc_xcursor->mx_cursor.mc_pg[0] = node_data(node);
       rc = mdbx_cursor_del(&mc->mc_xcursor->mx_cursor, MDBX_NOSPILL);
       if (unlikely(rc))
@@ -16136,7 +16273,7 @@ __hot int mdbx_cursor_del(MDBX_cursor *mc, MDBX_put_flags_t flags) {
     return MDBX_INCOMPATIBLE;
 
   /* add large/overflow pages to free list */
-  if (F_ISSET(node_flags(node), F_BIGDATA)) {
+  if (node_flags(node) & F_BIGDATA) {
     pgr_t lp = page_get_large(mc, node_largedata_pgno(node), mp->mp_txnid);
     if (unlikely((rc = lp.err) || (rc = page_retire(mc, lp.page))))
       goto fail;
@@ -16760,7 +16897,7 @@ int mdbx_cursor_bind(MDBX_txn *txn, MDBX_cursor *mc, MDBX_dbi dbi) {
   if (unlikely(!check_dbi(txn, dbi, DBI_VALID)))
     return MDBX_BAD_DBI;
 
-  if (unlikely(dbi == FREE_DBI && !F_ISSET(txn->mt_flags, MDBX_TXN_RDONLY)))
+  if (unlikely(dbi == FREE_DBI && !(txn->mt_flags & MDBX_TXN_RDONLY)))
     return MDBX_EACCESS;
 
   if (unlikely(mc->mc_backup)) /* Cursor from parent transaction */ {
@@ -16951,7 +17088,7 @@ int mdbx_cursor_count(const MDBX_cursor *mc, size_t *countp) {
   *countp = 1;
   if (mc->mc_xcursor != NULL) {
     MDBX_node *node = page_node(mp, mc->mc_ki[mc->mc_top]);
-    if (F_ISSET(node_flags(node), F_DUPDATA)) {
+    if (node_flags(node) & F_DUPDATA) {
       cASSERT(mc, mc->mc_xcursor &&
                       (mc->mc_xcursor->mx_cursor.mc_flags & C_INITIALIZED));
       *countp = unlikely(mc->mc_xcursor->mx_db.md_entries > PTRDIFF_MAX)
@@ -19141,7 +19278,7 @@ int mdbx_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data,
       /* LY: allows update (explicit overwrite) only for unique keys */
       MDBX_node *node = page_node(cx.outer.mc_pg[cx.outer.mc_top],
                                   cx.outer.mc_ki[cx.outer.mc_top]);
-      if (F_ISSET(node_flags(node), F_DUPDATA)) {
+      if (node_flags(node) & F_DUPDATA) {
         tASSERT(txn, XCURSOR_INITED(&cx.outer) &&
                          cx.outer.mc_xcursor->mx_db.md_entries > 1);
         rc = MDBX_EMULTIVAL;
@@ -19689,13 +19826,13 @@ __cold static int env_copy_asis(MDBX_env *env, MDBX_txn *read_txn,
 
   jitter4testing(false);
   const size_t meta_bytes = pgno2bytes(env, NUM_METAS);
-  const meta_xyz_t xyz = meta_tap(env);
+  const meta_troika_t troika = meta_tap(env);
   /* Make a snapshot of meta-pages,
    * but writing ones after the data was flushed */
   memcpy(buffer, env->me_map, meta_bytes);
   MDBX_meta *const headcopy = /* LY: get pointer to the snapshot copy */
       (MDBX_meta *)(buffer +
-                    ((uint8_t *)meta_recent(env, &xyz).ptr_c - env->me_map));
+                    ((uint8_t *)meta_recent(env, &troika).ptr_c - env->me_map));
   mdbx_txn_unlock(env);
 
   if (flags & MDBX_CP_FORCE_DYNAMIC_SIZE)
@@ -20266,22 +20403,22 @@ __cold static int fetch_envinfo_ex(const MDBX_env *env, const MDBX_txn *txn,
   if (unlikely(env->me_flags & MDBX_FATAL_ERROR))
     return MDBX_PANIC;
 
-  meta_xyz_t holder;
-  meta_xyz_t const *xyz;
+  meta_troika_t holder;
+  meta_troika_t const *troika;
   if (txn && !(txn->mt_flags & MDBX_TXN_RDONLY))
-    xyz = &txn->tw.xyz;
+    troika = &txn->tw.troika;
   else {
     holder = meta_tap(env);
-    xyz = &holder;
+    troika = &holder;
   }
 
-  const meta_ptr_t head = meta_recent(env, xyz);
+  const meta_ptr_t head = meta_recent(env, troika);
   arg->mi_recent_txnid = head.txnid;
-  arg->mi_meta0_txnid = xyz->txnid[0];
+  arg->mi_meta0_txnid = troika->txnid[0];
   arg->mi_meta0_sign = unaligned_peek_u64(4, meta0->mm_sign);
-  arg->mi_meta1_txnid = xyz->txnid[1];
+  arg->mi_meta1_txnid = troika->txnid[1];
   arg->mi_meta1_sign = unaligned_peek_u64(4, meta1->mm_sign);
-  arg->mi_meta2_txnid = xyz->txnid[2];
+  arg->mi_meta2_txnid = troika->txnid[2];
   arg->mi_meta2_sign = unaligned_peek_u64(4, meta2->mm_sign);
   if (likely(bytes > size_before_bootid)) {
     memcpy(&arg->mi_bootid.meta0, &meta0->mm_bootid, 16);
@@ -21036,12 +21173,12 @@ __cold int mdbx_reader_list(const MDBX_env *env, MDBX_reader_list_func *func,
       size_t bytes_retained = 0;
       uint64_t lag = 0;
       if (txnid) {
-        meta_xyz_t xyz = meta_tap(env);
+        meta_troika_t troika = meta_tap(env);
       retry_header:;
-        const meta_ptr_t head = meta_recent(env, &xyz);
+        const meta_ptr_t head = meta_recent(env, &troika);
         const uint64_t head_pages_retired =
             unaligned_peek_u64_volatile(4, head.ptr_v->mm_pages_retired);
-        if (unlikely(meta_should_retry(env, &xyz) ||
+        if (unlikely(meta_should_retry(env, &troika) ||
                      head_pages_retired !=
                          unaligned_peek_u64_volatile(
                              4, head.ptr_v->mm_pages_retired)))
@@ -21242,7 +21379,7 @@ __cold static txnid_t kick_longlived_readers(MDBX_env *env,
   int retry = 0;
   do {
     const txnid_t steady =
-        env->me_txn->tw.xyz.txnid[env->me_txn->tw.xyz.prefer_steady];
+        env->me_txn->tw.troika.txnid[env->me_txn->tw.troika.prefer_steady];
     env->me_lck->mti_readers_refresh_flag.weak = /* force refresh */ true;
     oldest = find_oldest_reader(env, steady);
     eASSERT(env, oldest < env->me_txn0->mt_txnid);
@@ -21281,7 +21418,7 @@ __cold static txnid_t kick_longlived_readers(MDBX_env *env,
         stucked->mr_snapshot_pages_retired.weak != hold_retired)
       continue;
 
-    const meta_ptr_t head = meta_recent(env, &env->me_txn->tw.xyz);
+    const meta_ptr_t head = meta_recent(env, &env->me_txn->tw.troika);
     const txnid_t gap = (head.txnid - laggard) / xMDBX_TXNID_STEP;
     const uint64_t head_retired =
         unaligned_peek_u64(4, head.ptr_c->mm_pages_retired);
@@ -21368,16 +21505,16 @@ int mdbx_txn_straggler(const MDBX_txn *txn, int *percent)
   }
 
   txnid_t lag;
-  meta_xyz_t xyz = meta_tap(env);
+  meta_troika_t troika = meta_tap(env);
   do {
-    const meta_ptr_t head = meta_recent(env, &xyz);
+    const meta_ptr_t head = meta_recent(env, &troika);
     if (percent) {
       const pgno_t maxpg = head.ptr_v->mm_geo.now;
       *percent =
           (int)((head.ptr_v->mm_geo.next * UINT64_C(100) + maxpg / 2) / maxpg);
     }
     lag = (head.txnid - txn->mt_txnid) / xMDBX_TXNID_STEP;
-  } while (unlikely(meta_should_retry(env, &xyz)));
+  } while (unlikely(meta_should_retry(env, &troika)));
 
   return (lag > INT_MAX) ? INT_MAX : (int)lag;
 }
@@ -22086,7 +22223,7 @@ int mdbx_estimate_range(MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *begin_key,
       if (begin.outer.mc_xcursor != NULL) {
         MDBX_node *node = page_node(begin.outer.mc_pg[begin.outer.mc_top],
                                     begin.outer.mc_ki[begin.outer.mc_top]);
-        if (F_ISSET(node_flags(node), F_DUPDATA)) {
+        if (node_flags(node) & F_DUPDATA) {
           /* LY: return the number of duplicates for given key */
           tASSERT(txn, begin.outer.mc_xcursor == &begin.inner &&
                            (begin.inner.mx_cursor.mc_flags & C_INITIALIZED));
@@ -22253,7 +22390,7 @@ int mdbx_replace_ex(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key,
         if (flags & MDBX_CURRENT) {
           /* disallow update/delete for multi-values */
           MDBX_node *node = page_node(page, cx.outer.mc_ki[cx.outer.mc_top]);
-          if (F_ISSET(node_flags(node), F_DUPDATA)) {
+          if (node_flags(node) & F_DUPDATA) {
             tASSERT(txn, XCURSOR_INITED(&cx.outer) &&
                              cx.outer.mc_xcursor->mx_db.md_entries > 1);
             if (cx.outer.mc_xcursor->mx_db.md_entries > 1) {
@@ -22996,13 +23133,15 @@ __cold void global_ctor(void) {
     const uint8_t c01 = (i / (8 * 1)) % 3;
     const uint8_t c02 = (i / (8 * 3)) % 3;
     const uint8_t c12 = (i / (8 * 9)) % 3;
-    const uint8_t xyz = meta_cmp2pack(c01, c02, c12, s0, s1, s2);
 
-    const uint8_t recent = (xyz >> 2) & 3;
-    const uint8_t prefer_steady = (xyz >> 4) & 3;
-    const uint8_t tail = xyz & 3;
-    const bool strict = (xyz & 64) != 0;
-    const bool valid = (xyz & 128) != 0;
+    const uint8_t packed = meta_cmp2pack(c01, c02, c12, s0, s1, s2);
+    meta_troika_t troika;
+    troika.fsm = (uint8_t)i;
+    meta_troika_unpack(&troika, packed);
+
+    const uint8_t tail = TROIKA_TAIL(&troika);
+    const bool strict = TROIKA_STRICT_VALID(&troika);
+    const bool valid = TROIKA_VALID(&troika);
 
     const uint8_t recent_chk = meta_cmp2recent(c01, s0, s1)
                                    ? (meta_cmp2recent(c02, s0, s2) ? 0 : 2)
@@ -23023,13 +23162,13 @@ __cold void global_ctor(void) {
         c01 != 1 || s0 != s1 || c02 != 1 || s0 != s2 || c12 != 1 || s1 != s2;
     const bool strict_chk = (c01 != 1 || s0 != s1) && (c02 != 1 || s0 != s2) &&
                             (c12 != 1 || s1 != s2);
-    assert(recent == recent_chk);
-    assert(prefer_steady == prefer_steady_chk);
+    assert(troika.recent == recent_chk);
+    assert(troika.prefer_steady == prefer_steady_chk);
     assert(tail == tail_chk);
     assert(valid == valid_chk);
     assert(strict == strict_chk);
-    // printf(" %d, ", xyz);
-    assert(xyz_fsm_map[i] == xyz);
+    // printf(" %d, ", packed);
+    assert(troika_fsm_map[troika.fsm] == packed);
   }
 #endif /* MDBX_DEBUG*/
 

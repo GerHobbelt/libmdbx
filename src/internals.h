@@ -868,6 +868,7 @@ typedef struct MDBX_dp {
 typedef struct MDBX_dpl {
   unsigned sorted;
   unsigned length;
+  unsigned pages_including_loose; /* number of pages, but not an entries. */
   unsigned detent; /* allocated size excluding the MDBX_DPL_RESERVE_GAP */
 #if (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L) ||              \
     (!defined(__cplusplus) && defined(_MSC_VER))
@@ -919,12 +920,14 @@ typedef struct MDBX_dbx {
       md_vlen_max; /* min/max value/data length for the database */
 } MDBX_dbx;
 
-typedef struct xyz {
+typedef struct troika {
   uint8_t fsm, recent, prefer_steady, tail_and_flags;
-#define XYZ_HAVE_STEADY(xyz) ((xyz)->fsm & 7)
-#define XYZ_VALID(xyz) ((xyz)->tail_pgno_and_flags & 128)
+#define TROIKA_HAVE_STEADY(troika) ((troika)->fsm & 7)
+#define TROIKA_STRICT_VALID(troika) ((troika)->tail_and_flags & 64)
+#define TROIKA_VALID(troika) ((troika)->tail_and_flags & 128)
+#define TROIKA_TAIL(troika) ((troika)->tail_and_flags & 3)
   txnid_t txnid[NUM_METAS];
-} meta_xyz_t;
+} meta_troika_t;
 
 /* A database transaction.
  * Every operation requires a transaction handle. */
@@ -999,7 +1002,7 @@ struct MDBX_txn {
       MDBX_reader *reader;
     } to;
     struct {
-      meta_xyz_t xyz;
+      meta_troika_t troika;
       /* In write txns, array of cursors for each DB */
       pgno_t *reclaimed_pglist; /* Reclaimed GC pages */
       txnid_t last_reclaimed;   /* ID of last used record */
