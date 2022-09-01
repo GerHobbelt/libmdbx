@@ -20,7 +20,13 @@
  */
 
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/time.h>
+#else
+#ifndef PATH_MAX
+#define PATH_MAX MAX_PATH
+#endif
+#endif
 
 #include "mdbx.h"
 #include <assert.h>
@@ -69,7 +75,9 @@ static void add_id_to_pool(int64_t id) {
 
 static inline int64_t getClockUs(void) {
   struct timespec val;
-#ifdef CYGWIN
+#if defined(CYGWIN)
+  clock_gettime(CLOCK_REALTIME, &val);
+#elif defined(_WIN32)
   clock_gettime(CLOCK_REALTIME, &val);
 #else
   clock_gettime(CLOCK_MONOTONIC, &val);
