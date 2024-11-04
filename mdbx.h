@@ -77,10 +77,10 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 #if defined(__riscv) || defined(__riscv__) || defined(__RISCV) ||              \
     defined(__RISCV__)
-#warning The RISC-V architecture is intentionally insecure by design. \
+#warning "The RISC-V architecture is intentionally insecure by design. \
   Please delete this admonition at your own risk, \
   if you make such decision informed and consciously. \
-  Refer to https://clck.ru/32d9xH for more information.
+  Refer to https://clck.ru/32d9xH for more information."
 #endif /* RISC-V */
 
 #ifdef _MSC_VER
@@ -2220,6 +2220,34 @@ enum MDBX_option_t {
    * to 50% (half empty) which corresponds to the range from 8192 and to 32768
    * in units respectively. */
   MDBX_opt_merge_threshold_16dot16_percent,
+
+  /** \brief Controls the choosing between use write-through disk writes and
+   * usual ones with followed flush by the `fdatasync()` syscall.
+   * \details Depending on the operating system, storage subsystem
+   * characteristics and the use case, higher performance can be achieved by
+   * either using write-through or a serie of usual/lazy writes followed by
+   * the flush-to-disk.
+   *
+   * Basically for N chunks the latency/cost of write-through is:
+   *  latency = N * (emit + round-trip-to-storage + storage-execution);
+   * And for serie of lazy writes with flush is:
+   *  latency = N * (emit + storage-execution) + flush + round-trip-to-storage.
+   *
+   * So, for large N and/or noteable round-trip-to-storage the write+flush
+   * approach is win. But for small N and/or near-zero NVMe-like latency
+   * the write-through is better.
+   *
+   * To solve this issue libmdbx provide `MDBX_opt_writethrough_threshold`:
+   *  - when N described above less or equal specified threshold,
+   *    a write-through approach will be used;
+   *  - otherwise, when N great than specified threshold,
+   *    a write-and-flush approach will be used.
+   *
+   * \note MDBX_opt_writethrough_threshold affects only \ref MDBX_SYNC_DURABLE
+   * mode without \ref MDBX_WRITEMAP, and not supported on Windows.
+   * On Windows a write-through is used always but \ref MDBX_NOMETASYNC could
+   * be used for switching to write-and-flush. */
+  MDBX_opt_writethrough_threshold,
 };
 #ifndef __cplusplus
 /** \ingroup c_settings */
@@ -2555,16 +2583,17 @@ struct MDBX_envinfo {
    * first process opened the database after everyone had previously closed it).
    */
   struct {
-    uint64_t newly;   /**< Quantity of a new pages added */
-    uint64_t cow;     /**< Quantity of pages copied for update */
-    uint64_t clone;   /**< Quantity of parent's dirty pages clones
-                           for nested transactions */
-    uint64_t split;   /**< Page splits */
-    uint64_t merge;   /**< Page merges */
-    uint64_t spill;   /**< Quantity of spilled dirty pages */
-    uint64_t unspill; /**< Quantity of unspilled/reloaded pages */
-    uint64_t wops;    /**< Number of explicit write operations (not a pages)
-                           to a disk */
+    uint64_t newly;    /**< Quantity of a new pages added */
+    uint64_t cow;      /**< Quantity of pages copied for update */
+    uint64_t clone;    /**< Quantity of parent's dirty pages clones
+                            for nested transactions */
+    uint64_t split;    /**< Page splits */
+    uint64_t merge;    /**< Page merges */
+    uint64_t spill;    /**< Quantity of spilled dirty pages */
+    uint64_t unspill;  /**< Quantity of unspilled/reloaded pages */
+    uint64_t wops;     /**< Number of explicit write operations (not a pages)
+                            to a disk */
+    uint64_t prefault; /**< Number of prefault write operations (not a pages) */
     uint64_t
         msync; /**< Number of explicit msync-to-disk operations (not a pages) */
     uint64_t
@@ -3766,13 +3795,10 @@ struct MDBX_commit_latency {
     /** \brief Время "по настенным часам" затраченное на чтение и поиск внутри
      *  GC ради данных пользователя. */
     uint32_t work_rtime_monotonic;
-    /** \brief Монотонное время по "настенным часам" затраченное
+    /** \brief Время ЦПУ в режиме пользователе затраченное
      *   на подготовку страниц извлекаемых из GC для данных пользователя,
      *   включая подкачку с диска. */
-    uint32_t work_xtime_monotonic;
-    /** \brief Время ЦПУ в режиме пользователе затраченное на чтение и поиск
-     *  внтури GC ради данных пользователя. */
-    uint32_t work_rtime_cpu;
+    uint32_t work_xtime_cpu;
     /** \brief Количество итераций поиска внутри GC при выделении страниц
      *  ради данных пользователя. */
     uint32_t work_rsteps;
@@ -3789,13 +3815,10 @@ struct MDBX_commit_latency {
     /** \brief Время "по настенным часам" затраченное на чтение и поиск внутри
      *  GC для целей поддержки и обновления самой GC. */
     uint32_t self_rtime_monotonic;
-    /** \brief Монотонное время по "настенным часам" затраченное на подготовку
+    /** \brief Время ЦПУ в режиме пользователе затраченное на подготовку
      *  страниц извлекаемых из GC для целей поддержки и обновления самой GC,
      *  включая подкачку с диска. */
-    uint32_t self_xtime_monotonic;
-    /** \brief Время ЦПУ в режиме пользователе затраченное на чтение и поиск
-     *  внтури GC для целей поддержки и обновления самой GC. */
-    uint32_t self_rtime_cpu;
+    uint32_t self_xtime_cpu;
     /** \brief Количество итераций поиска внутри GC при выделении страниц
      *  для целей поддержки и обновления самой GC. */
     uint32_t self_rsteps;

@@ -525,16 +525,12 @@ typedef struct MDBX_meta {
  * Each non-metapage up to MDBX_meta.mm_last_pg is reachable exactly once
  * in the snapshot: Either used by a database or listed in a GC record. */
 typedef struct MDBX_page {
-  union {
 #define IS_FROZEN(txn, p) ((p)->mp_txnid < (txn)->mt_txnid)
 #define IS_SPILLED(txn, p) ((p)->mp_txnid == (txn)->mt_txnid)
 #define IS_SHADOWED(txn, p) ((p)->mp_txnid > (txn)->mt_txnid)
 #define IS_VALID(txn, p) ((p)->mp_txnid <= (txn)->mt_front)
 #define IS_MODIFIABLE(txn, p) ((p)->mp_txnid == (txn)->mt_front)
-    uint64_t
-        mp_txnid; /* txnid which created this page, maybe zero in legacy DB */
-    struct MDBX_page *mp_next; /* for in-memory list of freed pages */
-  };
+  uint64_t mp_txnid; /* txnid which created page, maybe zero in legacy DB */
   uint16_t mp_leaf2_ksize;   /* key size if this is a LEAF2 page */
 #define P_BRANCH 0x01u       /* branch page */
 #define P_LEAF 0x02u         /* leaf page */
@@ -576,18 +572,24 @@ typedef struct MDBX_page {
 /* Size of the page header, excluding dynamic data at the end */
 #define PAGEHDRSZ offsetof(MDBX_page, mp_ptrs)
 
+/* Pointer displacement without casting to char* to avoid pointer-aliasing */
+#define ptr_disp(ptr, disp) ((void *)(((intptr_t)(ptr)) + ((intptr_t)(disp))))
+
+/* Pointer distance as signed number of bytes */
+#define ptr_dist(more, less) (((intptr_t)(more)) - ((intptr_t)(less)))
+
+#define mp_next(mp)                                                            \
+  (*(MDBX_page **)ptr_disp((mp)->mp_ptrs, sizeof(void *) - sizeof(uint32_t)))
+
 #pragma pack(pop)
 
 typedef struct profgc_stat {
   /* Монотонное время по "настенным часам"
    * затраченное на чтение и поиск внутри GC */
   uint64_t rtime_monotonic;
-  /* Монотонное время по "настенным часам" затраченное
-   * на подготовку страниц извлекаемых из GC, включая подкачку с диска. */
-  uint64_t xtime_monotonic;
   /* Процессорное время в режим пользователя
-   * затраченное на чтение и поиск внутри GC */
-  uint64_t rtime_cpu;
+   * на подготовку страниц извлекаемых из GC, включая подкачку с диска. */
+  uint64_t xtime_cpu;
   /* Количество итераций чтения-поиска внутри GC при выделении страниц */
   uint32_t rsteps;
   /* Количество запросов на выделение последовательностей страниц,
@@ -616,6 +618,8 @@ typedef struct pgop_stat {
       msync; /* Number of explicit msync/flush-to-disk operations */
   MDBX_atomic_uint64_t
       fsync; /* Number of explicit fsync/flush-to-disk operations */
+
+  MDBX_atomic_uint64_t prefault; /* Number of prefault write operations */
 
   /* Статистика для профилирования GC.
    * Логически эти данные может быть стоит вынести в другую структуру,
@@ -756,6 +760,10 @@ typedef struct MDBX_lockinfo {
 
   /* Low 32-bit of txnid with which meta-pages was synced,
    * i.e. for sync-polling in the MDBX_NOMETASYNC mode. */
+#define MDBX_NOMETASYNC_LAZY_UNK (UINT32_MAX / 3)
+#define MDBX_NOMETASYNC_LAZY_FD (MDBX_NOMETASYNC_LAZY_UNK + UINT32_MAX / 8)
+#define MDBX_NOMETASYNC_LAZY_WRITEMAP                                          \
+  (MDBX_NOMETASYNC_LAZY_UNK - UINT32_MAX / 8)
   MDBX_atomic_uint32_t mti_meta_sync_txnid;
 
   /* Period for timed auto-sync feature, i.e. at the every steady checkpoint
@@ -933,7 +941,7 @@ typedef struct MDBX_dpl {
 #define MDBX_TXL_INITIAL                                                       \
   (MDBX_TXL_GRANULATE - 2 - MDBX_ASSUME_MALLOC_OVERHEAD / sizeof(txnid_t))
 #define MDBX_TXL_MAX                                                           \
-  ((1u << 17) - 2 - MDBX_ASSUME_MALLOC_OVERHEAD / sizeof(txnid_t))
+  ((1u << 26) - 2 - MDBX_ASSUME_MALLOC_OVERHEAD / sizeof(txnid_t))
 
 #define MDBX_PNL_ALLOCLEN(pl) ((pl)[-1])
 #define MDBX_PNL_GETSIZE(pl) ((size_t)((pl)[0]))
@@ -949,9 +957,11 @@ typedef struct MDBX_dpl {
 #define MDBX_PNL_END(pl) (&(pl)[MDBX_PNL_GETSIZE(pl) + 1])
 
 #if MDBX_PNL_ASCENDING
+#define MDBX_PNL_EDGE(pl) ((pl) + 1)
 #define MDBX_PNL_LEAST(pl) MDBX_PNL_FIRST(pl)
 #define MDBX_PNL_MOST(pl) MDBX_PNL_LAST(pl)
 #else
+#define MDBX_PNL_EDGE(pl) ((pl) + MDBX_PNL_GETSIZE(pl))
 #define MDBX_PNL_LEAST(pl) MDBX_PNL_LAST(pl)
 #define MDBX_PNL_MOST(pl) MDBX_PNL_FIRST(pl)
 #endif
@@ -1000,13 +1010,9 @@ struct MDBX_txn {
   /* Additional flag for sync_locked() */
 #define MDBX_SHRINK_ALLOWED UINT32_C(0x40000000)
 
-#define MDBX_TXN_UPDATE_GC 0x20 /* GC is being updated */
-#define MDBX_TXN_FROZEN_RE 0x40 /* list of reclaimed-pgno must not altered */
-
 #define TXN_FLAGS                                                              \
   (MDBX_TXN_FINISHED | MDBX_TXN_ERROR | MDBX_TXN_DIRTY | MDBX_TXN_SPILLS |     \
-   MDBX_TXN_HAS_CHILD | MDBX_TXN_INVALID | MDBX_TXN_UPDATE_GC |                \
-   MDBX_TXN_FROZEN_RE)
+   MDBX_TXN_HAS_CHILD | MDBX_TXN_INVALID)
 
 #if (TXN_FLAGS & (MDBX_TXN_RW_BEGIN_FLAGS | MDBX_TXN_RO_BEGIN_FLAGS)) ||       \
     ((MDBX_TXN_RW_BEGIN_FLAGS | MDBX_TXN_RO_BEGIN_FLAGS | TXN_FLAGS) &         \
@@ -1147,6 +1153,9 @@ struct MDBX_cursor {
 #define C_SUB 0x04         /* Cursor is a sub-cursor */
 #define C_DEL 0x08         /* last op was a cursor_del */
 #define C_UNTRACK 0x10     /* Un-track cursor when closing */
+#define C_GCU                                                                                  \
+  0x20 /* Происходит подготовка к обновлению GC, поэтому \
+        * можно брать страницы из GC даже для FREE_DBI */
   uint8_t mc_flags;
 
   /* Cursor checking flags. */
@@ -1205,12 +1214,12 @@ struct MDBX_env {
 #define ENV_INTERNAL_FLAGS (MDBX_FATAL_ERROR | MDBX_ENV_ACTIVE | MDBX_ENV_TXKEY)
   uint32_t me_flags;
   osal_mmap_t me_dxb_mmap; /* The main data file */
-#define me_map me_dxb_mmap.dxb
+#define me_map me_dxb_mmap.base
 #define me_lazy_fd me_dxb_mmap.fd
-#define me_fd4data me_ioring.fd
   mdbx_filehandle_t me_dsync_fd, me_fd4meta;
 #if defined(_WIN32) || defined(_WIN64)
-  HANDLE me_overlapped_fd, me_data_lock_event;
+#define me_overlapped_fd me_ioring.overlapped_fd
+  HANDLE me_data_lock_event;
 #endif                     /* Windows */
   osal_mmap_t me_lck_mmap; /* The lock file */
 #define me_lfd me_lck_mmap.fd
@@ -1253,6 +1262,9 @@ struct MDBX_env {
     uint8_t spill_min_denominator;
     uint8_t spill_parent4child_denominator;
     unsigned merge_threshold_16dot16_percent;
+#if !(defined(_WIN32) || defined(_WIN64))
+    unsigned writethrough_threshold;
+#endif /* Windows */
     union {
       unsigned all;
       /* tracks options with non-auto values but tuned by user */
@@ -1471,7 +1483,8 @@ MDBX_NORETURN __cold void assert_fail(const char *msg, const char *func,
 #endif /* MDBX_CPU_WRITEBACK_INCOHERENT */
 
 MDBX_MAYBE_UNUSED static __inline void
-osal_flush_incoherent_mmap(void *addr, size_t nbytes, const intptr_t pagesize) {
+osal_flush_incoherent_mmap(const void *addr, size_t nbytes,
+                           const intptr_t pagesize) {
 #if MDBX_MMAP_INCOHERENT_FILE_WRITE
   char *const begin = (char *)(-pagesize & (intptr_t)addr);
   char *const end =
@@ -1487,7 +1500,7 @@ osal_flush_incoherent_mmap(void *addr, size_t nbytes, const intptr_t pagesize) {
 #ifdef DCACHE
   /* MIPS has cache coherency issues.
    * Note: for any nbytes >= on-chip cache size, entire is flushed. */
-  cacheflush(addr, nbytes, DCACHE);
+  cacheflush((void *)addr, nbytes, DCACHE);
 #else
 #error "Oops, cacheflush() not available"
 #endif /* DCACHE */

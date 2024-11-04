@@ -228,10 +228,9 @@ typedef wchar_t pathchar_t;
 typedef char pathchar_t;
 #endif
 
-typedef struct osal_mmap_param {
+typedef struct osal_mmap {
   union {
-    void *address;
-    uint8_t *dxb;
+    void *base;
     struct MDBX_lockinfo *lck;
   };
   mdbx_filehandle_t fd;
@@ -313,13 +312,12 @@ typedef struct osal_ioring {
   unsigned slots_left;
   unsigned allocated;
 #if defined(_WIN32) || defined(_WIN64)
-#define IOR_DIRECT 1
-#define IOR_OVERLAPPED 2
 #define IOR_STATE_LOCKED 1
+  HANDLE overlapped_fd;
   unsigned pagesize;
   unsigned last_sgvcnt;
   size_t last_bytes;
-  uint8_t flags, state, pagesize_ln2;
+  uint8_t direct, state, pagesize_ln2;
   unsigned event_stack;
   HANDLE *event_pool;
   volatile LONG async_waiting;
@@ -336,7 +334,6 @@ typedef struct osal_ioring {
 #define ior_last_sgvcnt(ior, item) (1)
 #define ior_last_bytes(ior, item) (item)->single.iov_len
 #endif /* !Windows */
-  mdbx_filehandle_t fd;
   ior_item_t *last;
   ior_item_t *pool;
   char *boundary;
@@ -345,11 +342,13 @@ typedef struct osal_ioring {
 #ifndef __cplusplus
 
 /* Actually this is not ioring for now, but on the way. */
-MDBX_INTERNAL_FUNC int osal_ioring_create(osal_ioring_t *,
+MDBX_INTERNAL_FUNC int osal_ioring_create(osal_ioring_t *
 #if defined(_WIN32) || defined(_WIN64)
-                                          uint8_t flags,
+                                          ,
+                                          bool enable_direct,
+                                          mdbx_filehandle_t overlapped_fd
 #endif /* Windows */
-                                          mdbx_filehandle_t fd);
+);
 MDBX_INTERNAL_FUNC int osal_ioring_resize(osal_ioring_t *, size_t items);
 MDBX_INTERNAL_FUNC void osal_ioring_destroy(osal_ioring_t *);
 MDBX_INTERNAL_FUNC void osal_ioring_reset(osal_ioring_t *);
@@ -360,7 +359,7 @@ typedef struct osal_ioring_write_result {
   unsigned wops;
 } osal_ioring_write_result_t;
 MDBX_INTERNAL_FUNC osal_ioring_write_result_t
-osal_ioring_write(osal_ioring_t *ior);
+osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd);
 
 typedef struct iov_ctx iov_ctx_t;
 MDBX_INTERNAL_FUNC void osal_ioring_walk(
@@ -378,11 +377,13 @@ osal_ioring_used(const osal_ioring_t *ior) {
 }
 
 MDBX_MAYBE_UNUSED static inline int
-osal_ioring_reserve(osal_ioring_t *ior, size_t items, size_t bytes) {
+osal_ioring_prepare(osal_ioring_t *ior, size_t items, size_t bytes) {
   items = (items > 32) ? items : 32;
 #if defined(_WIN32) || defined(_WIN64)
-  const size_t npages = bytes >> ior->pagesize_ln2;
-  items = (items > npages) ? items : npages;
+  if (ior->direct) {
+    const size_t npages = bytes >> ior->pagesize_ln2;
+    items = (items > npages) ? items : npages;
+  }
 #else
   (void)bytes;
 #endif
@@ -521,7 +522,7 @@ osal_thread_create(osal_thread_t *thread,
 MDBX_INTERNAL_FUNC int osal_thread_join(osal_thread_t thread);
 
 enum osal_syncmode_bits {
-  MDBX_SYNC_NONE = 0,
+  MDBX_SYNC_KICK = 0,
   MDBX_SYNC_DATA = 1,
   MDBX_SYNC_SIZE = 2,
   MDBX_SYNC_IODQ = 4

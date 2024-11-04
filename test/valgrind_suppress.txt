@@ -30,8 +30,16 @@
    ...
    fun:wipe_steady*
 }
+{
+   msync-meta
+   Memcheck:Param
+   msync(start)
+   fun:msync
+   ...
+   fun:meta_sync*
+}
 
-# memcmp() inside iov_write() as workaround for https://web.archive.org/web/https://github.com/erthink/libmdbx/issues/269
+# memcmp() inside iov_write() as workaround for https://libmdbx.dqdkfa.ru/dead-github/issues/269
 {
    iov-pagecheck-1
    Memcheck:Cond
