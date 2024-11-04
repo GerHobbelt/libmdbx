@@ -570,7 +570,7 @@ typedef struct MDBX_page {
        : PAGETYPE_WHOLE(p))
 
 /* Size of the page header, excluding dynamic data at the end */
-#define PAGEHDRSZ ((unsigned)offsetof(MDBX_page, mp_ptrs))
+#define PAGEHDRSZ offsetof(MDBX_page, mp_ptrs)
 
 #pragma pack(pop)
 
@@ -591,6 +591,10 @@ typedef struct {
   MDBX_atomic_uint64_t
       gcrtime; /* Time spending for reading/searching GC (aka FreeDB). The
                   unit/scale is platform-depended, see osal_monotime(). */
+  MDBX_atomic_uint64_t
+      msync; /* Number of explicit msync/flush-to-disk operations */
+  MDBX_atomic_uint64_t
+      fsync; /* Number of explicit fsync/flush-to-disk operations */
 } MDBX_pgop_stat_t;
 #endif /* MDBX_ENABLE_PGOP_STAT */
 
@@ -856,7 +860,7 @@ typedef struct MDBX_dp {
   MDBX_page *ptr;
   pgno_t pgno;
   union {
-    unsigned extra;
+    uint32_t extra;
     __anonymous_struct_extension__ struct {
       unsigned multi : 1;
       unsigned lru : 31;
@@ -866,10 +870,10 @@ typedef struct MDBX_dp {
 
 /* An DPL (dirty-page list) is a sorted array of MDBX_DPs. */
 typedef struct MDBX_dpl {
-  unsigned sorted;
-  unsigned length;
-  unsigned pages_including_loose; /* number of pages, but not an entries. */
-  unsigned detent; /* allocated size excluding the MDBX_DPL_RESERVE_GAP */
+  size_t sorted;
+  size_t length;
+  size_t pages_including_loose; /* number of pages, but not an entries. */
+  size_t detent; /* allocated size excluding the MDBX_DPL_RESERVE_GAP */
 #if (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L) ||              \
     (!defined(__cplusplus) && defined(_MSC_VER))
   MDBX_dp items[] /* dynamic size with holes at zero and after the last */;
@@ -888,11 +892,17 @@ typedef struct MDBX_dpl {
   ((1u << 17) - 2 - MDBX_ASSUME_MALLOC_OVERHEAD / sizeof(txnid_t))
 
 #define MDBX_PNL_ALLOCLEN(pl) ((pl)[-1])
-#define MDBX_PNL_SIZE(pl) ((pl)[0])
+#define MDBX_PNL_GETSIZE(pl) ((size_t)((pl)[0]))
+#define MDBX_PNL_SETSIZE(pl, size)                                             \
+  do {                                                                         \
+    const size_t __size = size;                                                \
+    assert(__size < INT_MAX);                                                  \
+    (pl)[0] = (pgno_t)__size;                                                  \
+  } while (0)
 #define MDBX_PNL_FIRST(pl) ((pl)[1])
-#define MDBX_PNL_LAST(pl) ((pl)[MDBX_PNL_SIZE(pl)])
+#define MDBX_PNL_LAST(pl) ((pl)[MDBX_PNL_GETSIZE(pl)])
 #define MDBX_PNL_BEGIN(pl) (&(pl)[1])
-#define MDBX_PNL_END(pl) (&(pl)[MDBX_PNL_SIZE(pl) + 1])
+#define MDBX_PNL_END(pl) (&(pl)[MDBX_PNL_GETSIZE(pl) + 1])
 
 #if MDBX_PNL_ASCENDING
 #define MDBX_PNL_LEAST(pl) MDBX_PNL_FIRST(pl)
@@ -902,8 +912,8 @@ typedef struct MDBX_dpl {
 #define MDBX_PNL_MOST(pl) MDBX_PNL_FIRST(pl)
 #endif
 
-#define MDBX_PNL_SIZEOF(pl) ((MDBX_PNL_SIZE(pl) + 1) * sizeof(pgno_t))
-#define MDBX_PNL_IS_EMPTY(pl) (MDBX_PNL_SIZE(pl) == 0)
+#define MDBX_PNL_SIZEOF(pl) ((MDBX_PNL_GETSIZE(pl) + 1) * sizeof(pgno_t))
+#define MDBX_PNL_IS_EMPTY(pl) (MDBX_PNL_GETSIZE(pl) == 0)
 
 /*----------------------------------------------------------------------------*/
 /* Internal structures */
@@ -1009,13 +1019,13 @@ struct MDBX_txn {
 #if MDBX_ENABLE_REFUND
       pgno_t loose_refund_wl /* FIXME: describe */;
 #endif /* MDBX_ENABLE_REFUND */
+      /* a sequence to spilling dirty page with LRU policy */
+      unsigned dirtylru;
       /* dirtylist room: Dirty array size - dirty pages visible to this txn.
        * Includes ancestor txns' dirty pages not hidden by other txns'
        * dirty/spilled pages. Thus commit(nested txn) has room to merge
        * dirtylist into mt_parent after freeing hidden mt_parent pages. */
-      unsigned dirtyroom;
-      /* a sequence to spilling dirty page with LRU policy */
-      unsigned dirtylru;
+      size_t dirtyroom;
       /* For write txns: Modified pages. Sorted when not MDBX_WRITEMAP. */
       MDBX_dpl *dirtylist;
       /* The list of reclaimed txns from GC */
@@ -1026,8 +1036,8 @@ struct MDBX_txn {
        * in this transaction, linked through `mp_next`. */
       MDBX_page *loose_pages;
       /* Number of loose pages (tw.loose_pages) */
-      unsigned loose_count;
-      unsigned spill_least_removed;
+      size_t loose_count;
+      size_t spill_least_removed;
       /* The sorted list of dirty pages we temporarily wrote to disk
        * because the dirty list was full. page numbers in here are
        * shifted left by 1, deleted slots have the LSB set. */
@@ -1143,14 +1153,19 @@ struct MDBX_env {
   osal_mmap_t me_dxb_mmap; /* The main data file */
 #define me_map me_dxb_mmap.dxb
 #define me_lazy_fd me_dxb_mmap.fd
-  mdbx_filehandle_t me_dsync_fd;
+#define me_fd4data me_ioring.fd
+  mdbx_filehandle_t me_dsync_fd, me_fd4meta;
+#if defined(_WIN32) || defined(_WIN64)
+  HANDLE me_overlapped_fd, me_data_lock_event;
+#endif                     /* Windows */
   osal_mmap_t me_lck_mmap; /* The lock file */
 #define me_lfd me_lck_mmap.fd
   struct MDBX_lockinfo *me_lck;
 
-  unsigned me_psize;        /* DB page size, initialized from me_os_psize */
-  unsigned me_leaf_nodemax; /* max size of a leaf-node */
-  uint8_t me_psize2log;     /* log2 of DB page size */
+  unsigned me_psize;          /* DB page size, initialized from me_os_psize */
+  unsigned me_leaf_nodemax;   /* max size of a leaf-node */
+  unsigned me_branch_nodemax; /* max size of a branch-node */
+  uint8_t me_psize2log;       /* log2 of DB page size */
   int8_t me_stuck_meta; /* recovery-only: target meta page or less that zero */
   uint16_t me_merge_threshold,
       me_merge_threshold_gc;  /* pages emptier than this are candidates for
@@ -1222,6 +1237,7 @@ struct MDBX_env {
   unsigned me_dp_reserve_len;
   /* PNL of pages that became unused in a write txn */
   MDBX_PNL me_retired_pages;
+  osal_ioring_t me_ioring;
 
 #if defined(_WIN32) || defined(_WIN64)
   osal_srwlock_t me_remap_guard;
@@ -1352,10 +1368,22 @@ MDBX_INTERNAL_FUNC void debug_log_va(int level, const char *function, int line,
 #define FATAL(fmt, ...)                                                        \
   debug_log(MDBX_LOG_FATAL, __func__, __LINE__, fmt "\n", __VA_ARGS__);
 
+#if MDBX_DEBUG
+#define ASSERT_FAIL(env, msg, func, line) mdbx_assert_fail(env, msg, func, line)
+#else /* MDBX_DEBUG */
+MDBX_NORETURN __cold void assert_fail(const char *msg, const char *func,
+                                      unsigned line);
+#define ASSERT_FAIL(env, msg, func, line)                                      \
+  do {                                                                         \
+    (void)(env);                                                               \
+    assert_fail(msg, func, line);                                              \
+  } while (0)
+#endif /* MDBX_DEBUG */
+
 #define ENSURE_MSG(env, expr, msg)                                             \
   do {                                                                         \
     if (unlikely(!(expr)))                                                     \
-      mdbx_assert_fail(env, msg, __func__, __LINE__);                          \
+      ASSERT_FAIL(env, msg, __func__, __LINE__);                               \
   } while (0)
 
 #define ENSURE(env, expr) ENSURE_MSG(env, expr, #expr)
@@ -1609,20 +1637,24 @@ ceil_powerof2(size_t value, size_t granularity) {
 }
 
 MDBX_MAYBE_UNUSED MDBX_NOTHROW_CONST_FUNCTION static unsigned
-log2n_powerof2(size_t value) {
-  assert(value > 0 && value < INT32_MAX && is_powerof2(value));
-  assert((value & -(int32_t)value) == value);
-#if __GNUC_PREREQ(4, 1) || __has_builtin(__builtin_ctzl)
-  return __builtin_ctzl(value);
+log2n_powerof2(size_t value_uintptr) {
+  assert(value_uintptr > 0 && value_uintptr < INT32_MAX &&
+         is_powerof2(value_uintptr));
+  assert((value_uintptr & -(intptr_t)value_uintptr) == value_uintptr);
+  const uint32_t value_uint32 = (uint32_t)value_uintptr;
+#if __GNUC_PREREQ(4, 1) || __has_builtin(__builtin_ctz)
+  STATIC_ASSERT(sizeof(value_uint32) <= sizeof(unsigned));
+  return __builtin_ctz(value_uint32);
 #elif defined(_MSC_VER)
   unsigned long index;
-  _BitScanForward(&index, (unsigned long)value);
+  STATIC_ASSERT(sizeof(value_uint32) <= sizeof(long));
+  _BitScanForward(&index, value_uint32);
   return index;
 #else
   static const uint8_t debruijn_ctz32[32] = {
       0,  1,  28, 2,  29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4,  8,
       31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6,  11, 5,  10, 9};
-  return debruijn_ctz32[(uint32_t)(value * 0x077CB531u) >> 27];
+  return debruijn_ctz32[(uint32_t)(value_uint32 * 0x077CB531ul) >> 27];
 #endif
 }
 

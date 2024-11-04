@@ -121,23 +121,22 @@
 #error MDBX_DPL_PREALLOC_FOR_RADIXSORT must be defined as 0 or 1
 #endif /* MDBX_DPL_PREALLOC_FOR_RADIXSORT */
 
-/** Basically, this build-option is for TODO. Guess it should be replaced
- * with MDBX_ENABLE_WRITEMAP_SPILLING with the three variants:
- *  0/OFF = Don't track dirty pages at all and don't spilling ones.
- *          This should be by-default on Linux and may-be other systems
- *          (not sure: Darwin/OSX, FreeBSD, Windows 10) where kernel provides
- *          properly LRU tracking and async writing on-demand.
- *  1/ON  = Lite tracking of dirty pages but with LRU labels and explicit
- *          spilling with msync(MS_ASYNC). */
-#ifndef MDBX_FAKE_SPILL_WRITEMAP
-#if defined(__linux__) || defined(__gnu_linux__)
-#define MDBX_FAKE_SPILL_WRITEMAP 1 /* msync(MS_ASYNC) is no-op on Linux */
+/** Controls dirty pages tracking, spilling and persisting in MDBX_WRITEMAP
+ * mode. 0/OFF = Don't track dirty pages at all, don't spill ones, and use
+ * msync() to persist data. This is by-default on Linux and other systems where
+ * kernel provides properly LRU tracking and effective flushing on-demand. 1/ON
+ * = Tracking of dirty pages but with LRU labels for spilling and explicit
+ * persist ones by write(). This may be reasonable for systems which low
+ * performance of msync() and/or LRU tracking. */
+#ifndef MDBX_AVOID_MSYNC
+#if defined(_WIN32) || defined(_WIN64)
+#define MDBX_AVOID_MSYNC 1
 #else
-#define MDBX_FAKE_SPILL_WRITEMAP 0
+#define MDBX_AVOID_MSYNC 0
 #endif
-#elif !(MDBX_FAKE_SPILL_WRITEMAP == 0 || MDBX_FAKE_SPILL_WRITEMAP == 1)
-#error MDBX_FAKE_SPILL_WRITEMAP must be defined as 0 or 1
-#endif /* MDBX_FAKE_SPILL_WRITEMAP */
+#elif !(MDBX_AVOID_MSYNC == 0 || MDBX_AVOID_MSYNC == 1)
+#error MDBX_AVOID_MSYNC must be defined as 0 or 1
+#endif /* MDBX_AVOID_MSYNC */
 
 /** Controls sort order of internal page number lists.
  * This mostly experimental/advanced option with not for regular MDBX users.
@@ -193,6 +192,27 @@
  *  otherwise detects ones availability automatically. */
 #ifndef MDBX_HAVE_C11ATOMICS
 #endif /* MDBX_HAVE_C11ATOMICS */
+
+/** If defined then enables use the GCC's `__builtin_cpu_supports()`
+ *  for runtime dispatching depending on the CPU's capabilities. */
+#ifndef MDBX_HAVE_BUILTIN_CPU_SUPPORTS
+#if defined(__APPLE__) || defined(BIONIC)
+/* Never use any modern features on Apple's or Google's OSes
+ * since a lot of troubles with compatibility and/or performance */
+#define MDBX_HAVE_BUILTIN_CPU_SUPPORTS 0
+#elif defined(__e2k__)
+#define MDBX_HAVE_BUILTIN_CPU_SUPPORTS 0
+#elif __has_builtin(__builtin_cpu_supports) ||                                 \
+    defined(__BUILTIN_CPU_SUPPORTS__) ||                                       \
+    (defined(__ia32__) && __GNUC_PREREQ(4, 8) && __GLIBC_PREREQ(2, 23))
+#define MDBX_HAVE_BUILTIN_CPU_SUPPORTS 1
+#else
+#define MDBX_HAVE_BUILTIN_CPU_SUPPORTS 0
+#endif
+#elif !(MDBX_HAVE_BUILTIN_CPU_SUPPORTS == 0 ||                                 \
+        MDBX_HAVE_BUILTIN_CPU_SUPPORTS == 1)
+#error MDBX_HAVE_BUILTIN_CPU_SUPPORTS must be defined as 0 or 1
+#endif /* MDBX_HAVE_BUILTIN_CPU_SUPPORTS */
 
 //------------------------------------------------------------------------------
 

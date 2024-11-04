@@ -1020,12 +1020,15 @@ LIBMDBX_API const char *mdbx_dump_val(const MDBX_val *key, char *const buf,
                                       const size_t bufsize);
 
 /** \brief Panics with message and causes abnormal process termination. */
-LIBMDBX_API void mdbx_panic(const char *fmt, ...) MDBX_PRINTF_ARGS(1, 2);
+MDBX_NORETURN LIBMDBX_API void mdbx_panic(const char *fmt, ...)
+    MDBX_PRINTF_ARGS(1, 2);
 
 /** \brief Panics with asserton failed message and causes abnormal process
  * termination. */
-LIBMDBX_API void mdbx_assert_fail(const MDBX_env *env, const char *msg,
-                                  const char *func, unsigned line);
+MDBX_NORETURN LIBMDBX_API void mdbx_assert_fail(const MDBX_env *env,
+                                                const char *msg,
+                                                const char *func,
+                                                unsigned line);
 /** end of c_debug @} */
 
 /** \brief Environment flags
@@ -1593,8 +1596,7 @@ enum MDBX_put_flags_t {
   MDBX_NOOVERWRITE = UINT32_C(0x10),
 
   /** Has effect only for \ref MDBX_DUPSORT databases.
-   * For upsertion: don't write if the key-value pair already exist.
-   * For deletion: remove all values for key. */
+   * For upsertion: don't write if the key-value pair already exist. */
   MDBX_NODUPDATA = UINT32_C(0x20),
 
   /** For upsertion: overwrite the current key/data pair.
@@ -2524,8 +2526,12 @@ struct MDBX_envinfo {
     uint64_t wops;    /**< Number of explicit write operations (not a pages)
                            to a disk */
     uint64_t
+        msync; /**< Number of explicit msync-to-disk operations (not a pages) */
+    uint64_t
+        fsync; /**< Number of explicit fsync-to-disk operations (not a pages) */
+    uint64_t
         gcrtime_seconds16dot16; /**< Time spent loading and searching inside
-                                     GC (aka FreeDB) in 1/65536 of second. */
+                                     GC (aka FreeDB) in 1/65536 of second */
   } mi_pgop_stat;
 };
 #ifndef __cplusplus
@@ -3112,6 +3118,21 @@ mdbx_limits_keysize_max(intptr_t pagesize, MDBX_db_flags_t flags);
  * \see db_flags */
 MDBX_NOTHROW_CONST_FUNCTION LIBMDBX_API intptr_t
 mdbx_limits_valsize_max(intptr_t pagesize, MDBX_db_flags_t flags);
+
+/** \brief Returns maximal size of key-value pair to fit in a single page with
+ * the given size and database flags, or -1 if pagesize is invalid.
+ * \ingroup c_statinfo
+ * \see db_flags */
+MDBX_NOTHROW_CONST_FUNCTION LIBMDBX_API intptr_t
+mdbx_limits_pairsize4page_max(intptr_t pagesize, MDBX_db_flags_t flags);
+
+/** \brief Returns maximal data size in bytes to fit in a leaf-page or
+ * single overflow/large-page with the given page size and database flags,
+ * or -1 if pagesize is invalid.
+ * \ingroup c_statinfo
+ * \see db_flags */
+MDBX_NOTHROW_CONST_FUNCTION LIBMDBX_API intptr_t
+mdbx_limits_valsize4page_max(intptr_t pagesize, MDBX_db_flags_t flags);
 
 /** \brief Returns maximal write transaction size (i.e. limit for summary volume
  * of dirty pages) in bytes for given page size, or -1 if pagesize is invalid.
