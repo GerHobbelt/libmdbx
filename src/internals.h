@@ -620,6 +620,7 @@ typedef struct pgop_stat {
       fsync; /* Number of explicit fsync/flush-to-disk operations */
 
   MDBX_atomic_uint64_t prefault; /* Number of prefault write operations */
+  MDBX_atomic_uint64_t mincore;  /* Number of mincore() calls */
 
   /* Статистика для профилирования GC.
    * Логически эти данные может быть стоит вынести в другую структуру,
@@ -813,6 +814,12 @@ typedef struct MDBX_lockinfo {
   /* Shared anchor for tracking readahead edge and enabled/disabled status. */
   pgno_t mti_readahead_anchor;
 
+  /* Shared cache for mincore() results */
+  struct {
+    pgno_t begin[4];
+    uint64_t mask[4];
+  } mti_mincore_cache;
+
   MDBX_ALIGNAS(MDBX_CACHELINE_SIZE) /* cacheline ----------------------------*/
 
   /* Readeaders registration lock. */
@@ -885,7 +892,8 @@ typedef struct MDBX_lockinfo {
 #endif /* MDBX_WORDBITS */
 
 #define MDBX_READERS_LIMIT 32767
-#define MDBX_RADIXSORT_THRESHOLD 333
+#define MDBX_RADIXSORT_THRESHOLD 142
+#define MDBX_GOLD_RATIO_DBL 1.6180339887498948482
 
 /*----------------------------------------------------------------------------*/
 
@@ -911,13 +919,9 @@ typedef txnid_t *MDBX_TXL;
 typedef struct MDBX_dp {
   MDBX_page *ptr;
   pgno_t pgno;
-  union {
-    uint32_t extra;
-    __anonymous_struct_extension__ struct {
-      unsigned multi : 1;
-      unsigned lru : 31;
-    };
-  };
+  uint32_t mlru;
+#define MDBX_dp_multi_mask 1
+#define MDBX_dp_lru_mask UINT32_C(0xffffFFFe)
 } MDBX_dp;
 
 /* An DPL (dirty-page list) is a sorted array of MDBX_DPs. */
@@ -933,7 +937,8 @@ typedef struct MDBX_dpl {
 } MDBX_dpl;
 
 /* PNL sizes */
-#define MDBX_PNL_GRANULATE 1024
+#define MDBX_PNL_GRANULATE_LOG2 10
+#define MDBX_PNL_GRANULATE (1 << MDBX_PNL_GRANULATE_LOG2)
 #define MDBX_PNL_INITIAL                                                       \
   (MDBX_PNL_GRANULATE - 2 - MDBX_ASSUME_MALLOC_OVERHEAD / sizeof(pgno_t))
 
@@ -1010,9 +1015,11 @@ struct MDBX_txn {
   /* Additional flag for sync_locked() */
 #define MDBX_SHRINK_ALLOWED UINT32_C(0x40000000)
 
+#define MDBX_TXN_DRAINED_GC 0x20 /* GC was depleted up to oldest reader */
+
 #define TXN_FLAGS                                                              \
   (MDBX_TXN_FINISHED | MDBX_TXN_ERROR | MDBX_TXN_DIRTY | MDBX_TXN_SPILLS |     \
-   MDBX_TXN_HAS_CHILD | MDBX_TXN_INVALID)
+   MDBX_TXN_HAS_CHILD | MDBX_TXN_INVALID | MDBX_TXN_DRAINED_GC)
 
 #if (TXN_FLAGS & (MDBX_TXN_RW_BEGIN_FLAGS | MDBX_TXN_RO_BEGIN_FLAGS)) ||       \
     ((MDBX_TXN_RW_BEGIN_FLAGS | MDBX_TXN_RO_BEGIN_FLAGS | TXN_FLAGS) &         \
@@ -1071,7 +1078,7 @@ struct MDBX_txn {
     struct {
       meta_troika_t troika;
       /* In write txns, array of cursors for each DB */
-      pgno_t *relist;         /* Reclaimed GC pages */
+      MDBX_PNL relist;        /* Reclaimed GC pages */
       txnid_t last_reclaimed; /* ID of last used record */
 #if MDBX_ENABLE_REFUND
       pgno_t loose_refund_wl /* FIXME: describe */;
@@ -1103,6 +1110,7 @@ struct MDBX_txn {
           MDBX_PNL list;
         } spilled;
         size_t writemap_dirty_npages;
+        size_t writemap_spilled_npages;
       };
     } tw;
   };
@@ -1247,9 +1255,10 @@ struct MDBX_env {
   uint16_t *me_dbflags;             /* array of flags from MDBX_db.md_flags */
   MDBX_atomic_uint32_t *me_dbiseqs; /* array of dbi sequence numbers */
   unsigned
-      me_maxgc_ov1page;    /* Number of pgno_t fit in a single overflow page */
-  uint32_t me_live_reader; /* have liveness lock in reader table */
-  void *me_userctx;        /* User-settable context */
+      me_maxgc_ov1page; /* Number of pgno_t fit in a single overflow page */
+  unsigned me_maxgc_per_branch;
+  uint32_t me_live_reader;        /* have liveness lock in reader table */
+  void *me_userctx;               /* User-settable context */
   MDBX_hsr_func *me_hsr_callback; /* Callback for kicking laggard readers */
 
   struct {
@@ -1265,11 +1274,14 @@ struct MDBX_env {
 #if !(defined(_WIN32) || defined(_WIN64))
     unsigned writethrough_threshold;
 #endif /* Windows */
+    bool prefault_write;
     union {
       unsigned all;
       /* tracks options with non-auto values but tuned by user */
       struct {
         unsigned dp_limit : 1;
+        unsigned rp_augment_limit : 1;
+        unsigned prefault_write : 1;
       } non_auto;
     } flags;
   } me_options;
@@ -1291,6 +1303,7 @@ struct MDBX_env {
     int semid;
   } me_sysv_ipc;
 #endif /* MDBX_LOCKING == MDBX_LOCKING_SYSV */
+  bool me_incore;
 
   MDBX_env *me_lcklist_next;
 
@@ -1299,6 +1312,7 @@ struct MDBX_env {
   MDBX_txn *me_txn; /* current write transaction */
   osal_fastmutex_t me_dbi_lock;
   MDBX_dbi me_numdbs; /* number of DBs opened */
+  bool me_prefault_write;
 
   MDBX_page *me_dp_reserve; /* list of malloc'ed blocks for re-use */
   unsigned me_dp_reserve_len;

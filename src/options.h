@@ -40,6 +40,8 @@
 #define MDBX_ENV_CHECKPID 1
 #endif
 #define MDBX_ENV_CHECKPID_CONFIG "AUTO=" MDBX_STRINGIFY(MDBX_ENV_CHECKPID)
+#elif !(MDBX_ENV_CHECKPID == 0 || MDBX_ENV_CHECKPID == 1)
+#error MDBX_ENV_CHECKPID must be defined as 0 or 1
 #else
 #define MDBX_ENV_CHECKPID_CONFIG MDBX_STRINGIFY(MDBX_ENV_CHECKPID)
 #endif /* MDBX_ENV_CHECKPID */
@@ -49,6 +51,8 @@
 #ifndef MDBX_TXN_CHECKOWNER
 #define MDBX_TXN_CHECKOWNER 1
 #define MDBX_TXN_CHECKOWNER_CONFIG "AUTO=" MDBX_STRINGIFY(MDBX_TXN_CHECKOWNER)
+#elif !(MDBX_TXN_CHECKOWNER == 0 || MDBX_TXN_CHECKOWNER == 1)
+#error MDBX_TXN_CHECKOWNER must be defined as 0 or 1
 #else
 #define MDBX_TXN_CHECKOWNER_CONFIG MDBX_STRINGIFY(MDBX_TXN_CHECKOWNER)
 #endif /* MDBX_TXN_CHECKOWNER */
@@ -62,6 +66,8 @@
 #define MDBX_TRUST_RTC 1
 #endif
 #define MDBX_TRUST_RTC_CONFIG "AUTO=" MDBX_STRINGIFY(MDBX_TRUST_RTC)
+#elif !(MDBX_TRUST_RTC == 0 || MDBX_TRUST_RTC == 1)
+#error MDBX_TRUST_RTC must be defined as 0 or 1
 #else
 #define MDBX_TRUST_RTC_CONFIG MDBX_STRINGIFY(MDBX_TRUST_RTC)
 #endif /* MDBX_TRUST_RTC */
@@ -87,17 +93,18 @@
 #error MDBX_ENABLE_PGOP_STAT must be defined as 0 or 1
 #endif /* MDBX_ENABLE_PGOP_STAT */
 
-/** Controls prevention of page-faults of reclaimed and allocated pages in the
- *  MDBX_WRITEMAP mode by clearing ones through file handle before touching. */
-#ifndef MDBX_ENABLE_PREFAULT
-#if MDBX_MMAP_INCOHERENT_FILE_WRITE
-#define MDBX_ENABLE_PREFAULT 0
+/** Controls using Unix' mincore() to determine whether DB-pages
+ * are resident in memory. */
+#ifndef MDBX_ENABLE_MINCORE
+#if MDBX_ENABLE_PREFAULT &&                                                    \
+    (defined(MINCORE_INCORE) || !(defined(_WIN32) || defined(_WIN64)))
+#define MDBX_ENABLE_MINCORE 1
 #else
-#define MDBX_ENABLE_PREFAULT 1
+#define MDBX_ENABLE_MINCORE 0
 #endif
-#elif !(MDBX_ENABLE_PREFAULT == 0 || MDBX_ENABLE_PREFAULT == 1)
-#error MDBX_ENABLE_PREFAULT must be defined as 0 or 1
-#endif /* MDBX_ENABLE_PREFAULT */
+#elif !(MDBX_ENABLE_MINCORE == 0 || MDBX_ENABLE_MINCORE == 1)
+#error MDBX_ENABLE_MINCORE must be defined as 0 or 1
+#endif /* MDBX_ENABLE_MINCORE */
 
 /** Enables chunking long list of retired pages during huge transactions commit
  * to avoid use sequences of pages. */
@@ -299,6 +306,8 @@
 #define MDBX_USE_OFDLOCKS 0
 #endif
 #define MDBX_USE_OFDLOCKS_CONFIG "AUTO=" MDBX_STRINGIFY(MDBX_USE_OFDLOCKS)
+#elif !(MDBX_USE_OFDLOCKS == 0 || MDBX_USE_OFDLOCKS == 1)
+#error MDBX_USE_OFDLOCKS must be defined as 0 or 1
 #else
 #define MDBX_USE_OFDLOCKS_CONFIG MDBX_STRINGIFY(MDBX_USE_OFDLOCKS)
 #endif /* MDBX_USE_OFDLOCKS */
@@ -312,6 +321,8 @@
 #else
 #define MDBX_USE_SENDFILE 0
 #endif
+#elif !(MDBX_USE_SENDFILE == 0 || MDBX_USE_SENDFILE == 1)
+#error MDBX_USE_SENDFILE must be defined as 0 or 1
 #endif /* MDBX_USE_SENDFILE */
 
 /** Advanced: Using copy_file_range() syscall (autodetection by default). */
@@ -321,6 +332,8 @@
 #else
 #define MDBX_USE_COPYFILERANGE 0
 #endif
+#elif !(MDBX_USE_COPYFILERANGE == 0 || MDBX_USE_COPYFILERANGE == 1)
+#error MDBX_USE_COPYFILERANGE must be defined as 0 or 1
 #endif /* MDBX_USE_COPYFILERANGE */
 
 /** Advanced: Using sync_file_range() syscall (autodetection by default). */
@@ -332,6 +345,8 @@
 #else
 #define MDBX_USE_SYNCFILERANGE 0
 #endif
+#elif !(MDBX_USE_SYNCFILERANGE == 0 || MDBX_USE_SYNCFILERANGE == 1)
+#error MDBX_USE_SYNCFILERANGE must be defined as 0 or 1
 #endif /* MDBX_USE_SYNCFILERANGE */
 
 //------------------------------------------------------------------------------
@@ -343,6 +358,9 @@
 #else
 #define MDBX_CPU_WRITEBACK_INCOHERENT 1
 #endif
+#elif !(MDBX_CPU_WRITEBACK_INCOHERENT == 0 ||                                  \
+        MDBX_CPU_WRITEBACK_INCOHERENT == 1)
+#error MDBX_CPU_WRITEBACK_INCOHERENT must be defined as 0 or 1
 #endif /* MDBX_CPU_WRITEBACK_INCOHERENT */
 
 #ifndef MDBX_MMAP_INCOHERENT_FILE_WRITE
@@ -351,6 +369,9 @@
 #else
 #define MDBX_MMAP_INCOHERENT_FILE_WRITE 0
 #endif
+#elif !(MDBX_MMAP_INCOHERENT_FILE_WRITE == 0 ||                                \
+        MDBX_MMAP_INCOHERENT_FILE_WRITE == 1)
+#error MDBX_MMAP_INCOHERENT_FILE_WRITE must be defined as 0 or 1
 #endif /* MDBX_MMAP_INCOHERENT_FILE_WRITE */
 
 #ifndef MDBX_MMAP_INCOHERENT_CPU_CACHE
@@ -363,7 +384,20 @@
 /* LY: assume no relevant mmap/dcache issues. */
 #define MDBX_MMAP_INCOHERENT_CPU_CACHE 0
 #endif
+#elif !(MDBX_MMAP_INCOHERENT_CPU_CACHE == 0 ||                                 \
+        MDBX_MMAP_INCOHERENT_CPU_CACHE == 1)
+#error MDBX_MMAP_INCOHERENT_CPU_CACHE must be defined as 0 or 1
 #endif /* MDBX_MMAP_INCOHERENT_CPU_CACHE */
+
+#ifndef MDBX_MMAP_USE_MS_ASYNC
+#if MDBX_MMAP_INCOHERENT_FILE_WRITE || MDBX_MMAP_INCOHERENT_CPU_CACHE
+#define MDBX_MMAP_USE_MS_ASYNC 1
+#else
+#define MDBX_MMAP_USE_MS_ASYNC 0
+#endif
+#elif !(MDBX_MMAP_USE_MS_ASYNC == 0 || MDBX_MMAP_USE_MS_ASYNC == 1)
+#error MDBX_MMAP_USE_MS_ASYNC must be defined as 0 or 1
+#endif /* MDBX_MMAP_USE_MS_ASYNC */
 
 #ifndef MDBX_64BIT_ATOMIC
 #if MDBX_WORDBITS >= 64 || defined(DOXYGEN)
@@ -372,6 +406,8 @@
 #define MDBX_64BIT_ATOMIC 0
 #endif
 #define MDBX_64BIT_ATOMIC_CONFIG "AUTO=" MDBX_STRINGIFY(MDBX_64BIT_ATOMIC)
+#elif !(MDBX_64BIT_ATOMIC == 0 || MDBX_64BIT_ATOMIC == 1)
+#error MDBX_64BIT_ATOMIC must be defined as 0 or 1
 #else
 #define MDBX_64BIT_ATOMIC_CONFIG MDBX_STRINGIFY(MDBX_64BIT_ATOMIC)
 #endif /* MDBX_64BIT_ATOMIC */
@@ -397,6 +433,8 @@
 #endif
 #elif defined(_MSC_VER) || defined(__APPLE__) || defined(DOXYGEN)
 #define MDBX_64BIT_CAS 1
+#elif !(MDBX_64BIT_CAS == 0 || MDBX_64BIT_CAS == 1)
+#error MDBX_64BIT_CAS must be defined as 0 or 1
 #else
 #define MDBX_64BIT_CAS MDBX_64BIT_ATOMIC
 #endif

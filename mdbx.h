@@ -1926,6 +1926,12 @@ enum MDBX_error_t {
   /** Overlapping read and write transactions for the current thread */
   MDBX_TXN_OVERLAPPING = -30415,
 
+  /** Внутренняя ошибка возвращаемая в случае нехватки запаса свободных страниц
+   * при обновлении GC. Используется как вспомогательное средство для отладки.
+   * \note С точки зрения пользователя семантически
+   *       равнозначна \ref MDBX_PROBLEM. */
+  MDBX_BACKLOG_DEPLETED = -30414,
+
   /* The last of MDBX-added error codes */
   MDBX_LAST_ADDED_ERRCODE = MDBX_TXN_OVERLAPPING,
 
@@ -2248,6 +2254,11 @@ enum MDBX_option_t {
    * On Windows a write-through is used always but \ref MDBX_NOMETASYNC could
    * be used for switching to write-and-flush. */
   MDBX_opt_writethrough_threshold,
+
+  /** \brief Controls prevention of page-faults of reclaimed and allocated pages
+   * in the \ref MDBX_WRITEMAP mode by clearing ones through file handle before
+   * touching. */
+  MDBX_opt_prefault_write_enable,
 };
 #ifndef __cplusplus
 /** \ingroup c_settings */
@@ -2594,6 +2605,7 @@ struct MDBX_envinfo {
     uint64_t wops;     /**< Number of explicit write operations (not a pages)
                             to a disk */
     uint64_t prefault; /**< Number of prefault write operations (not a pages) */
+    uint64_t mincore;  /**< Number of mincore() calls */
     uint64_t
         msync; /**< Number of explicit msync-to-disk operations (not a pages) */
     uint64_t
@@ -4151,6 +4163,8 @@ typedef int(MDBX_cmp_func)(const MDBX_val *a,
  *                               by current thread. */
 LIBMDBX_API int mdbx_dbi_open(MDBX_txn *txn, const char *name,
                               MDBX_db_flags_t flags, MDBX_dbi *dbi);
+LIBMDBX_API int mdbx_dbi_open2(MDBX_txn *txn, const MDBX_val *name,
+                               MDBX_db_flags_t flags, MDBX_dbi *dbi);
 
 /** \deprecated Please
  * \ref avoid_custom_comparators "avoid using custom comparators" and use
@@ -4170,6 +4184,9 @@ LIBMDBX_API int mdbx_dbi_open(MDBX_txn *txn, const char *name,
 MDBX_DEPRECATED LIBMDBX_API int
 mdbx_dbi_open_ex(MDBX_txn *txn, const char *name, MDBX_db_flags_t flags,
                  MDBX_dbi *dbi, MDBX_cmp_func *keycmp, MDBX_cmp_func *datacmp);
+MDBX_DEPRECATED LIBMDBX_API int
+mdbx_dbi_open_ex2(MDBX_txn *txn, const MDBX_val *name, MDBX_db_flags_t flags,
+                  MDBX_dbi *dbi, MDBX_cmp_func *keycmp, MDBX_cmp_func *datacmp);
 
 /** \defgroup value2key Value-to-Key functions
  * \brief Value-to-Key functions to
@@ -5467,18 +5484,20 @@ typedef enum MDBX_page_type_t MDBX_page_type_t;
 #endif
 
 /** \brief Pseudo-name for MainDB */
-#define MDBX_PGWALK_MAIN ((const char *)((ptrdiff_t)0))
+#define MDBX_PGWALK_MAIN ((void *)((ptrdiff_t)0))
 /** \brief Pseudo-name for GarbageCollectorDB */
-#define MDBX_PGWALK_GC ((const char *)((ptrdiff_t)-1))
+#define MDBX_PGWALK_GC ((void *)((ptrdiff_t)-1))
 /** \brief Pseudo-name for MetaPages */
-#define MDBX_PGWALK_META ((const char *)((ptrdiff_t)-2))
+#define MDBX_PGWALK_META ((void *)((ptrdiff_t)-2))
 
 /** \brief Callback function for traverse the b-tree. \see mdbx_env_pgwalk() */
-typedef int MDBX_pgvisitor_func(
-    const uint64_t pgno, const unsigned number, void *const ctx, const int deep,
-    const char *const dbi, const size_t page_size, const MDBX_page_type_t type,
-    const MDBX_error_t err, const size_t nentries, const size_t payload_bytes,
-    const size_t header_bytes, const size_t unused_bytes) MDBX_CXX17_NOEXCEPT;
+typedef int
+MDBX_pgvisitor_func(const uint64_t pgno, const unsigned number, void *const ctx,
+                    const int deep, const MDBX_val *dbi_name,
+                    const size_t page_size, const MDBX_page_type_t type,
+                    const MDBX_error_t err, const size_t nentries,
+                    const size_t payload_bytes, const size_t header_bytes,
+                    const size_t unused_bytes) MDBX_CXX17_NOEXCEPT;
 
 /** \brief B-tree traversal function. */
 LIBMDBX_API int mdbx_env_pgwalk(MDBX_txn *txn, MDBX_pgvisitor_func *visitor,

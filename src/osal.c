@@ -1155,6 +1155,8 @@ MDBX_INTERNAL_FUNC void osal_ioring_destroy(osal_ioring_t *ior) {
   osal_memalign_free(ior->pool);
   osal_free(ior->event_pool);
   CloseHandle(ior->async_done);
+  if (ior->overlapped_fd)
+    CloseHandle(ior->overlapped_fd);
 #else
   osal_free(ior->pool);
 #endif
@@ -1564,6 +1566,7 @@ MDBX_INTERNAL_FUNC int osal_fsync(mdbx_filehandle_t fd,
    * see http://www.spinics.net/lists/linux-ext4/msg33714.html */
   while (1) {
     switch (mode_bits & (MDBX_SYNC_DATA | MDBX_SYNC_SIZE)) {
+    case MDBX_SYNC_NONE:
     case MDBX_SYNC_KICK:
       return MDBX_SUCCESS /* nothing to do */;
 #if defined(_POSIX_SYNCHRONIZED_IO) && _POSIX_SYNCHRONIZED_IO > 0
@@ -1705,9 +1708,15 @@ MDBX_INTERNAL_FUNC int osal_thread_join(osal_thread_t thread) {
 MDBX_INTERNAL_FUNC int osal_msync(const osal_mmap_t *map, size_t offset,
                                   size_t length,
                                   enum osal_syncmode_bits mode_bits) {
+  if (!MDBX_MMAP_USE_MS_ASYNC && mode_bits == MDBX_SYNC_NONE)
+    return MDBX_SUCCESS;
+
   void *ptr = ptr_disp(map->base, offset);
 #if defined(_WIN32) || defined(_WIN64)
   if (!FlushViewOfFile(ptr, length))
+    return (int)GetLastError();
+  if ((mode_bits & (MDBX_SYNC_DATA | MDBX_SYNC_IODQ)) &&
+      !FlushFileBuffers(map->fd))
     return (int)GetLastError();
 #else
 #if defined(__linux__) || defined(__gnu_linux__)
@@ -1716,16 +1725,18 @@ MDBX_INTERNAL_FUNC int osal_msync(const osal_mmap_t *map, size_t offset,
   //
   // However, this behavior may be changed in custom kernels,
   // so just leave such optimization to the libc discretion.
+  // NOTE: The MDBX_MMAP_USE_MS_ASYNC must be defined to 1 for such cases.
   //
   // assert(linux_kernel_version > 0x02061300);
-  // if (mode_bits == MDBX_SYNC_KICK)
+  // if (mode_bits <= MDBX_SYNC_KICK)
   //   return MDBX_SUCCESS;
 #endif /* Linux */
   if (msync(ptr, length, (mode_bits & MDBX_SYNC_DATA) ? MS_SYNC : MS_ASYNC))
     return errno;
-  mode_bits &= ~MDBX_SYNC_DATA;
+  if ((mode_bits & MDBX_SYNC_SIZE) && fsync(map->fd))
+    return errno;
 #endif
-  return osal_fsync(map->fd, mode_bits);
+  return MDBX_SUCCESS;
 }
 
 MDBX_INTERNAL_FUNC int osal_check_fs_rdonly(mdbx_filehandle_t handle,
@@ -1756,6 +1767,50 @@ MDBX_INTERNAL_FUNC int osal_check_fs_rdonly(mdbx_filehandle_t handle,
     return (err == MDBX_ENOFILE) ? MDBX_EACCESS : err;
 #endif /* !Windows */
   return MDBX_SUCCESS;
+}
+
+MDBX_INTERNAL_FUNC int osal_check_fs_incore(mdbx_filehandle_t handle) {
+#if defined(_WIN32) || defined(_WIN64)
+  (void)handle;
+#else
+  struct statfs statfs_info;
+  if (fstatfs(handle, &statfs_info))
+    return errno;
+
+#if defined(__OpenBSD__)
+  const unsigned type = 0;
+#else
+  const unsigned type = statfs_info.f_type;
+#endif
+  switch (type) {
+  case 0x28cd3d45 /* CRAMFS_MAGIC */:
+  case 0x858458f6 /* RAMFS_MAGIC */:
+  case 0x01021994 /* TMPFS_MAGIC */:
+  case 0x73717368 /* SQUASHFS_MAGIC */:
+  case 0x7275 /* ROMFS_MAGIC */:
+    return MDBX_RESULT_TRUE;
+  }
+
+#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) ||     \
+    defined(__BSD__) || defined(__bsdi__) || defined(__DragonFly__) ||         \
+    defined(__APPLE__) || defined(__MACH__) || defined(MFSNAMELEN) ||          \
+    defined(MFSTYPENAMELEN) || defined(VFS_NAMELEN)
+  const char *const name = statfs_info.f_fstypename;
+  const size_t name_len = sizeof(statfs_info.f_fstypename);
+#else
+  const char *const name = "";
+  const size_t name_len = 0;
+#endif
+  if (name_len) {
+    if (strncasecmp("tmpfs", name, 6) == 0 ||
+        strncasecmp("mfs", name, 4) == 0 ||
+        strncasecmp("ramfs", name, 6) == 0 ||
+        strncasecmp("romfs", name, 6) == 0)
+      return MDBX_RESULT_TRUE;
+  }
+#endif /* !Windows */
+
+  return MDBX_RESULT_FALSE;
 }
 
 static int osal_check_fs_local(mdbx_filehandle_t handle, int flags) {
@@ -3336,7 +3391,7 @@ __cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages,
 
 #ifndef xMDBX_ALLOY
 unsigned sys_pagesize;
-MDBX_MAYBE_UNUSED unsigned sys_allocation_granularity;
+MDBX_MAYBE_UNUSED unsigned sys_pagesize_ln2, sys_allocation_granularity;
 #endif /* xMDBX_ALLOY */
 
 void osal_ctor(void) {
@@ -3362,6 +3417,7 @@ void osal_ctor(void) {
   assert(sys_pagesize > 0 && (sys_pagesize & (sys_pagesize - 1)) == 0);
   assert(sys_allocation_granularity >= sys_pagesize &&
          sys_allocation_granularity % sys_pagesize == 0);
+  sys_pagesize_ln2 = log2n_powerof2(sys_pagesize);
 
 #if defined(__linux__) || defined(__gnu_linux__)
   posix_clockid = choice_monoclock();

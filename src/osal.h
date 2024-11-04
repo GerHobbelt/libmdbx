@@ -211,7 +211,8 @@ typedef pthread_mutex_t osal_fastmutex_t;
 /* OS abstraction layer stuff */
 
 MDBX_INTERNAL_VAR unsigned sys_pagesize;
-MDBX_MAYBE_UNUSED MDBX_INTERNAL_VAR unsigned sys_allocation_granularity;
+MDBX_MAYBE_UNUSED MDBX_INTERNAL_VAR unsigned sys_pagesize_ln2,
+    sys_allocation_granularity;
 
 /* Get the size of a memory page for the system.
  * This is the basic size that the platform's memory manager uses, and is
@@ -522,10 +523,11 @@ osal_thread_create(osal_thread_t *thread,
 MDBX_INTERNAL_FUNC int osal_thread_join(osal_thread_t thread);
 
 enum osal_syncmode_bits {
-  MDBX_SYNC_KICK = 0,
-  MDBX_SYNC_DATA = 1,
-  MDBX_SYNC_SIZE = 2,
-  MDBX_SYNC_IODQ = 4
+  MDBX_SYNC_NONE = 0,
+  MDBX_SYNC_KICK = 1,
+  MDBX_SYNC_DATA = 2,
+  MDBX_SYNC_SIZE = 4,
+  MDBX_SYNC_IODQ = 8
 };
 
 MDBX_INTERNAL_FUNC int osal_fsync(mdbx_filehandle_t fd,
@@ -584,6 +586,7 @@ MDBX_INTERNAL_FUNC int osal_msync(const osal_mmap_t *map, size_t offset,
 MDBX_INTERNAL_FUNC int osal_check_fs_rdonly(mdbx_filehandle_t handle,
                                             const pathchar_t *pathname,
                                             int err);
+MDBX_INTERNAL_FUNC int osal_check_fs_incore(mdbx_filehandle_t handle);
 
 MDBX_MAYBE_UNUSED static __inline uint32_t osal_getpid(void) {
   STATIC_ASSERT(sizeof(mdbx_pid_t) <= sizeof(uint32_t));
