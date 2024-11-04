@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2022 Leonid Yuriev <leo@yuriev.ru>
+ * Copyright 2015-2023 Leonid Yuriev <leo@yuriev.ru>
  * and other libmdbx authors: please see AUTHORS file.
  * All rights reserved.
  *
@@ -668,6 +668,23 @@ __extern_C key_t ftok(const char *, int);
 #define MDBX_WEAK_IMPORT_ATTRIBUTE
 #endif
 #endif /* MDBX_WEAK_IMPORT_ATTRIBUTE */
+
+#ifndef MDBX_GOOFY_MSVC_STATIC_ANALYZER
+#ifdef _PREFAST_
+#define MDBX_GOOFY_MSVC_STATIC_ANALYZER 1
+#else
+#define MDBX_GOOFY_MSVC_STATIC_ANALYZER 0
+#endif
+#endif /* MDBX_GOOFY_MSVC_STATIC_ANALYZER */
+
+#if MDBX_GOOFY_MSVC_STATIC_ANALYZER
+#define MDBX_ANALYSIS_ASSUME(expr) __analysis_assume(expr)
+#define MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(warn_id, note)                       \
+  _Pragma(MDBX_STRINGIFY(prefast(suppress : warn_id)))
+#else
+#define MDBX_ANALYSIS_ASSUME(expr) assert(expr)
+#define MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(warn_id, note)
+#endif
 
 /*----------------------------------------------------------------------------*/
 

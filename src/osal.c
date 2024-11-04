@@ -1,7 +1,7 @@
 /* https://en.wikipedia.org/wiki/Operating_system_abstraction_layer */
 
 /*
- * Copyright 2015-2022 Leonid Yuriev <leo@yuriev.ru>
+ * Copyright 2015-2023 Leonid Yuriev <leo@yuriev.ru>
  * and other libmdbx authors: please see AUTHORS file.
  * All rights reserved.
  *
@@ -48,6 +48,7 @@ static int ntstatus2errcode(NTSTATUS status) {
   OVERLAPPED ov;
   memset(&ov, 0, sizeof(ov));
   ov.Internal = status;
+  MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(6387, "'_Param_(1)' could be '0'");
   return GetOverlappedResult(NULL, &ov, &dummy, FALSE) ? MDBX_SUCCESS
                                                        : (int)GetLastError();
 }
@@ -82,6 +83,8 @@ extern NTSTATUS NTAPI NtMapViewOfSection(
 extern NTSTATUS NTAPI NtUnmapViewOfSection(IN HANDLE ProcessHandle,
                                            IN OPTIONAL PVOID BaseAddress);
 
+MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(28251,
+                                  "Inconsistent annotation for 'NtClose'...")
 extern NTSTATUS NTAPI NtClose(HANDLE Handle);
 
 extern NTSTATUS NTAPI NtAllocateVirtualMemory(
@@ -320,7 +323,7 @@ MDBX_INTERNAL_FUNC int osal_vasprintf(char **strp, const char *fmt,
     return needed;
   }
 
-  *strp = osal_malloc(needed + 1);
+  *strp = osal_malloc(needed + (size_t)1);
   if (unlikely(*strp == nullptr)) {
     va_end(ones);
 #if defined(_WIN32) || defined(_WIN64)
@@ -331,7 +334,7 @@ MDBX_INTERNAL_FUNC int osal_vasprintf(char **strp, const char *fmt,
     return -1;
   }
 
-  int actual = vsnprintf(*strp, needed + 1, fmt, ones);
+  int actual = vsnprintf(*strp, needed + (size_t)1, fmt, ones);
   va_end(ones);
 
   assert(actual == needed);
@@ -546,19 +549,32 @@ MDBX_INTERNAL_FUNC int osal_fastmutex_release(osal_fastmutex_t *fastmutex) {
 
 #if defined(_WIN32) || defined(_WIN64)
 
-#ifndef WC_ERR_INVALID_CHARS
-static const DWORD WC_ERR_INVALID_CHARS =
-    (6 /* Windows Vista */ <= /* MajorVersion */ LOBYTE(LOWORD(GetVersion())))
-        ? 0x00000080
-        : 0;
-#endif /* WC_ERR_INVALID_CHARS */
+MDBX_INTERNAL_FUNC int osal_mb2w(const char *const src, wchar_t **const pdst) {
+  const size_t dst_wlen = MultiByteToWideChar(
+      CP_THREAD_ACP, MB_ERR_INVALID_CHARS, src, -1, nullptr, 0);
+  wchar_t *dst = *pdst;
+  int rc = ERROR_INVALID_NAME;
+  if (unlikely(dst_wlen < 2 || dst_wlen > /* MAX_PATH */ INT16_MAX))
+    goto bailout;
 
-MDBX_MAYBE_UNUSED MDBX_INTERNAL_FUNC size_t osal_mb2w(wchar_t *dst,
-                                                      size_t dst_n,
-                                                      const char *src,
-                                                      size_t src_n) {
-  return MultiByteToWideChar(CP_THREAD_ACP, MB_ERR_INVALID_CHARS, src,
-                             (int)src_n, dst, (int)dst_n);
+  dst = osal_realloc(dst, dst_wlen * sizeof(wchar_t));
+  rc = MDBX_ENOMEM;
+  if (unlikely(!dst))
+    goto bailout;
+
+  *pdst = dst;
+  if (likely(dst_wlen == (size_t)MultiByteToWideChar(CP_THREAD_ACP,
+                                                     MB_ERR_INVALID_CHARS, src,
+                                                     -1, dst, (int)dst_wlen)))
+    return MDBX_SUCCESS;
+
+  rc = ERROR_INVALID_NAME;
+bailout:
+  if (*pdst) {
+    osal_free(*pdst);
+    *pdst = nullptr;
+  }
+  return rc;
 }
 
 #endif /* Windows */
@@ -679,7 +695,7 @@ MDBX_INTERNAL_FUNC int osal_ioring_add(osal_ioring_t *ior, const size_t offset,
           ((bytes | (uintptr_t)data | ior->last_bytes |
             (uintptr_t)(uint64_t)item->sgv[0].Buffer) &
            ior_alignment_mask) == 0 &&
-          ior->last_sgvcnt + segments < OSAL_IOV_MAX) {
+          ior->last_sgvcnt + (size_t)segments < OSAL_IOV_MAX) {
         assert(ior->overlapped_fd);
         assert((item->single.iov_len & ior_WriteFile_flag) == 0);
         assert(item->sgv[ior->last_sgvcnt].Buffer == 0);
@@ -788,6 +804,8 @@ MDBX_INTERNAL_FUNC void osal_ioring_walk(
     if (bytes & ior_WriteFile_flag) {
       data = Ptr64ToPtr(item->sgv[0].Buffer);
       bytes = ior->pagesize;
+      MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(
+          6385, "Reading invalid data from 'item->sgv'");
       while (item->sgv[i].Buffer) {
         if (data + ior->pagesize != item->sgv[i].Buffer) {
           callback(ctx, offset, data, bytes);
@@ -834,6 +852,8 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
     if (bytes & ior_WriteFile_flag) {
       assert(ior->overlapped_fd && fd == ior->overlapped_fd);
       bytes = ior->pagesize;
+      MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(
+          6385, "Reading invalid data from 'item->sgv'");
       while (item->sgv[i].Buffer) {
         bytes += ior->pagesize;
         ++i;
@@ -972,6 +992,8 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
       size_t i = 1, bytes = item->single.iov_len - ior_WriteFile_flag;
       if (bytes & ior_WriteFile_flag) {
         bytes = ior->pagesize;
+        MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(
+            6385, "Reading invalid data from 'item->sgv'");
         while (item->sgv[i].Buffer) {
           bytes += ior->pagesize;
           ++i;
@@ -1065,9 +1087,12 @@ MDBX_INTERNAL_FUNC void osal_ioring_reset(osal_ioring_t *ior) {
       if (item->ov.hEvent && item->ov.hEvent != ior)
         ior_put_event(ior, item->ov.hEvent);
       size_t i = 1;
-      if ((item->single.iov_len & ior_WriteFile_flag) == 0)
+      if ((item->single.iov_len & ior_WriteFile_flag) == 0) {
+        MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(
+            6385, "Reading invalid data from 'item->sgv'");
         while (item->sgv[i].Buffer)
           ++i;
+      }
       item = ior_next(item, i);
     }
   }
@@ -1082,8 +1107,11 @@ MDBX_INTERNAL_FUNC void osal_ioring_reset(osal_ioring_t *ior) {
 static void ior_cleanup(osal_ioring_t *ior, const size_t since) {
   osal_ioring_reset(ior);
 #if defined(_WIN32) || defined(_WIN64)
-  for (size_t i = since; i < ior->event_stack; ++i)
+  for (size_t i = since; i < ior->event_stack; ++i) {
+    MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(
+        6001, "Using uninitialized memory '**ior.event_pool'");
     CloseHandle(ior->event_pool[i]);
+  }
   ior->event_stack = 0;
 #else
   (void)since;
@@ -1160,7 +1188,7 @@ MDBX_INTERNAL_FUNC void osal_ioring_destroy(osal_ioring_t *ior) {
 #else
   osal_free(ior->pool);
 #endif
-  memset(ior, -1, sizeof(osal_ioring_t));
+  memset(ior, 0, sizeof(osal_ioring_t));
 }
 
 /*----------------------------------------------------------------------------*/
@@ -1183,6 +1211,33 @@ MDBX_INTERNAL_FUNC int osal_removedirectory(const pathchar_t *pathname) {
 #else
   return rmdir(pathname) ? errno : MDBX_SUCCESS;
 #endif
+}
+
+MDBX_INTERNAL_FUNC int osal_fileexists(const pathchar_t *pathname) {
+#if defined(_WIN32) || defined(_WIN64)
+  if (GetFileAttributesW(pathname) != INVALID_FILE_ATTRIBUTES)
+    return MDBX_RESULT_TRUE;
+  int err = GetLastError();
+  return (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
+             ? MDBX_RESULT_FALSE
+             : err;
+#else
+  if (access(pathname, F_OK) == 0)
+    return MDBX_RESULT_TRUE;
+  int err = errno;
+  return (err == ENOENT || err == ENOTDIR) ? MDBX_RESULT_FALSE : err;
+#endif
+}
+
+MDBX_INTERNAL_FUNC pathchar_t *osal_fileext(const pathchar_t *pathname,
+                                            size_t len) {
+  const pathchar_t *ext = nullptr;
+  for (size_t i = 0; i < len && pathname[i]; i++)
+    if (pathname[i] == '.')
+      ext = pathname + i;
+    else if (osal_isdirsep(pathname[i]))
+      ext = nullptr;
+  return (pathchar_t *)ext;
 }
 
 MDBX_INTERNAL_FUNC bool osal_pathequal(const pathchar_t *l, const pathchar_t *r,
@@ -2133,9 +2188,8 @@ static int check_mmap_limit(const size_t limit) {
   return MDBX_SUCCESS;
 }
 
-MDBX_INTERNAL_FUNC int osal_mmap(const int flags, osal_mmap_t *map,
-                                 const size_t size, const size_t limit,
-                                 const unsigned options) {
+MDBX_INTERNAL_FUNC int osal_mmap(const int flags, osal_mmap_t *map, size_t size,
+                                 const size_t limit, const unsigned options) {
   assert(size <= limit);
   map->limit = 0;
   map->current = 0;
@@ -2155,6 +2209,7 @@ MDBX_INTERNAL_FUNC int osal_mmap(const int flags, osal_mmap_t *map,
 
   if ((flags & MDBX_RDONLY) == 0 && (options & MMAP_OPTION_TRUNCATE) != 0) {
     err = osal_ftruncate(map->fd, size);
+    VERBOSE("ftruncate %zu, err %d", size, err);
     if (err != MDBX_SUCCESS)
       return err;
     map->filesize = size;
@@ -2163,9 +2218,16 @@ MDBX_INTERNAL_FUNC int osal_mmap(const int flags, osal_mmap_t *map,
 #endif /* !Windows */
   } else {
     err = osal_filesize(map->fd, &map->filesize);
+    VERBOSE("filesize %" PRIu64 ", err %d", map->filesize, err);
     if (err != MDBX_SUCCESS)
       return err;
-#if !(defined(_WIN32) || defined(_WIN64))
+#if defined(_WIN32) || defined(_WIN64)
+    if (map->filesize < size) {
+      WARNING("file size (%zu) less than requested for mapping (%zu)",
+              (size_t)map->filesize, size);
+      size = (size_t)map->filesize;
+    }
+#else
     map->current = (map->filesize > limit) ? limit : (size_t)map->filesize;
 #endif /* !Windows */
   }
@@ -2274,8 +2336,7 @@ MDBX_INTERNAL_FUNC int osal_munmap(osal_mmap_t *map) {
   VALGRIND_MAKE_MEM_NOACCESS(map->base, map->current);
   /* Unpoisoning is required for ASAN to avoid false-positive diagnostic
    * when this memory will re-used by malloc or another mmapping.
-   * See https://libmdbx.dqdkfa.ru/dead-github/pull/93#issuecomment-613687203
-   */
+   * See https://libmdbx.dqdkfa.ru/dead-github/pull/93#issuecomment-613687203 */
   MDBX_ASAN_UNPOISON_MEMORY_REGION(
       map->base, (map->filesize && map->filesize < map->limit) ? map->filesize
                                                                : map->limit);
@@ -2300,25 +2361,38 @@ MDBX_INTERNAL_FUNC int osal_munmap(osal_mmap_t *map) {
 
 MDBX_INTERNAL_FUNC int osal_mresize(const int flags, osal_mmap_t *map,
                                     size_t size, size_t limit) {
+  int rc = osal_filesize(map->fd, &map->filesize);
+  VERBOSE("flags 0x%x, size %zu, limit %zu, filesize %" PRIu64, flags, size,
+          limit, map->filesize);
   assert(size <= limit);
+  if (rc != MDBX_SUCCESS) {
+    map->filesize = 0;
+    return rc;
+  }
+
 #if defined(_WIN32) || defined(_WIN64)
   assert(size != map->current || limit != map->limit || size < map->filesize);
 
   NTSTATUS status;
   LARGE_INTEGER SectionSize;
-  int err, rc = MDBX_SUCCESS;
+  int err;
 
-  if (!(flags & MDBX_RDONLY) && limit == map->limit && size > map->current &&
-      /* workaround for Wine */ mdbx_NtExtendSection) {
-    /* growth rw-section */
-    SectionSize.QuadPart = size;
-    status = mdbx_NtExtendSection(map->section, &SectionSize);
-    if (!NT_SUCCESS(status))
-      return ntstatus2errcode(status);
-    map->current = size;
-    if (map->filesize < size)
-      map->filesize = size;
-    return MDBX_SUCCESS;
+  if (limit == map->limit && size > map->current) {
+    if ((flags & MDBX_RDONLY) && map->filesize >= size) {
+      map->current = size;
+      return MDBX_SUCCESS;
+    } else if (!(flags & MDBX_RDONLY) &&
+               /* workaround for Wine */ mdbx_NtExtendSection) {
+      /* growth rw-section */
+      SectionSize.QuadPart = size;
+      status = mdbx_NtExtendSection(map->section, &SectionSize);
+      if (!NT_SUCCESS(status))
+        return ntstatus2errcode(status);
+      map->current = size;
+      if (map->filesize < size)
+        map->filesize = size;
+      return MDBX_SUCCESS;
+    }
   }
 
   if (limit > map->limit) {
@@ -2347,13 +2421,15 @@ MDBX_INTERNAL_FUNC int osal_mresize(const int flags, osal_mmap_t *map,
    *  - change size of mapped view;
    *  - extend read-only mapping;
    * Therefore we should unmap/map entire section. */
-  if ((flags & MDBX_MRESIZE_MAY_UNMAP) == 0)
+  if ((flags & MDBX_MRESIZE_MAY_UNMAP) == 0) {
+    if (size <= map->current && limit == map->limit)
+      return MDBX_SUCCESS;
     return MDBX_EPERM;
+  }
 
   /* Unpoisoning is required for ASAN to avoid false-positive diagnostic
    * when this memory will re-used by malloc or another mmapping.
-   * See https://libmdbx.dqdkfa.ru/dead-github/pull/93#issuecomment-613687203
-   */
+   * See https://libmdbx.dqdkfa.ru/dead-github/pull/93#issuecomment-613687203 */
   MDBX_ASAN_UNPOISON_MEMORY_REGION(map->base, map->limit);
   status = NtUnmapViewOfSection(GetCurrentProcess(), map->base);
   if (!NT_SUCCESS(status))
@@ -2366,7 +2442,6 @@ MDBX_INTERNAL_FUNC int osal_mresize(const int flags, osal_mmap_t *map,
   if (!NT_SUCCESS(status)) {
   bailout_ntstatus:
     err = ntstatus2errcode(status);
-  bailout:
     map->base = NULL;
     map->current = map->limit = 0;
     if (ReservedAddress) {
@@ -2394,10 +2469,6 @@ retry_file_and_section:
       /* the base address could be changed */
       map->base = NULL;
   }
-
-  err = osal_filesize(map->fd, &map->filesize);
-  if (err != MDBX_SUCCESS)
-    goto bailout;
 
   if ((flags & MDBX_RDONLY) == 0 && map->filesize != size) {
     err = osal_ftruncate(map->fd, size);
@@ -2475,18 +2546,17 @@ retry_mapview:;
 
 #else /* Windows */
 
-  map->filesize = 0;
-  int rc = osal_filesize(map->fd, &map->filesize);
-  if (rc != MDBX_SUCCESS)
-    return rc;
-
   if (flags & MDBX_RDONLY) {
+    if (size > map->filesize)
+      rc = MDBX_UNABLE_EXTEND_MAPSIZE;
+    else if (size < map->filesize && map->filesize > limit)
+      rc = MDBX_EPERM;
     map->current = (map->filesize > limit) ? limit : (size_t)map->filesize;
-    if (map->current != size)
-      rc = (size > map->current) ? MDBX_UNABLE_EXTEND_MAPSIZE : MDBX_EPERM;
   } else {
-    if (map->filesize != size) {
+    if (size > map->filesize ||
+        (size < map->filesize && (flags & MDBX_SHRINK_ALLOWED))) {
       rc = osal_ftruncate(map->fd, size);
+      VERBOSE("ftruncate %zu, err %d", size, rc);
       if (rc != MDBX_SUCCESS)
         return rc;
       map->filesize = size;
@@ -2679,9 +2749,11 @@ retry_mapview:;
 
 #endif /* POSIX / Windows */
 
+  MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(6287, "Redundant code");
   assert(rc != MDBX_SUCCESS ||
          (map->base != nullptr && map->base != MAP_FAILED &&
-          map->current == size && map->limit == limit));
+          map->current == size && map->limit == limit &&
+          map->filesize >= size));
   return rc;
 }
 

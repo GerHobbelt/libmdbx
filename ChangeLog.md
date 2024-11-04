@@ -4,13 +4,73 @@ ChangeLog
 English version [by Google](https://gitflic-ru.translate.goog/project/erthink/libmdbx/blob?file=ChangeLog.md&_x_tr_sl=ru&_x_tr_tl=en)
 and [by Yandex](https://translated.turbopages.org/proxy_u/ru-en.en/https/gitflic.ru/project/erthink/libmdbx/blob?file=ChangeLog.md).
 
+## v0.13 (в разработке)
 
-## v0.12.3 (Акула) запланирован на 2023-01-07
+Благодарности:
 
-Выпуск с существенными доработками и новой функциональностью в память о закрытом open-source проекте "Акула".
+ - Max <maxc0d3r@protonmail.com> за сообщение о проблеме ERROR_SHARING_VIOLATION
+   в режиме MDBX_EXCLUSIVE на Windows.
+ - Alisher Ashyrov <https://t.me/a1is43ras4> за сообщение о проблеме
+   с assert-проверкой и содействие в отладке.
+ - Masatoshi Fukunaga <https://gitflic.ru/user/mah0x211> за сообщение о проблеме
+   `put(MDBX_UPSERT+MDBX_ALLDUPS)` для случая замены всех значений в subDb.
+
+Исправления (без корректировок новых функций):
+
+ - Устранен регресс после коммита 474391c83c5f81def6fdf3b0b6f5716a87b78fbf,
+   приводящий к возврату ERROR_SHARING_VIOLATION в Windows при открытии БД
+   в режиме MDBX_EXCLUSIVE для чтения-записи.
+
+ - Добавлено ограничение размера отображения при коротком read-only файле, для
+   предотвращения ошибки ERROR_NOT_ENOUGH_MEMORY в Windows, которая возникает
+   в этом случае и совсем не информативна для пользователя.
+
+ - Произведен рефакторинг `dxb_resize()`, в том числе, для устранения срабатывания
+   assert-проверки `size_bytes == env->me_dxb_mmap.current` в специфических
+   многопоточных сценариях использования. Проверка срабатывала только в
+   отладочных сборках, при специфическом наложении во времени читающей и
+   пишущей транзакции в разных потоках, одновременно с изменением размера БД.
+   Кроме срабатывание проверки, каких-либо других последствий не возникало.
+
+ - Устранена проблема в `put(MDBX_UPSERT+MDBX_ALLDUPS)` для случая замены
+   всех значений единственного ключа в subDb. В ходе этой операции subDb
+   становится полностью пустой, без каких-либо страниц и именно эта
+   ситуация не была учтена в коде, что приводило к повреждению БД
+   при фиксации такой транзакции.
+
+ - Устранена излишняя assert-проверка внутри `override_meta()`.
+   Что в отладочных сборках могло приводить к ложным срабатываниям
+   при восстановлении БД, в том числе при автоматическом откате слабых
+   мета-страниц.
+
+Ликвидация технических долгов и мелочи:
+
+ - Исправлены многочисленные опечатки в документации.
+ - Доработан тест для полной стохастической проверки `MDBX_EKEYMISMATCH` в режиме `MDBX_APPEND`.
+ - Расширены сценарии запуска `mdbx_chk` из CMake-тестов для проверки как в обычном,
+   так и эксклюзивном режимах чтения-записи.
+ - Уточнены спецификаторы `const` и `noexcept` для нескольких методов в C++ API.
+ - Устранено использование стека под буферы для `wchar`-преобразования путей.
+ - Для Windows добавлена функция `mdbx_env_get_path()` для получения пути к БД
+   в формате многобайтных символов.
+ - Добавлены doxygen-описания для API с широкими символами.
+ - Устранены предупреждения статического анализатора MSVC,
+   все они были несущественные, либо ложные.
+
+
+-------------------------------------------------------------------------------
+
+
+## v0.12.3 (Акула) от 2023-01-07
+
+Выпуск с существенными доработками и новой функциональностью в память о закрытом open-source
+[проекте "Акула"](https://erigon.substack.com/p/winding-down-support-for-akula-project).
+
+Добавлена prefault-запись, переделан контроль “некогерентности” unified page/buffer cache, изменена тактика слияния страниц и т.д.
+Стало ещё быстрее, в некоторых сценариях вдвое.
 
 ```
-20 files changed, 4388 insertions(+), 2907 deletions(-)
+20 files changed, 4508 insertions(+), 2928 deletions(-)
 Signed-off-by: Леонид Юрьев (Leonid Yuriev) <leo@yuriev.ru>
 ```
 
@@ -77,7 +137,7 @@ Signed-off-by: Леонид Юрьев (Leonid Yuriev) <leo@yuriev.ru>
    системах с unified page cache. Такое поведение (без использования
    `msync(MS_ASYNC)`) соответствует неизменяемой (hardcoded) логике LMDB. В
    результате, в простых/наивных бенчмарках, libmdbx опережает LMDB
-   примерна также как при реальном применении.
+   примерно также как при реальном применении.
 
    На всякий случай стоит еще раз отметить/напомнить, что на Windows
    предположительно libmdbx будет отставать от LMDB в сценариях с
@@ -88,15 +148,17 @@ Signed-off-by: Леонид Юрьев (Leonid Yuriev) <leo@yuriev.ru>
 
  - Поддержка не-печатных имен для subDb.
 
- - Добавлен явный выбор `tls_model("local-dynamic")` для обзода проблемы
+ - Добавлен явный выбор `tls_model("local-dynamic")` для обхода проблемы
    `relocation R_X86_64_TPOFF32 against FOO cannot be used with -shared`
    из-за ошибки в CLANG приводящей к использованию неверного режима `ls_model`.
 
- - Изменение тактики слияние страниц при удалении.
+ - Изменение тактики слияния страниц при удалении.
    Теперь слияние выполняется преимущественно с уже измененной/грязной страницей.
    Если же справа и слева обе страницы с одинаковым статусом,
    то с наименее заполненной, как прежде. В сценариях с массивным удалением
    это позволяет увеличить производительность до 50%.
+
+ - Добавлен контроль отсутствия LCK-файлов с альтернативным именованием.
 
 Исправления (без корректировок новых функций):
 
@@ -1170,7 +1232,7 @@ Fixes:
  - Fix a lot of typos & spelling (Thanks to Josh Soref for PR).
  - Fix `getopt()` messages for Windows (Thanks to Andrey Sporaw for reporting).
  - Fix MSVC compiler version requirements (Thanks to Andrey Sporaw for reporting).
- - Workarounds for QEMU's bugs to run tests for cross-builded library under QEMU.
+ - Workarounds for QEMU's bugs to run tests for cross-built[A library under QEMU.
  - Now C++ compiler optional for building by CMake.
 
 
@@ -1239,7 +1301,7 @@ Deprecated functions and flags:
  - Avoid using `pwritev()` for single-writes (up to 10% speedup for some kernels & scenarios).
  - Avoiding `MDBX_UTTERLY_NOSYNC` as result of flags merge.
  - Add `mdbx_dbi_dupsort_depthmask()` function.
- - Add `MDBX_CP_FORCE_RESIZEABLE` option.
+ - Add `MDBX_CP_FORCE_RESIZABLE` option.
  - Add deprecated `MDBX_MAP_RESIZED` for compatibility.
  - Add `MDBX_BUILD_TOOLS` option (default `ON`).
  - Refine `mdbx_dbi_open_ex()` to safe concurrently opening the same handle from different threads.

@@ -81,19 +81,48 @@ Historically, _libmdbx_ is a deeply revised and extended descendant of the amazi
 [Lightning Memory-Mapped Database](https://en.wikipedia.org/wiki/Lightning_Memory-Mapped_Database).
 _libmdbx_ inherits all benefits from _LMDB_, but resolves some issues and adds [a set of improvements](#improvements-beyond-lmdb).
 
+### MithrilDB and Future
+
 <!-- section-begin mithril -->
 
-The next version is under active non-public development from scratch and will be
+The next version is under non-public development from scratch and will be
 released as **MithrilDB** and `libmithrildb` for libraries & packages.
 Admittedly mythical [Mithril](https://en.wikipedia.org/wiki/Mithril) is
 resembling silver but being stronger and lighter than steel. Therefore
 _MithrilDB_ is a rightly relevant name.
 
-   > _MithrilDB_ will be radically different from _libmdbx_ by the new
-   > database format and API based on C++17, as well as the [Apache 2.0
-   > License](https://www.apache.org/licenses/LICENSE-2.0). The goal of this
-   > revolution is to provide a clearer and robust API, add more features and
-   > new valuable properties of the database.
+_MithrilDB_ is radically different from _libmdbx_ by the new database
+format and API based on C++20. The goal of this revolution is to provide
+a clearer and robust API, add more features and new valuable properties
+of the database. All fundamental architectural problems of libmdbx/LMDB
+have been solved there, but now the active development has been
+suspended for top-three reasons:
+
+1. For now _libmdbx_ «mostly» enough for all [our products](https://www.ptsecurity.com/ww-en/products/),
+and I’m busy in development of replication for scalability.
+2. Waiting for fresh [Elbrus CPU](https://wiki.elbrus.ru/) of [e2k architecture](https://en.wikipedia.org/wiki/Elbrus_2000),
+especially with hardware acceleration of [Streebog](https://en.wikipedia.org/wiki/Streebog) and
+[Kuznyechik](https://en.wikipedia.org/wiki/Kuznyechik), which are required for Merkle tree, etc.
+3. The expectation of needs and opportunities due to the wide use of NVDIMM (aka persistent memory),
+modern NVMe and [Ангара](https://ru.wikipedia.org/wiki/Ангара_(интерконнект)).
+
+However, _MithrilDB_ will not be available for countries unfriendly to
+Russia (i.e. acceded the sanctions, devil adepts and/or NATO). But it is
+not yet known whether such restriction will be implemented only through
+a license and support, either the source code will not be open at all.
+Basically we are not inclined to allow our work to contribute to the
+profit that goes to weapons that kill our relatives and friends.
+NO OPTIONS.
+
+Nonetheless, I try not to make any promises regarding _MithrilDB_ until release.
+
+Contrary to _MithrilDB_, _libmdbx_ will forever free and open source.
+Moreover with high-quality support whenever possible. Tu deviens
+responsable pour toujours de ce que tu as apprivois. So we will continue
+to comply with the original open license and the principles of
+constructive cooperation, in spite of outright Github sabotage and
+sanctions. I will also try to keep (not drop) Windows support, despite
+it is an unused obsolete technology for us.
 
 <!-- section-end -->
 
@@ -248,7 +277,7 @@ the user's point of view.
    > and up to 30% faster when _libmdbx_ compiled with specific build options
    > which downgrades several runtime checks to be match with LMDB behaviour.
    >
-   > These and other results could be easily reproduced with [ioArena](https://github.com/pmwkaa/ioarena) just by `make bench-quartet` command,
+   > These and other results could be easily reproduced with [ioArena](https://abf.io/erthink/ioarena.git) just by `make bench-quartet` command,
    > including comparisons with [RockDB](https://en.wikipedia.org/wiki/RocksDB)
    > and [WiredTiger](https://en.wikipedia.org/wiki/WiredTiger).
 
@@ -630,7 +659,7 @@ Bindings
 Performance comparison
 ======================
 
-All benchmarks were done in 2015 by [IOArena](https://github.com/pmwkaa/ioarena)
+All benchmarks were done in 2015 by [IOArena](https://abf.io/erthink/ioarena.git)
 and multiple [scripts](https://github.com/pmwkaa/ioarena/tree/HL%2B%2B2015)
 runs on Lenovo Carbon-2 laptop, i7-4600U 2.1 GHz (2 physical cores, 4 HyperThreading cores), 8 Gb RAM,
 SSD SAMSUNG MZNTD512HAGL-000L1 (DXT23L0Q) 512 Gb.

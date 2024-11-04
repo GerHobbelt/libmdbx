@@ -1,7 +1,7 @@
 /* https://en.wikipedia.org/wiki/Operating_system_abstraction_layer */
 
 /*
- * Copyright 2015-2022 Leonid Yuriev <leo@yuriev.ru>
+ * Copyright 2015-2023 Leonid Yuriev <leo@yuriev.ru>
  * and other libmdbx authors: please see AUTHORS file.
  * All rights reserved.
  *
@@ -225,8 +225,10 @@ osal_syspagesize(void) {
 
 #if defined(_WIN32) || defined(_WIN64)
 typedef wchar_t pathchar_t;
+#define MDBX_PRIsPATH "ls"
 #else
 typedef char pathchar_t;
+#define MDBX_PRIsPATH "s"
 #endif
 
 typedef struct osal_mmap {
@@ -559,6 +561,9 @@ MDBX_MAYBE_UNUSED static __inline bool osal_isdirsep(pathchar_t c) {
 
 MDBX_INTERNAL_FUNC bool osal_pathequal(const pathchar_t *l, const pathchar_t *r,
                                        size_t len);
+MDBX_INTERNAL_FUNC pathchar_t *osal_fileext(const pathchar_t *pathname,
+                                            size_t len);
+MDBX_INTERNAL_FUNC int osal_fileexists(const pathchar_t *pathname);
 MDBX_INTERNAL_FUNC int osal_openfile(const enum osal_openfile_purpose purpose,
                                      const MDBX_env *env,
                                      const pathchar_t *pathname,
@@ -572,9 +577,8 @@ MDBX_INTERNAL_FUNC int osal_lockfile(mdbx_filehandle_t fd, bool wait);
 
 #define MMAP_OPTION_TRUNCATE 1
 #define MMAP_OPTION_SEMAPHORE 2
-MDBX_INTERNAL_FUNC int osal_mmap(const int flags, osal_mmap_t *map,
-                                 const size_t must, const size_t limit,
-                                 const unsigned options);
+MDBX_INTERNAL_FUNC int osal_mmap(const int flags, osal_mmap_t *map, size_t size,
+                                 const size_t limit, const unsigned options);
 MDBX_INTERNAL_FUNC int osal_munmap(osal_mmap_t *map);
 #define MDBX_MRESIZE_MAY_MOVE 0x00000100
 #define MDBX_MRESIZE_MAY_UNMAP 0x00000200
@@ -699,7 +703,7 @@ MDBX_INTERNAL_FUNC int osal_lck_destroy(MDBX_env *env,
 MDBX_INTERNAL_FUNC int osal_lck_seize(MDBX_env *env);
 
 /// \brief Downgrades the level of initially acquired lock to
-///   operational level specified by argument. The reson for such downgrade:
+///   operational level specified by argument. The reason for such downgrade:
 ///    - unblocking of other processes that are waiting for access, i.e.
 ///      if (env->me_flags & MDBX_EXCLUSIVE) != 0, then other processes
 ///      should be made aware that access is unavailable rather than
@@ -753,22 +757,7 @@ MDBX_INTERNAL_FUNC int osal_rpid_check(MDBX_env *env, uint32_t pid);
 
 #if defined(_WIN32) || defined(_WIN64)
 
-MDBX_INTERNAL_FUNC size_t osal_mb2w(wchar_t *dst, size_t dst_n, const char *src,
-                                    size_t src_n);
-
-#define OSAL_MB2WIDE(FROM, TO)                                                 \
-  do {                                                                         \
-    const char *const from_tmp = (FROM);                                       \
-    const size_t from_mblen = strlen(from_tmp);                                \
-    const size_t to_wlen = osal_mb2w(nullptr, 0, from_tmp, from_mblen);        \
-    if (to_wlen < 1 || to_wlen > /* MAX_PATH */ INT16_MAX)                     \
-      return ERROR_INVALID_NAME;                                               \
-    wchar_t *const to_tmp = _alloca((to_wlen + 1) * sizeof(wchar_t));          \
-    if (to_wlen + 1 !=                                                         \
-        osal_mb2w(to_tmp, to_wlen + 1, from_tmp, from_mblen + 1))              \
-      return ERROR_INVALID_NAME;                                               \
-    (TO) = to_tmp;                                                             \
-  } while (0)
+MDBX_INTERNAL_FUNC int osal_mb2w(const char *const src, wchar_t **const pdst);
 
 typedef void(WINAPI *osal_srwlock_t_function)(osal_srwlock_t *);
 MDBX_INTERNAL_VAR osal_srwlock_t_function osal_srwlock_Init,

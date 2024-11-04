@@ -1,7 +1,7 @@
 /* mdbx_chk.c - memory-mapped database check tool */
 
 /*
- * Copyright 2015-2022 Leonid Yuriev <leo@yuriev.ru>
+ * Copyright 2015-2023 Leonid Yuriev <leo@yuriev.ru>
  * and other libmdbx authors: please see AUTHORS file.
  * All rights reserved.
  *
@@ -153,6 +153,10 @@ static const char *sdb_name(const MDBX_val *val) {
     return "<nullptr>";
   if (len > 65536) {
     static char buf[64];
+    /* NOTE: There is MSYS2 MinGW bug if you here got
+     * the "unknown conversion type character ‘z’ in format [-Werror=format=]"
+     * https://stackoverflow.com/questions/74504432/whats-the-proper-way-to-tell-mingw-based-gcc-to-use-ansi-stdio-output-on-windo
+     */
     snprintf(buf, sizeof(buf), "<too-long-%zu>", len);
     return buf;
   }
@@ -567,8 +571,8 @@ static int pgvisitor(const uint64_t pgno, const unsigned pgnumber,
         data_tree_problems += !is_gc_tree;
         gc_tree_problems += is_gc_tree;
       } else {
-        dbi->payload_bytes += payload_bytes + header_bytes;
-        walk.total_payload_bytes += payload_bytes + header_bytes;
+        dbi->payload_bytes += (uint64_t)payload_bytes + header_bytes;
+        walk.total_payload_bytes += (uint64_t)payload_bytes + header_bytes;
       }
     }
   }
@@ -628,7 +632,7 @@ static int handle_freedb(const uint64_t record_number, const MDBX_val *key,
 
       pgno_t prev = MDBX_PNL_ASCENDING ? NUM_METAS - 1 : txn->mt_next_pgno;
       pgno_t span = 1;
-      for (unsigned i = 0; i < number; ++i) {
+      for (size_t i = 0; i < number; ++i) {
         if (check_user_break())
           return MDBX_EINTR;
         const pgno_t pgno = iptr[i];
@@ -647,7 +651,7 @@ static int handle_freedb(const uint64_t record_number, const MDBX_val *key,
           if (MDBX_PNL_DISORDERED(prev, pgno)) {
             bad = " [bad sequence]";
             problem_add("entry", txnid, "bad sequence",
-                        "%" PRIaPGNO " %c [%u].%" PRIaPGNO, prev,
+                        "%" PRIaPGNO " %c [%zu].%" PRIaPGNO, prev,
                         (prev == pgno) ? '=' : (MDBX_PNL_ASCENDING ? '>' : '<'),
                         i, pgno);
           }
@@ -673,7 +677,7 @@ static int handle_freedb(const uint64_t record_number, const MDBX_val *key,
               " pages, maxspan %" PRIaPGNO "%s\n",
               txnid, number, span, bad);
         if (verbose > 4) {
-          for (unsigned i = 0; i < number; i += span) {
+          for (size_t i = 0; i < number; i += span) {
             const pgno_t pgno = iptr[i];
             for (span = 1;
                  i + span < number &&
@@ -1493,7 +1497,7 @@ int main(int argc, char *argv[]) {
       alloc_pages = backed_pages;
     }
   } else {
-    /* LY: DB may be shrinked by writer down to the allocated pages. */
+    /* LY: DB may be shrunk by writer down to the allocated pages. */
     if (alloc_pages > backed_pages) {
       print(" ! alloc-pages %" PRIu64 " > backed-pages %" PRIu64 "\n",
             alloc_pages, backed_pages);

@@ -1,7 +1,7 @@
 /* mdbx_load.c - memory-mapped database load tool */
 
 /*
- * Copyright 2015-2022 Leonid Yuriev <leo@yuriev.ru>
+ * Copyright 2015-2023 Leonid Yuriev <leo@yuriev.ru>
  * and other libmdbx authors: please see AUTHORS file.
  * All rights reserved.
  *
@@ -673,7 +673,7 @@ int main(int argc, char *argv[]) {
     goto env_close;
   }
 
-  kbuf.iov_len = mdbx_env_get_maxvalsize_ex(env, 0) + 1;
+  kbuf.iov_len = mdbx_env_get_maxvalsize_ex(env, 0) + (size_t)1;
   if (kbuf.iov_len >= INTPTR_MAX / 2) {
     if (!quiet)
       fprintf(stderr, "mdbx_env_get_maxkeysize() failed, returns %zu\n",

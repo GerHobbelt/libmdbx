@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2022 Leonid Yuriev <leo@yuriev.ru>
+ * Copyright 2015-2023 Leonid Yuriev <leo@yuriev.ru>
  * and other libmdbx authors: please see AUTHORS file.
  * All rights reserved.
  *
@@ -35,7 +35,7 @@
 
 /** Disables using GNU/Linux libc extensions.
  * \ingroup build_option
- * \note This option couldn't be moved to the options.h since dependant
+ * \note This option couldn't be moved to the options.h since dependent
  * control macros/defined should be prepared before include the options.h */
 #ifndef MDBX_DISABLE_GNU_SOURCE
 #define MDBX_DISABLE_GNU_SOURCE 0
@@ -86,13 +86,17 @@
 #pragma warning(disable : 4464) /* relative include path contains '..' */
 #endif
 #if _MSC_VER > 1913
-#pragma warning(disable : 5045) /* Compiler will insert Spectre mitigation...  \
-                                 */
+#pragma warning(disable : 5045) /* will insert Spectre mitigation... */
 #endif
 #if _MSC_VER > 1914
 #pragma warning(                                                               \
     disable : 5105) /* winbase.h(9531): warning C5105: macro expansion         \
                        producing 'defined' has undefined behavior */
+#endif
+#if _MSC_VER > 1930
+#pragma warning(disable : 6235) /* <expression> is always a constant */
+#pragma warning(disable : 6237) /* <expression> is never evaluated and might   \
+                                   have side effects */
 #endif
 #pragma warning(disable : 4710) /* 'xyz': function not inlined */
 #pragma warning(disable : 4711) /* function 'xyz' selected for automatic       \
@@ -920,7 +924,7 @@ typedef struct MDBX_lockinfo {
 
   /* Paired counter of processes that have mlock()ed part of mmapped DB.
    * The (mti_mlcnt[0] - mti_mlcnt[1]) > 0 means at least one process
-   * lock at leat one page, so therefore madvise() could return EINVAL. */
+   * lock at least one page, so therefore madvise() could return EINVAL. */
   MDBX_atomic_uint32_t mti_mlcnt[2];
 
   MDBX_ALIGNAS(MDBX_CACHELINE_SIZE) /* cacheline ----------------------------*/
@@ -1463,6 +1467,8 @@ struct MDBX_env {
   osal_srwlock_t me_remap_guard;
   /* Workaround for LockFileEx and WriteFile multithread bug */
   CRITICAL_SECTION me_windowsbug_lock;
+  char *me_pathname_char; /* cache of multi-byte representation of pathname
+                             to the DB files */
 #else
   osal_fastmutex_t me_remap_guard;
 #endif
@@ -1691,14 +1697,14 @@ int64pgno(int64_t i64) {
 MDBX_MAYBE_UNUSED MDBX_NOTHROW_CONST_FUNCTION static __inline pgno_t
 pgno_add(size_t base, size_t augend) {
   assert(base <= MAX_PAGENO + 1 && augend < MAX_PAGENO);
-  return int64pgno(base + augend);
+  return int64pgno((int64_t)base + (int64_t)augend);
 }
 
 MDBX_MAYBE_UNUSED MDBX_NOTHROW_CONST_FUNCTION static __inline pgno_t
 pgno_sub(size_t base, size_t subtrahend) {
   assert(base >= MIN_PAGENO && base <= MAX_PAGENO + 1 &&
          subtrahend < MAX_PAGENO);
-  return int64pgno(base - subtrahend);
+  return int64pgno((int64_t)base - (int64_t)subtrahend);
 }
 
 MDBX_MAYBE_UNUSED MDBX_NOTHROW_CONST_FUNCTION static __always_inline bool
