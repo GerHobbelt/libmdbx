@@ -549,6 +549,16 @@ enum osal_openfile_purpose {
   MDBX_OPEN_DELETE
 };
 
+MDBX_MAYBE_UNUSED static __inline bool osal_isdirsep(pathchar_t c) {
+  return
+#if defined(_WIN32) || defined(_WIN64)
+      c == '\\' ||
+#endif
+      c == '/';
+}
+
+MDBX_INTERNAL_FUNC bool osal_pathequal(const pathchar_t *l, const pathchar_t *r,
+                                       size_t len);
 MDBX_INTERNAL_FUNC int osal_openfile(const enum osal_openfile_purpose purpose,
                                      const MDBX_env *env,
                                      const pathchar_t *pathname,
@@ -887,6 +897,46 @@ MDBX_INTERNAL_VAR MDBX_SetFileIoOverlappedRange mdbx_SetFileIoOverlappedRange;
 #endif /* Windows */
 
 #endif /* !__cplusplus */
+
+/*----------------------------------------------------------------------------*/
+
+MDBX_MAYBE_UNUSED MDBX_NOTHROW_PURE_FUNCTION static __always_inline uint64_t
+osal_bswap64(uint64_t v) {
+#if __GNUC_PREREQ(4, 4) || __CLANG_PREREQ(4, 0) ||                             \
+    __has_builtin(__builtin_bswap64)
+  return __builtin_bswap64(v);
+#elif defined(_MSC_VER) && !defined(__clang__)
+  return _byteswap_uint64(v);
+#elif defined(__bswap_64)
+  return __bswap_64(v);
+#elif defined(bswap_64)
+  return bswap_64(v);
+#else
+  return v << 56 | v >> 56 | ((v << 40) & UINT64_C(0x00ff000000000000)) |
+         ((v << 24) & UINT64_C(0x0000ff0000000000)) |
+         ((v << 8) & UINT64_C(0x000000ff00000000)) |
+         ((v >> 8) & UINT64_C(0x00000000ff000000)) |
+         ((v >> 24) & UINT64_C(0x0000000000ff0000)) |
+         ((v >> 40) & UINT64_C(0x000000000000ff00));
+#endif
+}
+
+MDBX_MAYBE_UNUSED MDBX_NOTHROW_PURE_FUNCTION static __always_inline uint32_t
+osal_bswap32(uint32_t v) {
+#if __GNUC_PREREQ(4, 4) || __CLANG_PREREQ(4, 0) ||                             \
+    __has_builtin(__builtin_bswap32)
+  return __builtin_bswap32(v);
+#elif defined(_MSC_VER) && !defined(__clang__)
+  return _byteswap_ulong(v);
+#elif defined(__bswap_32)
+  return __bswap_32(v);
+#elif defined(bswap_32)
+  return bswap_32(v);
+#else
+  return v << 24 | v >> 24 | ((v << 8) & UINT32_C(0x00ff0000)) |
+         ((v >> 8) & UINT32_C(0x0000ff00));
+#endif
+}
 
 /*----------------------------------------------------------------------------*/
 

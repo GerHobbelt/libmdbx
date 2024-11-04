@@ -1185,6 +1185,23 @@ MDBX_INTERNAL_FUNC int osal_removedirectory(const pathchar_t *pathname) {
 #endif
 }
 
+MDBX_INTERNAL_FUNC bool osal_pathequal(const pathchar_t *l, const pathchar_t *r,
+                                       size_t len) {
+#if defined(_WIN32) || defined(_WIN64)
+  for (size_t i = 0; i < len; ++i) {
+    pathchar_t a = l[i];
+    pathchar_t b = r[i];
+    a = (a == '\\') ? '/' : a;
+    b = (b == '\\') ? '/' : b;
+    if (a != b)
+      return false;
+  }
+  return true;
+#else
+  return memcmp(l, r, len * sizeof(pathchar_t)) == 0;
+#endif
+}
+
 MDBX_INTERNAL_FUNC int osal_openfile(const enum osal_openfile_purpose purpose,
                                      const MDBX_env *env,
                                      const pathchar_t *pathname,
@@ -1571,7 +1588,7 @@ MDBX_INTERNAL_FUNC int osal_fsync(mdbx_filehandle_t fd,
       return MDBX_SUCCESS /* nothing to do */;
 #if defined(_POSIX_SYNCHRONIZED_IO) && _POSIX_SYNCHRONIZED_IO > 0
     case MDBX_SYNC_DATA:
-      if (fdatasync(fd) == 0)
+      if (likely(fdatasync(fd) == 0))
         return MDBX_SUCCESS;
       break /* error */;
 #if defined(__linux__) || defined(__gnu_linux__)
@@ -1581,7 +1598,7 @@ MDBX_INTERNAL_FUNC int osal_fsync(mdbx_filehandle_t fd,
 #endif /* Linux */
 #endif /* _POSIX_SYNCHRONIZED_IO > 0 */
     default:
-      if (fsync(fd) == 0)
+      if (likely(fsync(fd) == 0))
         return MDBX_SUCCESS;
     }
 
