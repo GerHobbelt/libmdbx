@@ -578,10 +578,30 @@ typedef struct MDBX_page {
 
 #pragma pack(pop)
 
-#if MDBX_ENABLE_PGOP_STAT
+typedef struct profgc_stat {
+  /* Монотонное время по "настенным часам"
+   * затраченное на чтение и поиск внутри GC */
+  uint64_t rtime_monotonic;
+  /* Монотонное время по "настенным часам" затраченное
+   * на подготовку страниц извлекаемых из GC, включая подкачку с диска. */
+  uint64_t xtime_monotonic;
+  /* Процессорное время в режим пользователя
+   * затраченное на чтение и поиск внутри GC */
+  uint64_t rtime_cpu;
+  /* Количество итераций чтения-поиска внутри GC при выделении страниц */
+  uint32_t rsteps;
+  /* Количество запросов на выделение последовательностей страниц,
+   * т.е. когда запрашивает выделение больше одной страницы */
+  uint32_t xpages;
+  /* Счетчик выполнения по медленному пути (slow path execution count) */
+  uint32_t spe_counter;
+  /* page faults (hard page faults) */
+  uint32_t majflt;
+} profgc_stat_t;
+
 /* Statistics of page operations overall of all (running, completed and aborted)
  * transactions */
-typedef struct {
+typedef struct pgop_stat {
   MDBX_atomic_uint64_t newly;   /* Quantity of a new pages added */
   MDBX_atomic_uint64_t cow;     /* Quantity of pages copied for update */
   MDBX_atomic_uint64_t clone;   /* Quantity of parent's dirty pages clones
@@ -593,14 +613,31 @@ typedef struct {
   MDBX_atomic_uint64_t
       wops; /* Number of explicit write operations (not a pages) to a disk */
   MDBX_atomic_uint64_t
-      gcrtime; /* Time spending for reading/searching GC (aka FreeDB). The
-                  unit/scale is platform-depended, see osal_monotime(). */
-  MDBX_atomic_uint64_t
       msync; /* Number of explicit msync/flush-to-disk operations */
   MDBX_atomic_uint64_t
       fsync; /* Number of explicit fsync/flush-to-disk operations */
-} MDBX_pgop_stat_t;
-#endif /* MDBX_ENABLE_PGOP_STAT */
+
+  /* Статистика для профилирования GC.
+   * Логически эти данные может быть стоит вынести в другую структуру,
+   * но разница будет сугубо косметическая. */
+  struct {
+    /* Затраты на поддержку данных пользователя */
+    profgc_stat_t work;
+    /* Затраты на поддержку и обновления самой GC */
+    profgc_stat_t self;
+    /* Итераций обновления GC,
+     * больше 1 если были повторы/перезапуски */
+    uint32_t wloops;
+    /* Итерации слияния записей GC */
+    uint32_t coalescences;
+    /* Уничтожения steady-точек фиксации в MDBX_UTTERLY_NOSYNC */
+    uint32_t wipes;
+    /* Сбросы данные на диск вне MDBX_UTTERLY_NOSYNC */
+    uint32_t flushes;
+    /* Попытки пнуть тормозящих читателей */
+    uint32_t kicks;
+  } gc_prof;
+} pgop_stat_t;
 
 #if MDBX_LOCKING == MDBX_LOCKING_WIN32FILES
 #define MDBX_CLOCK_SIGN UINT32_C(0xF10C)
@@ -731,13 +768,16 @@ typedef struct MDBX_lockinfo {
   /* Marker to distinguish uniqueness of DB/CLK. */
   MDBX_atomic_uint64_t mti_bait_uniqueness;
 
+  /* Paired counter of processes that have mlock()ed part of mmapped DB.
+   * The (mti_mlcnt[0] - mti_mlcnt[1]) > 0 means at least one process
+   * lock at leat one page, so therefore madvise() could return EINVAL. */
+  MDBX_atomic_uint32_t mti_mlcnt[2];
+
   MDBX_ALIGNAS(MDBX_CACHELINE_SIZE) /* cacheline ----------------------------*/
 
-#if MDBX_ENABLE_PGOP_STAT
   /* Statistics of costly ops of all (running, completed and aborted)
    * transactions */
-  MDBX_pgop_stat_t mti_pgop_stat;
-#endif /* MDBX_ENABLE_PGOP_STAT*/
+  pgop_stat_t mti_pgop_stat;
 
   MDBX_ALIGNAS(MDBX_CACHELINE_SIZE) /* cacheline ----------------------------*/
 
@@ -759,7 +799,7 @@ typedef struct MDBX_lockinfo {
   /* Timestamp of the last readers check. */
   MDBX_atomic_uint64_t mti_reader_check_timestamp;
 
-  /* Number of page which was discarded last time by madvise(MADV_FREE). */
+  /* Number of page which was discarded last time by madvise(DONTNEED). */
   atomic_pgno_t mti_discarded_tail;
 
   /* Shared anchor for tracking readahead edge and enabled/disabled status. */
@@ -936,6 +976,9 @@ typedef struct MDBX_dbx {
 
 typedef struct troika {
   uint8_t fsm, recent, prefer_steady, tail_and_flags;
+#if MDBX_WORDBITS > 32 /* Workaround for false-positives from Valgrind */
+  uint32_t unused_pad;
+#endif
 #define TROIKA_HAVE_STEADY(troika) ((troika)->fsm & 7)
 #define TROIKA_STRICT_VALID(troika) ((troika)->tail_and_flags & 64)
 #define TROIKA_VALID(troika) ((troika)->tail_and_flags & 128)
@@ -957,9 +1000,13 @@ struct MDBX_txn {
   /* Additional flag for sync_locked() */
 #define MDBX_SHRINK_ALLOWED UINT32_C(0x40000000)
 
+#define MDBX_TXN_UPDATE_GC 0x20 /* GC is being updated */
+#define MDBX_TXN_FROZEN_RE 0x40 /* list of reclaimed-pgno must not altered */
+
 #define TXN_FLAGS                                                              \
   (MDBX_TXN_FINISHED | MDBX_TXN_ERROR | MDBX_TXN_DIRTY | MDBX_TXN_SPILLS |     \
-   MDBX_TXN_HAS_CHILD | MDBX_TXN_INVALID)
+   MDBX_TXN_HAS_CHILD | MDBX_TXN_INVALID | MDBX_TXN_UPDATE_GC |                \
+   MDBX_TXN_FROZEN_RE)
 
 #if (TXN_FLAGS & (MDBX_TXN_RW_BEGIN_FLAGS | MDBX_TXN_RO_BEGIN_FLAGS)) ||       \
     ((MDBX_TXN_RW_BEGIN_FLAGS | MDBX_TXN_RO_BEGIN_FLAGS | TXN_FLAGS) &         \
@@ -1018,8 +1065,8 @@ struct MDBX_txn {
     struct {
       meta_troika_t troika;
       /* In write txns, array of cursors for each DB */
-      pgno_t *reclaimed_pglist; /* Reclaimed GC pages */
-      txnid_t last_reclaimed;   /* ID of last used record */
+      pgno_t *relist;         /* Reclaimed GC pages */
+      txnid_t last_reclaimed; /* ID of last used record */
 #if MDBX_ENABLE_REFUND
       pgno_t loose_refund_wl /* FIXME: describe */;
 #endif /* MDBX_ENABLE_REFUND */
@@ -1095,9 +1142,7 @@ struct MDBX_cursor {
 #define C_SUB 0x04         /* Cursor is a sub-cursor */
 #define C_DEL 0x08         /* last op was a cursor_del */
 #define C_UNTRACK 0x10     /* Un-track cursor when closing */
-#define C_RECLAIMING 0x20  /* GC lookup is prohibited */
-#define C_GCFREEZE 0x40    /* reclaimed_pglist must not be updated */
-  uint8_t mc_flags;        /* see mdbx_cursor */
+  uint8_t mc_flags;
 
   /* Cursor checking flags. */
 #define CC_BRANCH 0x01    /* same as P_BRANCH for CHECK_LEAF_TYPE() */
@@ -1108,7 +1153,7 @@ struct MDBX_cursor {
 #define CC_LEAF2 0x20     /* same as P_LEAF2 for CHECK_LEAF_TYPE() */
 #define CC_RETIRING 0x40  /* refs to child pages may be invalid */
 #define CC_PAGECHECK 0x80 /* perform page checking, see MDBX_VALIDATION */
-  uint8_t mc_checking;    /* page checking level */
+  uint8_t mc_checking;
 
   MDBX_page *mc_pg[CURSOR_STACK]; /* stack of pushed pages */
   indx_t mc_ki[CURSOR_STACK];     /* stack of page indices */
@@ -1169,7 +1214,8 @@ struct MDBX_env {
   unsigned me_psize;          /* DB page size, initialized from me_os_psize */
   unsigned me_leaf_nodemax;   /* max size of a leaf-node */
   unsigned me_branch_nodemax; /* max size of a branch-node */
-  uint8_t me_psize2log;       /* log2 of DB page size */
+  atomic_pgno_t me_mlocked_pgno;
+  uint8_t me_psize2log; /* log2 of DB page size */
   int8_t me_stuck_meta; /* recovery-only: target meta page or less that zero */
   uint16_t me_merge_threshold,
       me_merge_threshold_gc;  /* pages emptier than this are candidates for
@@ -1458,7 +1504,9 @@ MDBX_INTERNAL_FUNC int rthc_alloc(osal_thread_key_t *key, MDBX_reader *begin,
 MDBX_INTERNAL_FUNC void rthc_remove(const osal_thread_key_t key);
 
 MDBX_INTERNAL_FUNC void global_ctor(void);
+MDBX_INTERNAL_FUNC void osal_ctor(void);
 MDBX_INTERNAL_FUNC void global_dtor(void);
+MDBX_INTERNAL_FUNC void osal_dtor(void);
 MDBX_INTERNAL_FUNC void thread_dtor(void *ptr);
 
 #endif /* !__cplusplus */
@@ -1579,12 +1627,12 @@ typedef struct MDBX_node {
 #error "Oops, some flags overlapped or wrong"
 #endif
 
-/* max number of pages to commit in one writev() call */
-#define MDBX_COMMIT_PAGES 64
-#if defined(IOV_MAX) && IOV_MAX < MDBX_COMMIT_PAGES /* sysconf(_SC_IOV_MAX) */
-#undef MDBX_COMMIT_PAGES
-#define MDBX_COMMIT_PAGES IOV_MAX
-#endif
+/* Max length of iov-vector passed to writev() call, used for auxilary writes */
+#define MDBX_AUXILARY_IOV_MAX 64
+#if defined(IOV_MAX) && IOV_MAX < MDBX_AUXILARY_IOV_MAX
+#undef MDBX_AUXILARY_IOV_MAX
+#define MDBX_AUXILARY_IOV_MAX IOV_MAX
+#endif /* MDBX_AUXILARY_IOV_MAX */
 
 /*
  *                /
