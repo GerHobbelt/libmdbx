@@ -269,7 +269,10 @@
 
 /** Advanced: Using POSIX OFD-locks (autodetection by default). */
 #ifndef MDBX_USE_OFDLOCKS
-#if defined(F_OFD_SETLK) && defined(F_OFD_SETLKW) && defined(F_OFD_GETLK) &&   \
+#if ((defined(F_OFD_SETLK) && defined(F_OFD_SETLKW) &&                         \
+      defined(F_OFD_GETLK)) ||                                                 \
+     (defined(F_OFD_SETLK64) && defined(F_OFD_SETLKW64) &&                     \
+      defined(F_OFD_GETLK64))) &&                                              \
     !defined(MDBX_SAFE4QEMU) &&                                                \
     !defined(__sun) /* OFD-lock are broken on Solaris */
 #define MDBX_USE_OFDLOCKS 1
@@ -355,13 +358,7 @@
 #endif /* MDBX_64BIT_ATOMIC */
 
 #ifndef MDBX_64BIT_CAS
-#if defined(ATOMIC_LLONG_LOCK_FREE)
-#if ATOMIC_LLONG_LOCK_FREE > 1
-#define MDBX_64BIT_CAS 1
-#else
-#define MDBX_64BIT_CAS 0
-#endif
-#elif defined(__GCC_ATOMIC_LLONG_LOCK_FREE)
+#if defined(__GCC_ATOMIC_LLONG_LOCK_FREE)
 #if __GCC_ATOMIC_LLONG_LOCK_FREE > 1
 #define MDBX_64BIT_CAS 1
 #else
@@ -369,6 +366,12 @@
 #endif
 #elif defined(__CLANG_ATOMIC_LLONG_LOCK_FREE)
 #if __CLANG_ATOMIC_LLONG_LOCK_FREE > 1
+#define MDBX_64BIT_CAS 1
+#else
+#define MDBX_64BIT_CAS 0
+#endif
+#elif defined(ATOMIC_LLONG_LOCK_FREE)
+#if ATOMIC_LLONG_LOCK_FREE > 1
 #define MDBX_64BIT_CAS 1
 #else
 #define MDBX_64BIT_CAS 0

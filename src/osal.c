@@ -1,4 +1,4 @@
-﻿/* https://en.wikipedia.org/wiki/Operating_system_abstraction_layer */
+/* https://en.wikipedia.org/wiki/Operating_system_abstraction_layer */
 
 /*
  * Copyright 2015-2022 Leonid Yuriev <leo@yuriev.ru>
@@ -19,6 +19,10 @@
 #if defined(_WIN32) || defined(_WIN64)
 
 #include <winioctl.h>
+
+#if !MDBX_WITHOUT_MSVC_CRT && defined(_DEBUG)
+#include <crtdbg.h>
+#endif
 
 static int waitstatus2errcode(DWORD result) {
   switch (result) {
@@ -252,9 +256,14 @@ MDBX_NORETURN __cold void assert_fail(const char *msg, const char *func,
 
   while (1) {
 #if defined(_WIN32) || defined(_WIN64)
+#if !MDBX_WITHOUT_MSVC_CRT && defined(_DEBUG)
+    _CrtDbgReport(_CRT_ASSERT, func ? func : "unknown", line, "libmdbx",
+                  "assertion failed: %s", msg);
+#else
     if (IsDebuggerPresent())
       DebugBreak();
-    FatalExit(ERROR_UNHANDLED_ERROR);
+#endif
+    FatalExit(STATUS_ASSERTION_FAILURE);
 #else
     abort();
 #endif
@@ -278,10 +287,15 @@ __cold void mdbx_panic(const char *fmt, ...) {
 
   while (1) {
 #if defined(_WIN32) || defined(_WIN64)
+#if !MDBX_WITHOUT_MSVC_CRT && defined(_DEBUG)
+    _CrtDbgReport(_CRT_ASSERT, "mdbx.c", 0, "libmdbx", "panic: %s",
+                  const_message);
+#else
     OutputDebugStringA("\r\nMDBX-PANIC: ");
     OutputDebugStringA(const_message);
     if (IsDebuggerPresent())
       DebugBreak();
+#endif
     FatalExit(ERROR_UNHANDLED_ERROR);
 #else
     __assert_fail(const_message, "mdbx", 0, "panic");
@@ -538,8 +552,10 @@ static const DWORD WC_ERR_INVALID_CHARS =
         : 0;
 #endif /* WC_ERR_INVALID_CHARS */
 
-MDBX_INTERNAL_FUNC size_t osal_mb2w(wchar_t *dst, size_t dst_n, const char *src,
-                                    size_t src_n) {
+MDBX_MAYBE_UNUSED MDBX_INTERNAL_FUNC size_t osal_mb2w(wchar_t *dst,
+                                                      size_t dst_n,
+                                                      const char *src,
+                                                      size_t src_n) {
   return MultiByteToWideChar(CP_THREAD_ACP, MB_ERR_INVALID_CHARS, src,
                              (int)src_n, dst, (int)dst_n);
 }
@@ -607,8 +623,12 @@ MDBX_INTERNAL_FUNC int osal_ioring_create(osal_ioring_t *ior,
 #endif /* !Windows */
 
 #if MDBX_HAVE_PWRITEV && defined(_SC_IOV_MAX)
-  if (!osal_iov_max)
+  if (!osal_iov_max) {
     osal_iov_max = sysconf(_SC_IOV_MAX);
+    if (RUNNING_ON_VALGRIND && osal_iov_max > 64)
+      /* чтобы не описывать все 1024 исключения в valgrind_suppress.txt */
+      osal_iov_max = 64;
+  }
 #endif
 
   ior->boundary = (char *)(ior->pool + ior->allocated);
@@ -2655,9 +2675,7 @@ MDBX_INTERNAL_FUNC uint32_t osal_monotime_to_16dot16(uint64_t monotime) {
 #else
       (uint32_t)(monotime * 128 / 1953125);
 #endif
-  if (likely(ret > 0))
-    return ret;
-  return monotime > 0 /* fix underflow */;
+  return ret;
 }
 
 MDBX_INTERNAL_FUNC uint64_t osal_monotime(void) {

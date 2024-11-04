@@ -180,9 +180,6 @@ static inline void osal_free(void *ptr) { HeapFree(GetProcessHeap(), 0, ptr); }
 #define vsnprintf _vsnprintf /* ntdll */
 #endif
 
-MDBX_INTERNAL_FUNC size_t osal_mb2w(wchar_t *dst, size_t dst_n, const char *src,
-                                    size_t src_n);
-
 #else /*----------------------------------------------------------------------*/
 
 typedef pthread_t osal_thread_t;
@@ -372,16 +369,18 @@ MDBX_INTERNAL_FUNC void osal_ioring_walk(
     osal_ioring_t *ior, iov_ctx_t *ctx,
     void (*callback)(iov_ctx_t *ctx, size_t offset, void *data, size_t bytes));
 
-static inline unsigned osal_ioring_left(const osal_ioring_t *ior) {
+MDBX_MAYBE_UNUSED static inline unsigned
+osal_ioring_left(const osal_ioring_t *ior) {
   return ior->slots_left;
 }
 
-static inline unsigned osal_ioring_used(const osal_ioring_t *ior) {
+MDBX_MAYBE_UNUSED static inline unsigned
+osal_ioring_used(const osal_ioring_t *ior) {
   return ior->allocated - ior->slots_left;
 }
 
-static inline int osal_ioring_reserve(osal_ioring_t *ior, size_t items,
-                                      size_t bytes) {
+MDBX_MAYBE_UNUSED static inline int
+osal_ioring_reserve(osal_ioring_t *ior, size_t items, size_t bytes) {
   items = (items > 32) ? items : 32;
 #if defined(_WIN32) || defined(_WIN64)
   const size_t npages = bytes >> ior->pagesize_ln2;
@@ -426,6 +425,47 @@ MDBX_MAYBE_UNUSED static __inline void jitter4testing(bool tiny);
 #define MAX_WRITE UINT32_C(0x04000000)
 #else
 #define MAX_WRITE UINT32_C(0x3f000000)
+
+#if defined(F_GETLK64) && defined(F_SETLK64) && defined(F_SETLKW64) &&         \
+    !defined(__ANDROID_API__)
+#define MDBX_F_SETLK F_SETLK64
+#define MDBX_F_SETLKW F_SETLKW64
+#define MDBX_F_GETLK F_GETLK64
+#if (__GLIBC_PREREQ(2, 28) &&                                                  \
+     (defined(__USE_LARGEFILE64) || defined(__LARGEFILE64_SOURCE) ||           \
+      defined(_USE_LARGEFILE64) || defined(_LARGEFILE64_SOURCE))) ||           \
+    defined(fcntl64)
+#define MDBX_FCNTL fcntl64
+#else
+#define MDBX_FCNTL fcntl
+#endif
+#define MDBX_STRUCT_FLOCK struct flock64
+#ifndef OFF_T_MAX
+#define OFF_T_MAX UINT64_C(0x7fffFFFFfff00000)
+#endif /* OFF_T_MAX */
+#else
+#define MDBX_F_SETLK F_SETLK
+#define MDBX_F_SETLKW F_SETLKW
+#define MDBX_F_GETLK F_GETLK
+#define MDBX_FCNTL fcntl
+#define MDBX_STRUCT_FLOCK struct flock
+#endif /* MDBX_F_SETLK, MDBX_F_SETLKW, MDBX_F_GETLK */
+
+#if defined(F_OFD_SETLK64) && defined(F_OFD_SETLKW64) &&                       \
+    defined(F_OFD_GETLK64) && !defined(__ANDROID_API__)
+#define MDBX_F_OFD_SETLK F_OFD_SETLK64
+#define MDBX_F_OFD_SETLKW F_OFD_SETLKW64
+#define MDBX_F_OFD_GETLK F_OFD_GETLK64
+#else
+#define MDBX_F_OFD_SETLK F_OFD_SETLK
+#define MDBX_F_OFD_SETLKW F_OFD_SETLKW
+#define MDBX_F_OFD_GETLK F_OFD_GETLK
+#ifndef OFF_T_MAX
+#define OFF_T_MAX                                                              \
+  (((sizeof(off_t) > 4) ? INT64_MAX : INT32_MAX) & ~(size_t)0xFffff)
+#endif /* OFF_T_MAX */
+#endif /* MDBX_F_OFD_SETLK64, MDBX_F_OFD_SETLKW64, MDBX_F_OFD_GETLK64 */
+
 #endif
 
 #if defined(__linux__) || defined(__gnu_linux__)
@@ -585,6 +625,12 @@ MDBX_INTERNAL_FUNC uint64_t osal_monotime(void);
 MDBX_INTERNAL_FUNC uint64_t osal_16dot16_to_monotime(uint32_t seconds_16dot16);
 MDBX_INTERNAL_FUNC uint32_t osal_monotime_to_16dot16(uint64_t monotime);
 
+MDBX_MAYBE_UNUSED static inline uint32_t
+osal_monotime_to_16dot16_noUnderflow(uint64_t monotime) {
+  uint32_t seconds_16dot16 = osal_monotime_to_16dot16(monotime);
+  return seconds_16dot16 ? seconds_16dot16 : /* fix underflow */ (monotime > 0);
+}
+
 MDBX_INTERNAL_FUNC bin128_t osal_bootid(void);
 /*----------------------------------------------------------------------------*/
 /* lck stuff */
@@ -693,6 +739,9 @@ MDBX_INTERNAL_FUNC int osal_rpid_clear(MDBX_env *env);
 MDBX_INTERNAL_FUNC int osal_rpid_check(MDBX_env *env, uint32_t pid);
 
 #if defined(_WIN32) || defined(_WIN64)
+
+MDBX_INTERNAL_FUNC size_t osal_mb2w(wchar_t *dst, size_t dst_n, const char *src,
+                                    size_t src_n);
 
 #define OSAL_MB2WIDE(FROM, TO)                                                 \
   do {                                                                         \

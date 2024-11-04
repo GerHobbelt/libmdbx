@@ -830,8 +830,14 @@ enum MDBX_constants {
 #if !(defined(_WIN32) || defined(_WIN64))
 #define MDBX_LOCKNAME "/mdbx.lck"
 #else
-#define MDBX_LOCKNAME L"\\mdbx.lck"
-#endif
+#define MDBX_LOCKNAME_W L"\\mdbx.lck"
+#define MDBX_LOCKNAME_A "\\mdbx.lck"
+#ifdef UNICODE
+#define MDBX_LOCKNAME MDBX_LOCKNAME_W
+#else
+#define MDBX_LOCKNAME MDBX_LOCKNAME_A
+#endif /* UNICODE */
+#endif /* Windows */
 #endif /* MDBX_LOCKNAME */
 #ifndef MDBX_DATANAME
 /** \brief The name of the data file in the environment
@@ -839,8 +845,14 @@ enum MDBX_constants {
 #if !(defined(_WIN32) || defined(_WIN64))
 #define MDBX_DATANAME "/mdbx.dat"
 #else
-#define MDBX_DATANAME L"\\mdbx.dat"
-#endif
+#define MDBX_DATANAME_W L"\\mdbx.dat"
+#define MDBX_DATANAME_A "\\mdbx.dat"
+#ifdef UNICODE
+#define MDBX_DATANAME MDBX_DATANAME_W
+#else
+#define MDBX_DATANAME MDBX_DATANAME_A
+#endif /* UNICODE */
+#endif /* Windows */
 #endif /* MDBX_DATANAME */
 
 #ifndef MDBX_LOCK_SUFFIX
@@ -848,8 +860,14 @@ enum MDBX_constants {
 #if !(defined(_WIN32) || defined(_WIN64))
 #define MDBX_LOCK_SUFFIX "-lck"
 #else
-#define MDBX_LOCK_SUFFIX L"-lck"
-#endif
+#define MDBX_LOCK_SUFFIX_W L"-lck"
+#define MDBX_LOCK_SUFFIX_A "-lck"
+#ifdef UNICODE
+#define MDBX_LOCK_SUFFIX MDBX_LOCK_SUFFIX_W
+#else
+#define MDBX_LOCK_SUFFIX MDBX_LOCK_SUFFIX_A
+#endif /* UNICODE */
+#endif /* Windows */
 #endif /* MDBX_LOCK_SUFFIX */
 
 /* DEBUG & LOGGING ************************************************************/
@@ -2497,7 +2515,9 @@ struct MDBX_envinfo {
   uint64_t mi_unsync_volume;
   /** Current auto-sync threshold, see \ref mdbx_env_set_syncbytes(). */
   uint64_t mi_autosync_threshold;
-  /** Time since the last steady sync in 1/65536 of second */
+  /** Time since entering to a "dirty" out-of-sync state in units of 1/65536 of
+   * second. In other words, this is the time since the last non-steady commit
+   * or zero if it was steady. */
   uint32_t mi_since_sync_seconds16dot16;
   /** Current auto-sync period in 1/65536 of second,
    * see \ref mdbx_env_set_syncperiod(). */
@@ -3288,6 +3308,32 @@ mdbx_env_get_maxvalsize_ex(const MDBX_env *env, MDBX_db_flags_t flags);
  * \ingroup c_statinfo */
 MDBX_DEPRECATED MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API int
 mdbx_env_get_maxkeysize(const MDBX_env *env);
+
+/** \brief Returns maximal size of key-value pair to fit in a single page
+ * for specified database flags.
+ * \ingroup c_statinfo
+ *
+ * \param [in] env    An environment handle returned by \ref mdbx_env_create().
+ * \param [in] flags  Database options (\ref MDBX_DUPSORT, \ref MDBX_INTEGERKEY
+ *                    and so on). \see db_flags
+ *
+ * \returns The maximum size of a data can write,
+ *          or -1 if something is wrong. */
+MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API int
+mdbx_env_get_pairsize4page_max(const MDBX_env *env, MDBX_db_flags_t flags);
+
+/** \brief Returns maximal data size in bytes to fit in a leaf-page or
+ * single overflow/large-page for specified database flags.
+ * \ingroup c_statinfo
+ *
+ * \param [in] env    An environment handle returned by \ref mdbx_env_create().
+ * \param [in] flags  Database options (\ref MDBX_DUPSORT, \ref MDBX_INTEGERKEY
+ *                    and so on). \see db_flags
+ *
+ * \returns The maximum size of a data can write,
+ *          or -1 if something is wrong. */
+MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API int
+mdbx_env_get_valsize4page_max(const MDBX_env *env, MDBX_db_flags_t flags);
 
 /** \brief Sets application information (a context pointer) associated with
  * the environment.
