@@ -11,6 +11,7 @@ BANNER="$(which banner 2>/dev/null | echo echo)"
 UNAME="$(uname -s 2>/dev/null || echo Unknown)"
 DB_UPTO_MB=17408
 PAGESIZE=min
+DONT_CHECK_RAM=no
 
 while [ -n "$1" ]
 do
@@ -31,6 +32,7 @@ do
     echo "--db-upto-mb NN        Limits upper size of test DB to the NN megabytes"
     echo "--no-geometry-jitter   Disable jitter for geometry upper-size"
     echo "--pagesize NN          Use specified page size (256 is minimal and used by default) "
+    echo "--dont-check-ram-size  Don't check available RAM "
     echo "--help                 Print this usage help and exit"
     exit -2
   ;;
@@ -140,6 +142,9 @@ do
     esac
     shift
   ;;
+  --dont-check-ram-size)
+    DONT_CHECK_RAM=yes
+  ;;
   *)
     echo "Unknown option '$1'"
     exit -2
@@ -222,6 +227,14 @@ case ${UNAME} in
   ;;
 
   MSYS*|MINGW*)
+    if [ -z "${TESTDB_DIR:-}" ]; then
+      for old_test_dir in $(ls -d /tmp/mdbx-test.[0-9]* 2>/dev/null); do
+        rm -rf $old_test_dir
+      done
+      TESTDB_DIR="/tmp/mdbx-test.$$"
+    fi
+    mkdir -p $TESTDB_DIR && rm -f $TESTDB_DIR/*
+
     echo "FIXME: Fake support for ${UNAME}"
     ram_avail_mb=32768
   ;;
@@ -238,11 +251,15 @@ rm -f ${TESTDB_DIR}/*
 # 2. estimate reasonable RAM space for test-db
 
 echo "=== ${ram_avail_mb}M RAM available"
-ram_reserve4logs_mb=1234
-if [ $ram_avail_mb -lt $ram_reserve4logs_mb ]; then
-  echo "=== At least ${ram_reserve4logs_mb}Mb RAM required"
-  exit 3
-fi
+if [ $DONT_CHECK_RAM = yes ]; then
+  db_size_mb=$DB_UPTO_MB
+  ram_reserve4logs_mb=64
+else
+  ram_reserve4logs_mb=1234
+  if [ $ram_avail_mb -lt $ram_reserve4logs_mb ]; then
+    echo "=== At least ${ram_reserve4logs_mb}Mb RAM required"
+    exit 3
+  fi
 
 #
 # В режимах отличных от MDBX_WRITEMAP изменения до записи в файл
@@ -262,9 +279,10 @@ fi
 # that malloc() will not return the allocated memory to the
 # system immediately, as well some space is required for logs.
 #
-db_size_mb=$(((ram_avail_mb - ram_reserve4logs_mb) / 4))
-if [ $db_size_mb -gt $DB_UPTO_MB ]; then
-  db_size_mb=$DB_UPTO_MB
+  db_size_mb=$(((ram_avail_mb - ram_reserve4logs_mb) / 4))
+  if [ $db_size_mb -gt $DB_UPTO_MB ]; then
+    db_size_mb=$DB_UPTO_MB
+  fi
 fi
 echo "=== use ${db_size_mb}M for DB"
 

@@ -2,32 +2,32 @@ enable_language(CXX)
 include(../cmake/compiler.cmake)
 
 set(LIBMDBX_TEST_SOURCES
-  base.h
-  cases.cc
-  chrono.cc
-  chrono.h
-  config.cc
-  config.h
-  copy.cc
-  dead.cc
-  hill.cc
-  jitter.cc
-  keygen.cc
-  keygen.h
-  log.cc
-  log.h
-  main.cc
-  osal.h
-  osal-unix.cc
-  osal-windows.cc
-  test.cc
-  test.h
-  try.cc
-  utils.cc
-  utils.h
-  append.cc
-  ttl.cc
-  nested.cc
+  base.h++
+  cases.c++
+  chrono.c++
+  chrono.h++
+  config.c++
+  config.h++
+  copy.c++
+  dead.c++
+  hill.c++
+  jitter.c++
+  keygen.c++
+  keygen.h++
+  log.c++
+  log.h++
+  main.c++
+  osal.h++
+  osal-unix.c++
+  osal-windows.c++
+  test.c++
+  test.h++
+  try.c++
+  utils.c++
+  utils.h++
+  append.c++
+  ttl.c++
+  nested.c++
   )
 
 if(NOT MDBX_BUILD_CXX)
@@ -54,7 +54,11 @@ if(NOT MDBX_BUILD_CXX AND LIBCXX_FILESYSTEM)
   target_link_libraries(mdbx_test ${LIBCXX_FILESYSTEM})
 endif()
 
-target_link_libraries(mdbx_test ${TOOL_MDBX_LIB} ${LIB_MATH} ${CMAKE_THREAD_LIBS_INIT})
+if(CMAKE_VERSION VERSION_LESS 3.1)
+  target_link_libraries(mdbx_test ${TOOL_MDBX_LIB} ${LIB_MATH} ${CMAKE_THREAD_LIBS_INIT})
+else()
+  target_link_libraries(mdbx_test ${TOOL_MDBX_LIB} ${LIB_MATH} Threads::Threads)
+endif()
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
   target_link_libraries(mdbx_test winmm.lib)
 endif()
