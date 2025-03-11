@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2023 Leonid Yuriev <leo@yuriev.ru>
+ * Copyright 2017-2024 Leonid Yuriev <leo@yuriev.ru>
  * and other libmdbx authors: please see AUTHORS file.
  * All rights reserved.
  *
@@ -119,9 +119,8 @@ bool testcase_ttl::run() {
     return false;
   }
 
-  uint64_t seed =
-      prng64_map2_white(config.params.keygen.seed) + config.actor_id;
-  keyvalue_maker.setup(config.params, config.actor_id, 0 /* thread_number */);
+  uint64_t seed = prng64_map2_white(prng_state) + config.space_id;
+  keyvalue_maker.setup(config.params, 0 /* thread_number */);
   key = keygen::alloc(config.params.keylen_max);
   data = keygen::alloc(config.params.datalen_max);
   const MDBX_put_flags_t insert_flags =

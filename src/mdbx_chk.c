@@ -1,7 +1,7 @@
 /* mdbx_chk.c - memory-mapped database check tool */
 
 /*
- * Copyright 2015-2023 Leonid Yuriev <leo@yuriev.ru>
+ * Copyright 2015-2024 Leonid Yuriev <leo@yuriev.ru>
  * and other libmdbx authors: please see AUTHORS file.
  * All rights reserved.
  *
@@ -691,7 +691,8 @@ int main(int argc, char *argv[]) {
 
 bailout:
   if (env) {
-    const bool dont_sync = rc != 0 || chk.result.total_problems;
+    const bool dont_sync = rc != 0 || chk.result.total_problems ||
+                           (chk_flags & MDBX_CHK_READWRITE) == 0;
     mdbx_env_close_ex(env, dont_sync);
   }
   flush();

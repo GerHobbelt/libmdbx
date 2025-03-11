@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2023 Leonid Yuriev <leo@yuriev.ru>
+ * Copyright 2017-2024 Leonid Yuriev <leo@yuriev.ru>
  * and other libmdbx authors: please see AUTHORS file.
  * All rights reserved.
  *
@@ -63,7 +63,7 @@ const char *keygencase2str(const keygen_case);
 
 namespace config {
 
-enum scale_mode { no_scale, decimal, binary, duration };
+enum scale_mode { no_scale, decimal, binary, duration, intkey };
 
 bool parse_option(int argc, char *const argv[], int &narg, const char *option,
                   const char **value, const char *default_value = nullptr);
@@ -274,6 +274,7 @@ struct actor_params_pod {
   unsigned batch_read{0};
   unsigned batch_write{0};
 
+  unsigned prng_seed{0};
   unsigned delaystart{0};
   unsigned waitfor_nops{0};
   unsigned inject_writefaultn{0};

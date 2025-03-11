@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2023 Leonid Yuriev <leo@yuriev.ru>
+ * Copyright 2015-2024 Leonid Yuriev <leo@yuriev.ru>
  * and other libmdbx authors: please see AUTHORS file.
  * All rights reserved.
  *
@@ -1260,6 +1260,7 @@ struct MDBX_txn {
         size_t writemap_dirty_npages;
         size_t writemap_spilled_npages;
       };
+      uint64_t gc_time_acc;
     } tw;
   };
 };
@@ -1387,8 +1388,12 @@ struct MDBX_env {
 #define me_lfd me_lck_mmap.fd
   struct MDBX_lockinfo *me_lck;
 
-  unsigned me_leaf_nodemax;   /* max size of a leaf-node */
-  unsigned me_branch_nodemax; /* max size of a branch-node */
+  uint16_t me_leaf_nodemax;   /* max size of a leaf-node */
+  uint16_t me_branch_nodemax; /* max size of a branch-node */
+  uint16_t me_subpage_limit;
+  uint16_t me_subpage_room_threshold;
+  uint16_t me_subpage_reserve_prereq;
+  uint16_t me_subpage_reserve_limit;
   atomic_pgno_t me_mlocked_pgno;
   uint8_t me_psize2log; /* log2 of DB page size */
   int8_t me_stuck_meta; /* recovery-only: target meta page or less that zero */
@@ -1422,6 +1427,7 @@ struct MDBX_env {
     unsigned rp_augment_limit;
     unsigned dp_limit;
     unsigned dp_initial;
+    uint64_t gc_time_limit;
     uint8_t dp_loose_limit;
     uint8_t spill_max_denominator;
     uint8_t spill_min_denominator;
@@ -1431,6 +1437,8 @@ struct MDBX_env {
     unsigned writethrough_threshold;
 #endif /* Windows */
     bool prefault_write;
+    bool prefer_waf_insteadof_balance; /* Strive to minimize WAF instead of
+                                          balancing pages fullment */
     union {
       unsigned all;
       /* tracks options with non-auto values but tuned by user */

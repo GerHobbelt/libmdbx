@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2020-2023, Leonid Yuriev <leo@yuriev.ru>.
+// Copyright (c) 2020-2024, Leonid Yuriev <leo@yuriev.ru>.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Non-inline part of the libmdbx C++ API
@@ -207,6 +207,44 @@ __cold  bug::~bug() noexcept {}
 
 #endif /* Unused*/
 
+struct line_wrapper {
+  char *line, *ptr;
+  line_wrapper(char *buf) noexcept : line(buf), ptr(buf) {}
+  void put(char c, size_t wrap_width) noexcept {
+    *ptr++ = c;
+    if (wrap_width && ptr >= wrap_width + line) {
+      *ptr++ = '\n';
+      line = ptr;
+    }
+  }
+  void put(const ::mdbx::slice &chunk, size_t wrap_width) noexcept {
+    if (!wrap_width || wrap_width > (ptr - line) + chunk.length()) {
+      memcpy(ptr, chunk.data(), chunk.length());
+      ptr += chunk.length();
+    } else {
+      for (size_t i = 0; i < chunk.length(); ++i)
+        put(chunk.char_ptr()[i], wrap_width);
+    }
+  }
+};
+
+template <typename TYPE, unsigned INPLACE_BYTES = unsigned(sizeof(void *) * 64)>
+struct temp_buffer {
+  TYPE inplace[(INPLACE_BYTES + sizeof(TYPE) - 1) / sizeof(TYPE)];
+  const size_t size;
+  TYPE *const area;
+  temp_buffer(size_t bytes)
+      : size((bytes + sizeof(TYPE) - 1) / sizeof(TYPE)),
+        area((bytes > sizeof(inplace)) ? new TYPE[size] : inplace) {
+    memset(area, 0, sizeof(TYPE) * size);
+  }
+  ~temp_buffer() {
+    if (area != inplace)
+      delete[] area;
+  }
+  TYPE *end() const { return area + size; }
+};
+
 } // namespace
 
 //------------------------------------------------------------------------------
@@ -231,6 +269,11 @@ namespace mdbx {
   throw std::logic_error(
       "mdbx:: An allocators mismatch, so an object could not be transferred "
       "into an incompatible memory allocation scheme.");
+}
+
+[[noreturn]] __cold void throw_incomparable_cursors() {
+  throw std::logic_error(
+      "mdbx:: incomparable and/or invalid cursors to compare positions.");
 }
 
 [[noreturn]] __cold void throw_bad_value_size() {
@@ -492,48 +535,48 @@ bool slice::is_printable(bool disable_utf8) const noexcept {
 }
 
 #ifdef MDBX_U128_TYPE
-MDBX_U128_TYPE slice::as_uint128() const {
+MDBX_U128_TYPE slice::as_uint128_adapt() const {
   static_assert(sizeof(MDBX_U128_TYPE) == 16, "WTF?");
   if (size() == 16) {
     MDBX_U128_TYPE r;
     memcpy(&r, data(), sizeof(r));
     return r;
   } else
-    return as_uint64();
+    return as_uint64_adapt();
 }
 #endif /* MDBX_U128_TYPE */
 
-uint64_t slice::as_uint64() const {
+uint64_t slice::as_uint64_adapt() const {
   static_assert(sizeof(uint64_t) == 8, "WTF?");
   if (size() == 8) {
     uint64_t r;
     memcpy(&r, data(), sizeof(r));
     return r;
   } else
-    return as_uint32();
+    return as_uint32_adapt();
 }
 
-uint32_t slice::as_uint32() const {
+uint32_t slice::as_uint32_adapt() const {
   static_assert(sizeof(uint32_t) == 4, "WTF?");
   if (size() == 4) {
     uint32_t r;
     memcpy(&r, data(), sizeof(r));
     return r;
   } else
-    return as_uint16();
+    return as_uint16_adapt();
 }
 
-uint16_t slice::as_uint16() const {
+uint16_t slice::as_uint16_adapt() const {
   static_assert(sizeof(uint16_t) == 2, "WTF?");
   if (size() == 2) {
     uint16_t r;
     memcpy(&r, data(), sizeof(r));
     return r;
   } else
-    return as_uint8();
+    return as_uint8_adapt();
 }
 
-uint8_t slice::as_uint8() const {
+uint8_t slice::as_uint8_adapt() const {
   static_assert(sizeof(uint8_t) == 1, "WTF?");
   if (size() == 1)
     return *static_cast<const uint8_t *>(data());
@@ -544,48 +587,48 @@ uint8_t slice::as_uint8() const {
 }
 
 #ifdef MDBX_I128_TYPE
-MDBX_I128_TYPE slice::as_int128() const {
+MDBX_I128_TYPE slice::as_int128_adapt() const {
   static_assert(sizeof(MDBX_I128_TYPE) == 16, "WTF?");
   if (size() == 16) {
     MDBX_I128_TYPE r;
     memcpy(&r, data(), sizeof(r));
     return r;
   } else
-    return as_int64();
+    return as_int64_adapt();
 }
 #endif /* MDBX_I128_TYPE */
 
-int64_t slice::as_int64() const {
+int64_t slice::as_int64_adapt() const {
   static_assert(sizeof(int64_t) == 8, "WTF?");
   if (size() == 8) {
     uint64_t r;
     memcpy(&r, data(), sizeof(r));
     return r;
   } else
-    return as_int32();
+    return as_int32_adapt();
 }
 
-int32_t slice::as_int32() const {
+int32_t slice::as_int32_adapt() const {
   static_assert(sizeof(int32_t) == 4, "WTF?");
   if (size() == 4) {
     int32_t r;
     memcpy(&r, data(), sizeof(r));
     return r;
   } else
-    return as_int16();
+    return as_int16_adapt();
 }
 
-int16_t slice::as_int16() const {
+int16_t slice::as_int16_adapt() const {
   static_assert(sizeof(int16_t) == 2, "WTF?");
   if (size() == 2) {
     int16_t r;
     memcpy(&r, data(), sizeof(r));
     return r;
   } else
-    return as_int8();
+    return as_int8_adapt();
 }
 
-int8_t slice::as_int8() const {
+int8_t slice::as_int8_adapt() const {
   if (size() == 1)
     return *static_cast<const int8_t *>(data());
   else if (size() == 0)
@@ -602,7 +645,7 @@ char *to_hex::write_bytes(char *__restrict const dest, size_t dest_size) const {
 
   auto ptr = dest;
   auto src = source.byte_ptr();
-  const char alphabase = (uppercase ? 'A' : 'a') - 10;
+  const char alpha_shift = (uppercase ? 'A' : 'a') - '9' - 1;
   auto line = ptr;
   for (const auto end = source.end_byte_ptr(); src != end; ++src) {
     if (wrap_width && size_t(ptr - line) >= wrap_width) {
@@ -611,8 +654,8 @@ char *to_hex::write_bytes(char *__restrict const dest, size_t dest_size) const {
     }
     const int8_t hi = *src >> 4;
     const int8_t lo = *src & 15;
-    ptr[0] = char(alphabase + hi + (((hi - 10) >> 7) & -7));
-    ptr[1] = char(alphabase + lo + (((lo - 10) >> 7) & -7));
+    ptr[0] = char('0' + hi + (((9 - hi) >> 7) & alpha_shift));
+    ptr[1] = char('0' + lo + (((9 - lo) >> 7) & alpha_shift));
     ptr += 2;
     assert(ptr <= dest + dest_size);
   }
@@ -624,7 +667,7 @@ char *to_hex::write_bytes(char *__restrict const dest, size_t dest_size) const {
     MDBX_CXX20_LIKELY {
       ::std::ostream::sentry sentry(out);
       auto src = source.byte_ptr();
-      const char alphabase = (uppercase ? 'A' : 'a') - 10;
+      const char alpha_shift = (uppercase ? 'A' : 'a') - '9' - 1;
       unsigned width = 0;
       for (const auto end = source.end_byte_ptr(); src != end; ++src) {
         if (wrap_width && width >= wrap_width) {
@@ -633,8 +676,8 @@ char *to_hex::write_bytes(char *__restrict const dest, size_t dest_size) const {
         }
         const int8_t hi = *src >> 4;
         const int8_t lo = *src & 15;
-        out.put(char(alphabase + hi + (((hi - 10) >> 7) & -7)));
-        out.put(char(alphabase + lo + (((lo - 10) >> 7) & -7)));
+        out.put(char('0' + hi + (((9 - hi) >> 7) & alpha_shift)));
+        out.put(char('0' + lo + (((9 - lo) >> 7) & alpha_shift)));
         width += 2;
       }
     }
@@ -665,11 +708,11 @@ char *from_hex::write_bytes(char *__restrict const dest,
 
     int8_t hi = src[0];
     hi = (hi | 0x20) - 'a';
-    hi += 10 + ((hi >> 7) & 7);
+    hi += 10 + ((hi >> 7) & 39);
 
     int8_t lo = src[1];
     lo = (lo | 0x20) - 'a';
-    lo += 10 + ((lo >> 7) & 7);
+    lo += 10 + ((lo >> 7) & 39);
 
     *ptr++ = hi << 4 | lo;
     src += 2;
@@ -712,40 +755,86 @@ enum : signed char {
   IL /* invalid */ = -1
 };
 
-static const byte b58_alphabet[58] = {
-    '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
-    'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W',
-    'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'm',
-    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'};
-
-#ifndef bswap64
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-static inline uint64_t bswap64(uint64_t v) noexcept {
-#if __GNUC_PREREQ(4, 4) || __CLANG_PREREQ(4, 0) ||                             \
-    __has_builtin(__builtin_bswap64)
-  return __builtin_bswap64(v);
-#elif defined(_MSC_VER) && !defined(__clang__)
-  return _byteswap_uint64(v);
-#elif defined(__bswap_64)
-  return __bswap_64(v);
-#elif defined(bswap_64)
-  return bswap_64(v);
+#if MDBX_WORDBITS > 32
+using b58_uint = uint_fast64_t;
 #else
-  return v << 56 | v >> 56 | ((v << 40) & UINT64_C(0x00ff000000000000)) |
-         ((v << 24) & UINT64_C(0x0000ff0000000000)) |
-         ((v << 8) & UINT64_C(0x000000ff00000000)) |
-         ((v >> 8) & UINT64_C(0x00000000ff000000)) |
-         ((v >> 24) & UINT64_C(0x0000000000ff0000)) |
-         ((v >> 40) & UINT64_C(0x000000000000ff00));
+using b58_uint = uint_fast32_t;
 #endif
-}
-#endif /* __BYTE_ORDER__ */
-#endif /* ifndef bswap64 */
 
-static inline char b58_8to11(uint64_t &v) noexcept {
-  const unsigned i = unsigned(v % 58);
+struct b58_buffer : public temp_buffer<b58_uint> {
+  b58_buffer(size_t bytes, size_t estimation_ratio_numerator,
+             size_t estimation_ratio_denominator, size_t extra = 0)
+      : temp_buffer((/* пересчитываем по указанной пропорции */
+                     bytes = (bytes * estimation_ratio_numerator +
+                              estimation_ratio_denominator - 1) /
+                             estimation_ratio_denominator,
+                     /* учитываем резервный старший байт в каждом слове */
+                     ((bytes + sizeof(b58_uint) - 2) / (sizeof(b58_uint) - 1) *
+                          sizeof(b58_uint) +
+                      extra) *
+                         sizeof(b58_uint))) {}
+};
+
+static byte b58_8to11(b58_uint &v) noexcept {
+  static const char b58_alphabet[58] = {
+      '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
+      'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W',
+      'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'm',
+      'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'};
+
+  const auto i = size_t(v % 58);
   v /= 58;
   return b58_alphabet[i];
+}
+
+static slice b58_encode(b58_buffer &buf, const byte *begin, const byte *end) {
+  auto high = buf.end();
+  const auto modulo =
+      b58_uint((sizeof(b58_uint) > 4) ? UINT64_C(0x1A636A90B07A00) /* 58^9 */
+                                      : UINT32_C(0xACAD10) /* 58^4 */);
+  static_assert(sizeof(modulo) == 4 || sizeof(modulo) == 8, "WTF?");
+  while (begin < end) {
+    b58_uint carry = *begin++;
+    auto ptr = buf.end();
+    do {
+      assert(ptr > buf.area);
+      carry += *--ptr << CHAR_BIT;
+      *ptr = carry % modulo;
+      carry /= modulo;
+    } while (carry || ptr > high);
+    high = ptr;
+  }
+
+  byte *output = static_cast<byte *>(static_cast<void *>(buf.area));
+  auto ptr = output;
+  for (auto porous = high; porous < buf.end();) {
+    auto chunk = *porous++;
+    static_assert(sizeof(chunk) == 4 || sizeof(chunk) == 8, "WTF?");
+    assert(chunk < modulo);
+    if (sizeof(chunk) > 4) {
+      ptr[8] = b58_8to11(chunk);
+      ptr[7] = b58_8to11(chunk);
+      ptr[6] = b58_8to11(chunk);
+      ptr[5] = b58_8to11(chunk);
+      ptr[4] = b58_8to11(chunk);
+      ptr[3] = b58_8to11(chunk);
+      ptr[2] = b58_8to11(chunk);
+      ptr[1] = b58_8to11(chunk);
+      ptr[0] = b58_8to11(chunk);
+      ptr += 9;
+    } else {
+      ptr[3] = b58_8to11(chunk);
+      ptr[2] = b58_8to11(chunk);
+      ptr[1] = b58_8to11(chunk);
+      ptr[0] = b58_8to11(chunk);
+      ptr += 4;
+    }
+    assert(static_cast<void *>(ptr) < static_cast<void *>(porous));
+  }
+
+  while (output < ptr && *output == '1')
+    ++output;
+  return slice(output, ptr);
 }
 
 char *to_base58::write_bytes(char *__restrict const dest,
@@ -753,115 +842,48 @@ char *to_base58::write_bytes(char *__restrict const dest,
   if (MDBX_UNLIKELY(envisage_result_length() > dest_size))
     MDBX_CXX20_UNLIKELY throw_too_small_target_buffer();
 
-  auto ptr = dest;
-  auto src = source.byte_ptr();
-  size_t left = source.length();
-  auto line = ptr;
-  while (MDBX_LIKELY(left > 7)) {
-    uint64_t v;
-    std::memcpy(&v, src, 8);
-    src += 8;
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-    v = bswap64(v);
-#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#else
-#error "FIXME: Unsupported byte order"
-#endif /* __BYTE_ORDER__ */
-    ptr[10] = b58_8to11(v);
-    ptr[9] = b58_8to11(v);
-    ptr[8] = b58_8to11(v);
-    ptr[7] = b58_8to11(v);
-    ptr[6] = b58_8to11(v);
-    ptr[5] = b58_8to11(v);
-    ptr[4] = b58_8to11(v);
-    ptr[3] = b58_8to11(v);
-    ptr[2] = b58_8to11(v);
-    ptr[1] = b58_8to11(v);
-    ptr[0] = b58_8to11(v);
-    assert(v == 0);
-    ptr += 11;
-    left -= 8;
-    if (wrap_width && size_t(ptr - line) >= wrap_width && left) {
-      *ptr = '\n';
-      line = ++ptr;
-    }
-    assert(ptr <= dest + dest_size);
+  auto begin = source.byte_ptr();
+  auto end = source.end_byte_ptr();
+  line_wrapper wrapper(dest);
+  while (MDBX_LIKELY(begin < end) && *begin == 0) {
+    wrapper.put('1', wrap_width);
+    assert(wrapper.ptr <= dest + dest_size);
+    ++begin;
   }
 
-  if (left) {
-    uint64_t v = 0;
-    unsigned parrots = 31;
-    do {
-      v = (v << 8) + *src++;
-      parrots += 43;
-    } while (--left);
-
-    auto tail = ptr += parrots >> 5;
-    assert(ptr <= dest + dest_size);
-    do {
-      *--tail = b58_8to11(v);
-      parrots -= 32;
-    } while (parrots > 31);
-    assert(v == 0);
-  }
-
-  return ptr;
+  b58_buffer buf(end - begin, 11, 8);
+  wrapper.put(b58_encode(buf, begin, end), wrap_width);
+  return wrapper.ptr;
 }
 
 ::std::ostream &to_base58::output(::std::ostream &out) const {
   if (MDBX_LIKELY(!is_empty()))
     MDBX_CXX20_LIKELY {
       ::std::ostream::sentry sentry(out);
-      auto src = source.byte_ptr();
-      size_t left = source.length();
+      auto begin = source.byte_ptr();
+      auto end = source.end_byte_ptr();
       unsigned width = 0;
-      std::array<char, 11> buf;
-
-      while (MDBX_LIKELY(left > 7)) {
-        uint64_t v;
-        std::memcpy(&v, src, 8);
-        src += 8;
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-        v = bswap64(v);
-#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#else
-#error "FIXME: Unsupported byte order"
-#endif /* __BYTE_ORDER__ */
-        buf[10] = b58_8to11(v);
-        buf[9] = b58_8to11(v);
-        buf[8] = b58_8to11(v);
-        buf[7] = b58_8to11(v);
-        buf[6] = b58_8to11(v);
-        buf[5] = b58_8to11(v);
-        buf[4] = b58_8to11(v);
-        buf[3] = b58_8to11(v);
-        buf[2] = b58_8to11(v);
-        buf[1] = b58_8to11(v);
-        buf[0] = b58_8to11(v);
-        assert(v == 0);
-        out.write(&buf.front(), 11);
-        left -= 8;
-        if (wrap_width && (width += 11) >= wrap_width && left) {
+      while (MDBX_LIKELY(begin < end) && *begin == 0) {
+        out.put('1');
+        if (wrap_width && ++width >= wrap_width) {
           out << ::std::endl;
           width = 0;
         }
+        ++begin;
       }
 
-      if (left) {
-        uint64_t v = 0;
-        unsigned parrots = 31;
-        do {
-          v = (v << 8) + *src++;
-          parrots += 43;
-        } while (--left);
-
-        auto ptr = buf.end();
-        do {
-          *--ptr = b58_8to11(v);
-          parrots -= 32;
-        } while (parrots > 31);
-        assert(v == 0);
-        out.write(&*ptr, buf.end() - ptr);
+      b58_buffer buf(end - begin, 11, 8);
+      const auto chunk = b58_encode(buf, begin, end);
+      if (!wrap_width || wrap_width > width + chunk.length())
+        out.write(chunk.char_ptr(), chunk.length());
+      else {
+        for (size_t i = 0; i < chunk.length(); ++i) {
+          out.put(chunk.char_ptr()[i]);
+          if (wrap_width && ++width >= wrap_width) {
+            out << ::std::endl;
+            width = 0;
+          }
+        }
       }
     }
   return out;
@@ -887,10 +909,46 @@ const signed char b58_map[256] = {
     IL, IL, IL, IL, IL, IL, IL, IL, IL, IL, IL, IL, IL, IL, IL, IL  // f0
 };
 
-static inline signed char b58_11to8(uint64_t &v, const byte c) noexcept {
-  const signed char m = b58_map[c];
-  v = v * 58 + m;
-  return m;
+static slice b58_decode(b58_buffer &buf, const byte *begin, const byte *end,
+                        bool ignore_spaces) {
+  auto high = buf.end();
+  while (begin < end) {
+    const auto c = b58_map[*begin++];
+    if (MDBX_LIKELY(c >= 0)) {
+      b58_uint carry = c;
+      auto ptr = buf.end();
+      do {
+        assert(ptr > buf.area);
+        carry += *--ptr * 58;
+        *ptr = carry & (~b58_uint(0) >> CHAR_BIT);
+        carry >>= CHAR_BIT * (sizeof(carry) - 1);
+      } while (carry || ptr > high);
+      high = ptr;
+    } else if (MDBX_UNLIKELY(!ignore_spaces || !isspace(begin[-1])))
+      MDBX_CXX20_UNLIKELY
+    throw std::domain_error("mdbx::from_base58:: invalid base58 string");
+  }
+
+  byte *output = static_cast<byte *>(static_cast<void *>(buf.area));
+  auto ptr = output;
+  for (auto porous = high; porous < buf.end(); ++porous) {
+    auto chunk = *porous;
+    static_assert(sizeof(chunk) == 4 || sizeof(chunk) == 8, "WTF?");
+    assert(chunk <= (~b58_uint(0) >> CHAR_BIT));
+    if (sizeof(chunk) > 4) {
+      *ptr++ = byte(uint_fast64_t(chunk) >> CHAR_BIT * 6);
+      *ptr++ = byte(uint_fast64_t(chunk) >> CHAR_BIT * 5);
+      *ptr++ = byte(uint_fast64_t(chunk) >> CHAR_BIT * 4);
+      *ptr++ = byte(chunk >> CHAR_BIT * 3);
+    }
+    *ptr++ = byte(chunk >> CHAR_BIT * 2);
+    *ptr++ = byte(chunk >> CHAR_BIT * 1);
+    *ptr++ = byte(chunk >> CHAR_BIT * 0);
+  }
+
+  while (output < ptr && *output == 0)
+    ++output;
+  return slice(output, ptr);
 }
 
 char *from_base58::write_bytes(char *__restrict const dest,
@@ -899,98 +957,33 @@ char *from_base58::write_bytes(char *__restrict const dest,
     MDBX_CXX20_UNLIKELY throw_too_small_target_buffer();
 
   auto ptr = dest;
-  auto src = source.byte_ptr();
-  for (auto left = source.length(); left > 0;) {
-    if (MDBX_UNLIKELY(isspace(*src)) && ignore_spaces) {
-      ++src;
-      --left;
-      continue;
-    }
-
-    if (MDBX_LIKELY(left > 10)) {
-      uint64_t v = 0;
-      if (MDBX_UNLIKELY((b58_11to8(v, src[0]) | b58_11to8(v, src[1]) |
-                         b58_11to8(v, src[2]) | b58_11to8(v, src[3]) |
-                         b58_11to8(v, src[4]) | b58_11to8(v, src[5]) |
-                         b58_11to8(v, src[6]) | b58_11to8(v, src[7]) |
-                         b58_11to8(v, src[8]) | b58_11to8(v, src[9]) |
-                         b58_11to8(v, src[10])) < 0))
-        MDBX_CXX20_UNLIKELY goto bailout;
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-      v = bswap64(v);
-#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#else
-#error "FIXME: Unsupported byte order"
-#endif /* __BYTE_ORDER__ */
-      std::memcpy(ptr, &v, 8);
-      ptr += 8;
-      src += 11;
-      left -= 11;
-      assert(ptr <= dest + dest_size);
-      continue;
-    }
-
-    constexpr unsigned invalid_length_mask = 1 << 1 | 1 << 4 | 1 << 8;
-    if (MDBX_UNLIKELY(invalid_length_mask & (1 << left)))
-      MDBX_CXX20_UNLIKELY goto bailout;
-
-    uint64_t v = 1;
-    unsigned parrots = 0;
-    do {
-      if (MDBX_UNLIKELY(b58_11to8(v, *src++) < 0))
-        MDBX_CXX20_UNLIKELY goto bailout;
-      parrots += 32;
-    } while (--left);
-
-    auto tail = ptr += parrots / 43;
-    assert(ptr <= dest + dest_size);
-    do {
-      *--tail = byte(v);
-      v >>= 8;
-    } while (v > 255);
-    break;
+  auto begin = source.byte_ptr();
+  auto const end = source.end_byte_ptr();
+  while (begin < end && *begin <= '1') {
+    if (MDBX_LIKELY(*begin == '1'))
+      MDBX_CXX20_LIKELY *ptr++ = 0;
+    else if (MDBX_UNLIKELY(!ignore_spaces || !isspace(*begin)))
+      MDBX_CXX20_UNLIKELY
+    throw std::domain_error("mdbx::from_base58:: invalid base58 string");
+    ++begin;
   }
-  return ptr;
 
-bailout:
-  throw std::domain_error("mdbx::from_base58:: invalid base58 string");
+  b58_buffer buf(end - begin, 47, 64);
+  auto slice = b58_decode(buf, begin, end, ignore_spaces);
+  memcpy(ptr, slice.data(), slice.length());
+  return ptr + slice.length();
 }
 
 bool from_base58::is_erroneous() const noexcept {
-  bool got = false;
-  auto src = source.byte_ptr();
-  for (auto left = source.length(); left > 0;) {
-    if (MDBX_UNLIKELY(*src <= ' ') &&
-        MDBX_LIKELY(ignore_spaces && isspace(*src))) {
-      ++src;
-      --left;
-      continue;
-    }
-
-    if (MDBX_LIKELY(left > 10)) {
-      if (MDBX_UNLIKELY((b58_map[src[0]] | b58_map[src[1]] | b58_map[src[2]] |
-                         b58_map[src[3]] | b58_map[src[4]] | b58_map[src[5]] |
-                         b58_map[src[6]] | b58_map[src[7]] | b58_map[src[8]] |
-                         b58_map[src[9]] | b58_map[src[10]]) < 0))
-        MDBX_CXX20_UNLIKELY return true;
-      src += 11;
-      left -= 11;
-      got = true;
-      continue;
-    }
-
-    constexpr unsigned invalid_length_mask = 1 << 1 | 1 << 4 | 1 << 8;
-    if (invalid_length_mask & (1 << left))
-      return false;
-
-    do
-      if (MDBX_UNLIKELY(b58_map[*src++] < 0))
-        MDBX_CXX20_UNLIKELY return true;
-    while (--left);
-    got = true;
-    break;
+  auto begin = source.byte_ptr();
+  auto const end = source.end_byte_ptr();
+  while (begin < end) {
+    if (MDBX_UNLIKELY(b58_map[*begin] < 0 &&
+                      !(ignore_spaces && isspace(*begin))))
+      return true;
+    ++begin;
   }
-  return !got;
+  return false;
 }
 
 //------------------------------------------------------------------------------
@@ -1548,6 +1541,13 @@ void txn_managed::commit(commit_latency *latency) {
     MDBX_CXX20_LIKELY handle_ = nullptr;
   if (MDBX_UNLIKELY(err.code() != MDBX_SUCCESS))
     MDBX_CXX20_UNLIKELY err.throw_exception();
+}
+
+void txn_managed::commit_embark_read() {
+  auto env = this->env();
+  commit();
+  error::success_or_throw(
+      ::mdbx_txn_begin(env, nullptr, MDBX_TXN_RDONLY, &handle_));
 }
 
 //------------------------------------------------------------------------------

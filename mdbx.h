@@ -25,7 +25,7 @@ _The Future will (be) [Positive](https://www.ptsecurity.com). Всё будет 
 
 \section copyright LICENSE & COPYRIGHT
 
-\authors Copyright (c) 2015-2023, Leonid Yuriev <leo@yuriev.ru>
+\authors Copyright (c) 2015-2024, Leonid Yuriev <leo@yuriev.ru>
 and other _libmdbx_ authors: please see [AUTHORS](./AUTHORS) file.
 
 \copyright Redistribution and use in source and binary forms, with or without
@@ -1778,7 +1778,7 @@ enum MDBX_cursor_op {
    * return both key and data, and the return code depends on whether a
    * upper-bound was found.
    *
-   * For non DUPSORT-ed collections this work the same to \ref MDBX_SET_RANGE,
+   * For non DUPSORT-ed collections this work like \ref MDBX_SET_RANGE,
    * but returns \ref MDBX_SUCCESS if the greater key was found or
    * \ref MDBX_NOTFOUND otherwise.
    *
@@ -1786,7 +1786,28 @@ enum MDBX_cursor_op {
    * i.e. for a pairs/tuples of a key and an each data value of duplicates.
    * Returns \ref MDBX_SUCCESS if the greater pair was returned or
    * \ref MDBX_NOTFOUND otherwise. */
-  MDBX_SET_UPPERBOUND
+  MDBX_SET_UPPERBOUND,
+
+  /* Doubtless cursor positioning at a specified key. */
+  MDBX_TO_KEY_LESSER_THAN,
+  MDBX_TO_KEY_LESSER_OR_EQUAL,
+  MDBX_TO_KEY_EQUAL,
+  MDBX_TO_KEY_GREATER_OR_EQUAL,
+  MDBX_TO_KEY_GREATER_THAN,
+
+  /* Doubtless cursor positioning at a specified key-value pair
+   * for dupsort/multi-value hives. */
+  MDBX_TO_EXACT_KEY_VALUE_LESSER_THAN,
+  MDBX_TO_EXACT_KEY_VALUE_LESSER_OR_EQUAL,
+  MDBX_TO_EXACT_KEY_VALUE_EQUAL,
+  MDBX_TO_EXACT_KEY_VALUE_GREATER_OR_EQUAL,
+  MDBX_TO_EXACT_KEY_VALUE_GREATER_THAN,
+
+  MDBX_TO_PAIR_LESSER_THAN,
+  MDBX_TO_PAIR_LESSER_OR_EQUAL,
+  MDBX_TO_PAIR_EQUAL,
+  MDBX_TO_PAIR_GREATER_OR_EQUAL,
+  MDBX_TO_PAIR_GREATER_THAN
 };
 #ifndef __cplusplus
 /** \ingroup c_cursors */
@@ -2112,6 +2133,7 @@ enum MDBX_option_t {
   /** \brief Controls the in-process limit to grow a list of reclaimed/recycled
    * page's numbers for finding a sequence of contiguous pages for large data
    * items.
+   * \see MDBX_opt_gc_time_limit
    *
    * \details A long values requires allocation of contiguous database pages.
    * To find such sequences, it may be necessary to accumulate very large lists,
@@ -2125,7 +2147,8 @@ enum MDBX_option_t {
    * growth, or/and to the inability of put long values.
    *
    * The `MDBX_opt_rp_augment_limit` controls described limit for the current
-   * process. Default is 262144, it is usually enough for most cases. */
+   * process. By default this limit adjusted dynamically to 1/3 of current
+   * quantity of DB pages, which is usually enough for most cases. */
   MDBX_opt_rp_augment_limit,
 
   /** \brief Controls the in-process limit to grow a cache of dirty
@@ -2271,6 +2294,33 @@ enum MDBX_option_t {
    * in the \ref MDBX_WRITEMAP mode by clearing ones through file handle before
    * touching. */
   MDBX_opt_prefault_write_enable,
+
+  /** \brief Controls the in-process spending time limit of searching
+   *  consecutive pages inside GC.
+   * \see MDBX_opt_rp_augment_limit
+   *
+   * \details Задаёт ограничение времени в 1/65536 долях секунды, которое может
+   * быть потрачено в ходе пишущей транзакции на поиск последовательностей
+   * страниц внутри GC/freelist после достижения ограничения задаваемого опцией
+   * \ref MDBX_opt_rp_augment_limit. Контроль по времени не выполняется при
+   * поиске/выделении одиночных страниц и выделении страниц под нужды GC (при
+   * обновлении GC в ходе фиксации транзакции).
+   *
+   * Задаваемый лимит времени исчисляется по "настенным часам" и контролируется
+   * в рамках транзакции, наследуется для вложенных транзакций и с
+   * аккумулированием в родительской при их фиксации. Контроль по времени
+   * производится только при достижении ограничения задаваемого опцией \ref
+   * MDBX_opt_rp_augment_limit. Это позволяет гибко управлять поведением
+   * используя обе опции.
+   *
+   * По умолчанию ограничение устанавливается в 0, что приводит к
+   * незамедлительной остановке поиска в GC при достижении \ref
+   * MDBX_opt_rp_augment_limit во внутреннем состоянии транзакции и
+   * соответствует поведению до появления опции `MDBX_opt_gc_time_limit`.
+   * С другой стороны, при минимальном значении (включая 0)
+   * `MDBX_opt_rp_augment_limit` переработка GC будет ограничиваться
+   * преимущественно затраченным временем. */
+  MDBX_opt_gc_time_limit
 };
 #ifndef __cplusplus
 /** \ingroup c_settings */
@@ -2358,7 +2408,6 @@ LIBMDBX_API int mdbx_env_get_option(const MDBX_env *env,
  *                            doesn't exist.
  * \retval MDBX_EACCES        The user didn't have permission to access
  *                            the environment files.
- * \retval MDBX_EAGAIN        The environment was locked by another process.
  * \retval MDBX_BUSY          The \ref MDBX_EXCLUSIVE flag was specified and the
  *                            environment is in use by another process,
  *                            or the current process tries to open environment
@@ -2895,8 +2944,80 @@ LIBMDBX_INLINE_API(int, mdbx_env_close, (MDBX_env * env)) {
   return mdbx_env_close_ex(env, false);
 }
 
-#if !(defined(_WIN32) || defined(_WIN64))
-/** FIXME */
+#if defined(DOXYGEN) || !(defined(_WIN32) || defined(_WIN64))
+/** \brief Восстанавливает экземпляр среды в дочернем процессе после ветвления
+ * родительского процесса посредством `fork()` и родственных системных вызовов.
+ * \ingroup c_extra
+ *
+ * Без вызова \ref mdbx_env_resurrect_after_fork() использование открытого
+ * экземпляра среды в дочернем процессе не возможно, включая все выполняющиеся
+ * на момент ветвления транзакции.
+ *
+ * Выполняемые функцией действия можно рассматривать как повторное открытие БД
+ * в дочернем процессе, с сохранением заданных опций и адресов уже созданных
+ * экземпляров объектов связанных с API.
+ *
+ * \note Функция не доступна в ОС семейства Windows по причине отсутствия
+ * функционала ветвления процесса в API операционной системы.
+ *
+ * Ветвление не оказывает влияния на состояние MDBX-среды в родительском
+ * процессе. Все транзакции, которые были в родительском процессе на момент
+ * ветвления, после ветвления в родительском процессе продолжат выполняться без
+ * помех. Но в дочернем процессе все соответствующие транзакции безальтернативно
+ * перестают быть валидными, а попытка их использования приведет к возврату
+ * ошибки или отправке `SIGSEGV`.
+ *
+ * Использование экземпляра среды в дочернем процессе не возможно до вызова
+ * \ref mdbx_env_resurrect_after_fork(), так как в результате ветвления у
+ * процесса меняется PID, значение которого используется для организации
+ * совместно работы с БД, в том числе, для отслеживания процессов/потоков
+ * выполняющих читающие транзакции связанные с соответствующими снимками данных.
+ * Все активные на момент ветвления транзакции не могут продолжаться в дочернем
+ * процессе, так как не владеют какими-либо блокировками или каким-либо снимком
+ * данных и не удерживает его от переработки при сборке мусора.
+ *
+ * Функция \ref mdbx_env_resurrect_after_fork() восстанавливает переданный
+ * экземпляр среды в дочернем процессе после ветвления, а именно: обновляет
+ * используемые системные идентификаторы, повторно открывает дескрипторы файлов,
+ * производит захват необходимых блокировок связанных с LCK- и DXB-файлами БД,
+ * восстанавливает отображения в память страницы БД, таблицы читателей и
+ * служебных/вспомогательных данных в память. Однако унаследованные от
+ * родительского процесса транзакции не восстанавливаются, прием пишущие и
+ * читающие транзакции обрабатываются по-разному:
+ *
+ *  - Пишущая транзакция, если таковая была на момент ветвления,
+ *    прерывается в дочернем процессе с освобождение связанных с ней ресурсов,
+ *    включая все вложенные транзакции.
+ *
+ *  - Читающие же транзакции, если таковые были в родительском процессе,
+ *    в дочернем процессе логически прерываются, но без освобождения ресурсов.
+ *    Поэтому необходимо обеспечить вызов \ref mdbx_txn_abort() для каждой
+ *    такой читающей транзакций в дочернем процессе, либо смириться с утечкой
+ *    ресурсов до завершения дочернего процесса.
+ *
+ * Причина не-освобождения ресурсов читающих транзакций в том, что исторически
+ * MDBX не ведет какой-либо общий список экземпляров читающих, так как это не
+ * требуется для штатных режимов работы, но требует использования атомарных
+ * операций или дополнительных объектов синхронизации при создании/разрушении
+ * экземпляров \ref MDBX_txn.
+ *
+ * Вызов \ref mdbx_env_resurrect_after_fork() без ветвления, не в дочернем
+ * процессе, либо повторные вызовы не приводят к каким-либо действиям или
+ * изменениям.
+ *
+ * \returns Ненулевое значение ошибки при сбое и 0 при успешном выполнении,
+ *          некоторые возможные ошибки таковы:
+ *
+ * \retval MDBX_BUSY      В родительском процессе БД была открыта
+ *                        в режиме \ref MDBX_EXCLUSIVE.
+ *
+ * \retval MDBX_EBADSIGN  При повреждении сигнатуры экземпляра объекта, а также
+ *                        в случае одновременного вызова \ref
+ *                        mdbx_env_resurrect_after_fork() из разных потоков.
+ *
+ * \retval MDBX_PANIC     Произошла критическая ошибка при восстановлении
+ *                        экземпляра среды, либо такая ошибка уже была
+ *                        до вызова функции. */
 LIBMDBX_API int mdbx_env_resurrect_after_fork(MDBX_env *env);
 #endif /* Windows */
 
@@ -3319,12 +3440,24 @@ mdbx_limits_dbsize_max(intptr_t pagesize);
 MDBX_NOTHROW_CONST_FUNCTION LIBMDBX_API intptr_t
 mdbx_limits_keysize_max(intptr_t pagesize, MDBX_db_flags_t flags);
 
+/** \brief Returns minimal key size in bytes for given database flags.
+ * \ingroup c_statinfo
+ * \see db_flags */
+MDBX_NOTHROW_CONST_FUNCTION LIBMDBX_API intptr_t
+mdbx_limits_keysize_min(MDBX_db_flags_t flags);
+
 /** \brief Returns maximal data size in bytes for given page size
  * and database flags, or -1 if pagesize is invalid.
  * \ingroup c_statinfo
  * \see db_flags */
 MDBX_NOTHROW_CONST_FUNCTION LIBMDBX_API intptr_t
 mdbx_limits_valsize_max(intptr_t pagesize, MDBX_db_flags_t flags);
+
+/** \brief Returns minimal data size in bytes for given database flags.
+ * \ingroup c_statinfo
+ * \see db_flags */
+MDBX_NOTHROW_CONST_FUNCTION LIBMDBX_API intptr_t
+mdbx_limits_valsize_min(MDBX_db_flags_t flags);
 
 /** \brief Returns maximal size of key-value pair to fit in a single page with
  * the given size and database flags, or -1 if pagesize is invalid.
@@ -4891,6 +5024,11 @@ LIBMDBX_API MDBX_dbi mdbx_cursor_dbi(const MDBX_cursor *cursor);
  * \returns A non-zero error value on failure and 0 on success. */
 LIBMDBX_API int mdbx_cursor_copy(const MDBX_cursor *src, MDBX_cursor *dest);
 
+/** FIXME */
+LIBMDBX_API int mdbx_cursor_compare(const MDBX_cursor *left,
+                                    const MDBX_cursor *right,
+                                    bool ignore_nested);
+
 /** \brief Retrieve by cursor.
  * \ingroup c_crud
  *
@@ -4924,6 +5062,21 @@ LIBMDBX_API int mdbx_cursor_copy(const MDBX_cursor *src, MDBX_cursor *dest);
  * \retval MDBX_EINVAL    An invalid parameter was specified. */
 LIBMDBX_API int mdbx_cursor_get(MDBX_cursor *cursor, MDBX_val *key,
                                 MDBX_val *data, MDBX_cursor_op op);
+/** FIXME */
+typedef int(MDBX_predicate_func)(void *context, MDBX_val *key, MDBX_val *value,
+                                 void *arg) MDBX_CXX17_NOEXCEPT;
+/** FIXME */
+LIBMDBX_API int mdbx_cursor_scan(MDBX_cursor *cursor,
+                                 MDBX_predicate_func *predicate, void *context,
+                                 MDBX_cursor_op start_op,
+                                 MDBX_cursor_op turn_op, void *arg);
+
+/** FIXME */
+LIBMDBX_API int mdbx_cursor_scan_from(MDBX_cursor *cursor,
+                                      MDBX_predicate_func *predicate,
+                                      void *context, MDBX_cursor_op from_op,
+                                      MDBX_val *from_key, MDBX_val *from_value,
+                                      MDBX_cursor_op turn_op, void *arg);
 
 /** \brief Retrieve multiple non-dupsort key/value pairs by cursor.
  * \ingroup c_crud
@@ -5133,6 +5286,10 @@ mdbx_cursor_eof(const MDBX_cursor *cursor);
 MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API int
 mdbx_cursor_on_first(const MDBX_cursor *cursor);
 
+/** FIXME */
+MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API int
+mdbx_cursor_on_first_dup(const MDBX_cursor *cursor);
+
 /** \brief Determines whether the cursor is pointed to the last key-value pair
  * or not.
  * \ingroup c_cursors
@@ -5146,6 +5303,10 @@ mdbx_cursor_on_first(const MDBX_cursor *cursor);
  * \retval Otherwise the error code */
 MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API int
 mdbx_cursor_on_last(const MDBX_cursor *cursor);
+
+/** FIXME */
+MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API int
+mdbx_cursor_on_last_dup(const MDBX_cursor *cursor);
 
 /** \addtogroup c_rqest
  * \details \note The estimation result varies greatly depending on the filling
@@ -5624,6 +5785,18 @@ LIBMDBX_API int mdbx_env_open_for_recoveryW(MDBX_env *env,
  * leg(s). */
 LIBMDBX_API int mdbx_env_turn_for_recovery(MDBX_env *env, unsigned target_meta);
 
+/** \brief FIXME
+ */
+LIBMDBX_API int mdbx_preopen_snapinfo(const char *pathname, MDBX_envinfo *arg,
+                                      size_t bytes);
+#if defined(_WIN32) || defined(_WIN64) || defined(DOXYGEN)
+/** \copydoc mdbx_preopen_snapinfo()
+ * \note Available only on Windows.
+ * \see mdbx_preopen_snapinfo() */
+LIBMDBX_API int mdbx_preopen_snapinfoW(const wchar_t *pathname,
+                                       MDBX_envinfo *arg, size_t bytes);
+#endif /* Windows */
+
 /** \brief Флаги/опции для проверки целостности БД.
  * \see mdbx_env_chk() */
 enum MDBX_chk_flags_t {
@@ -5790,7 +5963,7 @@ typedef struct MDBX_chk_context {
         problems_gc, problems_kv, total_problems;
     uint64_t steady_txnid, recent_txnid;
     /** Указатель на массив размером subdb_total с указателями на экземпляры
-     * структур MDBX_chk_subdb_t с информацией о всех таблицах ключ-значние,
+     * структур MDBX_chk_subdb_t с информацией о всех таблицах ключ-значение,
      * включая MainDB и GC/FreeDB. */
     const MDBX_chk_subdb_t *const *subdbs;
   } result;
