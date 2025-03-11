@@ -14,6 +14,12 @@
 #define __USE_MINGW_ANSI_STDIO 1
 #endif /* MinGW */
 
+/* Workaround for MSVC' header `extern "C"` vs `std::` redefinition bug */
+#if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__) &&                      \
+    !defined(_DISABLE_VECTOR_ANNOTATION)
+#define _DISABLE_VECTOR_ANNOTATION
+#endif /* _DISABLE_VECTOR_ANNOTATION */
+
 #include "../mdbx.h++"
 
 #include "internals.h"
@@ -227,6 +233,10 @@ namespace mdbx {
       "into an incompatible memory allocation scheme.");
 }
 
+[[noreturn]] __cold void throw_bad_value_size() {
+  throw bad_value_size(MDBX_BAD_VALSIZE);
+}
+
 __cold exception::exception(const ::mdbx::error &error) noexcept
     : base(error.what()), error_(error) {}
 
@@ -275,6 +285,8 @@ DEFINE_EXCEPTION(something_busy)
 DEFINE_EXCEPTION(thread_mismatch)
 DEFINE_EXCEPTION(transaction_full)
 DEFINE_EXCEPTION(transaction_overlapping)
+DEFINE_EXCEPTION(duplicated_lck_file)
+DEFINE_EXCEPTION(dangling_map_id)
 
 #undef DEFINE_EXCEPTION
 
@@ -361,6 +373,8 @@ __cold void error::throw_exception() const {
     CASE_EXCEPTION(thread_mismatch, MDBX_THREAD_MISMATCH);
     CASE_EXCEPTION(transaction_full, MDBX_TXN_FULL);
     CASE_EXCEPTION(transaction_overlapping, MDBX_TXN_OVERLAPPING);
+    CASE_EXCEPTION(duplicated_lck_file, MDBX_DUPLICATED_CLK);
+    CASE_EXCEPTION(dangling_map_id, MDBX_DANGLING_DBI);
 #undef CASE_EXCEPTION
   default:
     if (is_mdbx_error())
@@ -475,6 +489,109 @@ bool slice::is_printable(bool disable_utf8) const noexcept {
   } while (src < end);
 
   return true;
+}
+
+#ifdef MDBX_U128_TYPE
+MDBX_U128_TYPE slice::as_uint128() const {
+  static_assert(sizeof(MDBX_U128_TYPE) == 16, "WTF?");
+  if (size() == 16) {
+    MDBX_U128_TYPE r;
+    memcpy(&r, data(), sizeof(r));
+    return r;
+  } else
+    return as_uint64();
+}
+#endif /* MDBX_U128_TYPE */
+
+uint64_t slice::as_uint64() const {
+  static_assert(sizeof(uint64_t) == 8, "WTF?");
+  if (size() == 8) {
+    uint64_t r;
+    memcpy(&r, data(), sizeof(r));
+    return r;
+  } else
+    return as_uint32();
+}
+
+uint32_t slice::as_uint32() const {
+  static_assert(sizeof(uint32_t) == 4, "WTF?");
+  if (size() == 4) {
+    uint32_t r;
+    memcpy(&r, data(), sizeof(r));
+    return r;
+  } else
+    return as_uint16();
+}
+
+uint16_t slice::as_uint16() const {
+  static_assert(sizeof(uint16_t) == 2, "WTF?");
+  if (size() == 2) {
+    uint16_t r;
+    memcpy(&r, data(), sizeof(r));
+    return r;
+  } else
+    return as_uint8();
+}
+
+uint8_t slice::as_uint8() const {
+  static_assert(sizeof(uint8_t) == 1, "WTF?");
+  if (size() == 1)
+    return *static_cast<const uint8_t *>(data());
+  else if (size() == 0)
+    return 0;
+  else
+    MDBX_CXX20_UNLIKELY throw_bad_value_size();
+}
+
+#ifdef MDBX_I128_TYPE
+MDBX_I128_TYPE slice::as_int128() const {
+  static_assert(sizeof(MDBX_I128_TYPE) == 16, "WTF?");
+  if (size() == 16) {
+    MDBX_I128_TYPE r;
+    memcpy(&r, data(), sizeof(r));
+    return r;
+  } else
+    return as_int64();
+}
+#endif /* MDBX_I128_TYPE */
+
+int64_t slice::as_int64() const {
+  static_assert(sizeof(int64_t) == 8, "WTF?");
+  if (size() == 8) {
+    uint64_t r;
+    memcpy(&r, data(), sizeof(r));
+    return r;
+  } else
+    return as_int32();
+}
+
+int32_t slice::as_int32() const {
+  static_assert(sizeof(int32_t) == 4, "WTF?");
+  if (size() == 4) {
+    int32_t r;
+    memcpy(&r, data(), sizeof(r));
+    return r;
+  } else
+    return as_int16();
+}
+
+int16_t slice::as_int16() const {
+  static_assert(sizeof(int16_t) == 2, "WTF?");
+  if (size() == 2) {
+    int16_t r;
+    memcpy(&r, data(), sizeof(r));
+    return r;
+  } else
+    return as_int8();
+}
+
+int8_t slice::as_int8() const {
+  if (size() == 1)
+    return *static_cast<const int8_t *>(data());
+  else if (size() == 0)
+    return 0;
+  else
+    MDBX_CXX20_UNLIKELY throw_bad_value_size();
 }
 
 //------------------------------------------------------------------------------

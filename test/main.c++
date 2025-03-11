@@ -60,6 +60,10 @@ MDBX_NORETURN void usage(void) {
       "  --append                      Append-mode insertions\n"
       "  --dead.reader                 Dead-reader simulator\n"
       "  --dead.writer                 Dead-writer simulator\n"
+#if !defined(_WIN32) && !defined(_WIN64)
+      "  --fork.reader                 After-fork reader\n"
+      "  --fork.writer                 After-fork writer\n"
+#endif /* Windows */
       "Actor options:\n"
       "  --batch.read=N                Read-operations batch size\n"
       "  --batch.write=N               Write-operations batch size\n"
@@ -129,8 +133,7 @@ void actor_params::set_defaults(const std::string &tmpdir) {
 #endif
 
   pathname_db = tmpdir + "mdbx-test.db";
-  mode_flags = MDBX_NOSUBDIR | MDBX_WRITEMAP | MDBX_SAFE_NOSYNC |
-               MDBX_NOMEMINIT | MDBX_COALESCE | MDBX_LIFORECLAIM | MDBX_ACCEDE;
+  mode_flags = MDBX_NOSUBDIR | MDBX_WRITEMAP | MDBX_SYNC_DURABLE | MDBX_ACCEDE;
   table_flags = MDBX_DUPSORT;
 
   size_lower = -1;
@@ -264,8 +267,19 @@ static void fixup4qemu(actor_params &params) {
   (void)params;
 }
 
-int main(int argc, char *const argv[]) {
+static void set_linebuf_append(FILE *out) {
+  setvbuf(out, NULL, _IOLBF, 65536);
+#if !defined(_WIN32) && !defined(_WIN64)
+  int fd = fileno(out);
+  int flags = fcntl(fd, F_GETFD);
+  if (flags != -1)
+    (void)fcntl(fd, F_SETFD, O_APPEND | flags);
+#endif /* !Windows */
+}
 
+int main(int argc, char *const argv[]) {
+  set_linebuf_append(stdout);
+  set_linebuf_append(stderr);
 #ifdef _DEBUG
   log_trace("#argc = %d", argc);
   for (int i = 0; i < argc; ++i)
@@ -592,6 +606,18 @@ int main(int argc, char *const argv[]) {
       configure_actor(last_space_id, ac_nested, value, params);
       continue;
     }
+#if !defined(_WIN32) && !defined(_WIN64)
+    if (config::parse_option(argc, argv, narg, "fork.reader", nullptr)) {
+      fixup4qemu(params);
+      configure_actor(last_space_id, ac_forkread, value, params);
+      continue;
+    }
+    if (config::parse_option(argc, argv, narg, "fork.writer", nullptr)) {
+      fixup4qemu(params);
+      configure_actor(last_space_id, ac_forkwrite, value, params);
+      continue;
+    }
+#endif /* Windows */
 
     if (*argv[narg] != '-') {
       fixup4qemu(params);

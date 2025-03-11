@@ -316,17 +316,16 @@ MDBX_INTERNAL_FUNC int osal_vasprintf(char **strp, const char *fmt,
                                       va_list ap) {
   va_list ones;
   va_copy(ones, ap);
-  int needed = vsnprintf(nullptr, 0, fmt, ap);
+  const int needed = vsnprintf(nullptr, 0, fmt, ones);
+  va_end(ones);
 
   if (unlikely(needed < 0 || needed >= INT_MAX)) {
     *strp = nullptr;
-    va_end(ones);
     return needed;
   }
 
   *strp = osal_malloc(needed + (size_t)1);
   if (unlikely(*strp == nullptr)) {
-    va_end(ones);
 #if defined(_WIN32) || defined(_WIN64)
     SetLastError(MDBX_ENOMEM);
 #else
@@ -335,9 +334,7 @@ MDBX_INTERNAL_FUNC int osal_vasprintf(char **strp, const char *fmt,
     return -1;
   }
 
-  int actual = vsnprintf(*strp, needed + (size_t)1, fmt, ones);
-  va_end(ones);
-
+  const int actual = vsnprintf(*strp, needed + (size_t)1, fmt, ap);
   assert(actual == needed);
   if (unlikely(actual < 0)) {
     osal_free(*strp);
@@ -351,7 +348,7 @@ MDBX_INTERNAL_FUNC int osal_vasprintf(char **strp, const char *fmt,
 MDBX_INTERNAL_FUNC int osal_asprintf(char **strp, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  int rc = osal_vasprintf(strp, fmt, ap);
+  const int rc = osal_vasprintf(strp, fmt, ap);
   va_end(ap);
   return rc;
 }
@@ -506,8 +503,18 @@ MDBX_INTERNAL_FUNC int osal_fastmutex_init(osal_fastmutex_t *fastmutex) {
 #if defined(_WIN32) || defined(_WIN64)
   InitializeCriticalSection(fastmutex);
   return MDBX_SUCCESS;
+#elif MDBX_DEBUG
+  pthread_mutexattr_t ma;
+  int rc = pthread_mutexattr_init(&ma);
+  if (likely(!rc)) {
+    rc = pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_ERRORCHECK);
+    if (likely(!rc) || rc == ENOTSUP)
+      rc = pthread_mutex_init(fastmutex, &ma);
+    pthread_mutexattr_destroy(&ma);
+  }
+  return rc;
 #else
-  return pthread_mutex_init(fastmutex, NULL);
+  return pthread_mutex_init(fastmutex, nullptr);
 #endif
 }
 
@@ -529,7 +536,7 @@ MDBX_INTERNAL_FUNC int osal_fastmutex_acquire(osal_fastmutex_t *fastmutex) {
        0xC0000194 /* STATUS_POSSIBLE_DEADLOCK / EXCEPTION_POSSIBLE_DEADLOCK */)
           ? EXCEPTION_EXECUTE_HANDLER
           : EXCEPTION_CONTINUE_SEARCH) {
-    return ERROR_POSSIBLE_DEADLOCK;
+    return MDBX_EDEADLK;
   }
   return MDBX_SUCCESS;
 #else

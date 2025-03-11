@@ -30,6 +30,10 @@
 #define _WIN32_WINNT 0x0601 /* Windows 7 */
 #endif
 #ifdef _MSC_VER
+/* Workaround for MSVC' header `extern "C"` vs `std::` redefinition bug */
+#if defined(__SANITIZE_ADDRESS__) && !defined(_DISABLE_VECTOR_ANNOTATION)
+#define _DISABLE_VECTOR_ANNOTATION
+#endif /* _DISABLE_VECTOR_ANNOTATION */
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
 #endif /* _CRT_SECURE_NO_WARNINGS */
@@ -107,8 +111,8 @@
 
 #ifdef _MSC_VER
 #pragma warning(pop)
-#pragma warning(disable : 4201) /* nonstandard extension used :                \
-                                   nameless struct / union */
+#pragma warning(disable : 4201) /* nonstandard extension used: nameless        \
+                                   struct/union */
 #pragma warning(disable : 4127) /* conditional expression is constant */
 #if _MSC_VER < 1900
 #pragma warning(disable : 4510) /* default constructor could                   \
