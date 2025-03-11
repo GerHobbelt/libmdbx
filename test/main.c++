@@ -1,4 +1,4 @@
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 /// \copyright SPDX-License-Identifier: Apache-2.0
 
 #include "test.h++"
@@ -102,7 +102,7 @@ MDBX_NORETURN void usage(void) {
        "  --table={[+-]FLAG}[,[+-]FLAG]...\n"
        "    key.reverse  == MDBX_REVERSEKEY\n"
        "    key.integer  == MDBX_INTEGERKEY\n"
-       "    data.dups    == MDBX_DUPSORT\n"
+       "    data.multi   == MDBX_DUPSORT\n"
        "    data.integer == MDBX_INTEGERDUP | MDBX_DUPFIXED | MDBX_DUPSORT\n"
        "    data.fixed   == MDBX_DUPFIXED | MDBX_DUPSORT\n"
        "    data.reverse == MDBX_REVERSEDUP | MDBX_DUPSORT\n");

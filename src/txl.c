@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
@@ -17,13 +17,13 @@ static inline size_t txl_bytes2size(const size_t bytes) {
   return size - 2;
 }
 
-MDBX_INTERNAL txl_t txl_alloc(void) {
+txl_t txl_alloc(void) {
   size_t bytes = txl_size2bytes(txl_initial);
   txl_t txl = osal_malloc(bytes);
   if (likely(txl)) {
-#if __GLIBC_PREREQ(2, 12) || defined(__FreeBSD__) || defined(malloc_usable_size)
-    bytes = malloc_usable_size(txl);
-#endif /* malloc_usable_size */
+#ifdef osal_malloc_usable_size
+    bytes = osal_malloc_usable_size(txl);
+#endif /* osal_malloc_usable_size */
     txl[0] = txl_bytes2size(bytes);
     assert(txl[0] >= txl_initial);
     txl += 1;
@@ -32,12 +32,12 @@ MDBX_INTERNAL txl_t txl_alloc(void) {
   return txl;
 }
 
-MDBX_INTERNAL void txl_free(txl_t txl) {
+void txl_free(txl_t txl) {
   if (likely(txl))
     osal_free(txl - 1);
 }
 
-MDBX_INTERNAL int txl_reserve(txl_t __restrict *__restrict ptxl, const size_t wanna) {
+static int txl_reserve(txl_t __restrict *__restrict ptxl, const size_t wanna) {
   const size_t allocated = (size_t)MDBX_PNL_ALLOCLEN(*ptxl);
   assert(MDBX_PNL_GETSIZE(*ptxl) <= txl_max && MDBX_PNL_ALLOCLEN(*ptxl) >= MDBX_PNL_GETSIZE(*ptxl));
   if (likely(allocated >= wanna))
@@ -52,9 +52,9 @@ MDBX_INTERNAL int txl_reserve(txl_t __restrict *__restrict ptxl, const size_t wa
   size_t bytes = txl_size2bytes(size);
   txl_t txl = osal_realloc(*ptxl - 1, bytes);
   if (likely(txl)) {
-#if __GLIBC_PREREQ(2, 12) || defined(__FreeBSD__) || defined(malloc_usable_size)
-    bytes = malloc_usable_size(txl);
-#endif /* malloc_usable_size */
+#ifdef osal_malloc_usable_size
+    bytes = osal_malloc_usable_size(txl);
+#endif /* osal_malloc_usable_size */
     *txl = txl_bytes2size(bytes);
     assert(*txl >= wanna);
     *ptxl = txl + 1;
@@ -78,9 +78,9 @@ static __always_inline void txl_xappend(txl_t __restrict txl, txnid_t id) {
 
 #define TXNID_SORT_CMP(first, last) ((first) > (last))
 SORT_IMPL(txnid_sort, false, txnid_t, TXNID_SORT_CMP)
-MDBX_INTERNAL void txl_sort(txl_t txl) { txnid_sort(MDBX_PNL_BEGIN(txl), MDBX_PNL_END(txl)); }
+void txl_sort(txl_t txl) { txnid_sort(MDBX_PNL_BEGIN(txl), MDBX_PNL_END(txl)); }
 
-MDBX_INTERNAL int __must_check_result txl_append(txl_t __restrict *ptxl, txnid_t id) {
+int __must_check_result txl_append(txl_t __restrict *ptxl, txnid_t id) {
   if (unlikely(MDBX_PNL_GETSIZE(*ptxl) == MDBX_PNL_ALLOCLEN(*ptxl))) {
     int rc = txl_need(ptxl, txl_granulate);
     if (unlikely(rc != MDBX_SUCCESS))
@@ -88,4 +88,12 @@ MDBX_INTERNAL int __must_check_result txl_append(txl_t __restrict *ptxl, txnid_t
   }
   txl_xappend(*ptxl, id);
   return MDBX_SUCCESS;
+}
+
+__hot bool txl_contain(const txl_t txl, txnid_t id) {
+  const size_t len = MDBX_PNL_GETSIZE(txl);
+  for (size_t i = 1; i <= len; ++i)
+    if (txl[i] == id)
+      return true;
+  return false;
 }

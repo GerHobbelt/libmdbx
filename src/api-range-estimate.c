@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
@@ -141,6 +141,9 @@ __hot static ptrdiff_t estimate(const tree_t *tree, diff_t *const __restrict dr)
     }
   }
 }
+
+/*------------------------------------------------------------------------------
+ * Range-Estimation API */
 
 __hot int mdbx_estimate_distance(const MDBX_cursor *first, const MDBX_cursor *last, ptrdiff_t *distance_items) {
   if (unlikely(first == nullptr || last == nullptr || distance_items == nullptr))

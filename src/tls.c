@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
@@ -515,6 +515,7 @@ __cold void rthc_dtor(const uint32_t current_pid) {
       continue;
     if (!(env->flags & ENV_TXKEY))
       continue;
+    env->flags -= ENV_TXKEY;
     reader_slot_t *const begin = &env->lck_mmap.lck->rdt[0];
     reader_slot_t *const end = &env->lck_mmap.lck->rdt[env->max_readers];
     thread_key_delete(env->me_txkey);

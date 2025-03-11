@@ -1,4 +1,4 @@
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 /// \copyright SPDX-License-Identifier: Apache-2.0
 
 #include "test.h++"
@@ -349,7 +349,7 @@ const struct option_verb table_bits[] = {{"key.reverse", unsigned(MDBX_REVERSEKE
                                          {"data.integer", unsigned(MDBX_INTEGERDUP | MDBX_DUPFIXED | MDBX_DUPSORT)},
                                          {"data.fixed", unsigned(MDBX_DUPFIXED | MDBX_DUPSORT)},
                                          {"data.reverse", unsigned(MDBX_REVERSEDUP | MDBX_DUPSORT)},
-                                         {"data.dups", unsigned(MDBX_DUPSORT)},
+                                         {"data.multi", unsigned(MDBX_DUPSORT)},
                                          {nullptr, 0}};
 
 static void dump_verbs(const char *caption, size_t bits, const struct option_verb *verbs) {

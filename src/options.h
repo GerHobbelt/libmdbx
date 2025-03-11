@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 /*******************************************************************************
  *******************************************************************************
@@ -256,6 +256,22 @@
 #elif !(MDBX_HAVE_BUILTIN_CPU_SUPPORTS == 0 || MDBX_HAVE_BUILTIN_CPU_SUPPORTS == 1)
 #error MDBX_HAVE_BUILTIN_CPU_SUPPORTS must be defined as 0 or 1
 #endif /* MDBX_HAVE_BUILTIN_CPU_SUPPORTS */
+
+/** if enabled then treats the commit of pure (nothing changes) transactions as special
+ * cases and return \ref MDBX_RESULT_TRUE instead of \ref MDBX_SUCCESS. */
+#ifndef MDBX_NOSUCCESS_PURE_COMMIT
+#define MDBX_NOSUCCESS_PURE_COMMIT 0
+#elif !(MDBX_NOSUCCESS_PURE_COMMIT == 0 || MDBX_NOSUCCESS_PURE_COMMIT == 1)
+#error MDBX_NOSUCCESS_PURE_COMMIT must be defined as 0 or 1
+#endif /* MDBX_NOSUCCESS_PURE_COMMIT */
+
+/** if enabled then instead of the returned error `MDBX_REMOTE`, only a warning is issued, when
+ * the database being opened in non-read-only mode is located in a file system exported via NFS. */
+#ifndef MDBX_ENABLE_NON_READONLY_EXPORT
+#define MDBX_ENABLE_NON_READONLY_EXPORT 0
+#elif !(MDBX_ENABLE_NON_READONLY_EXPORT == 0 || MDBX_ENABLE_NON_READONLY_EXPORT == 1)
+#error MDBX_ENABLE_NON_READONLY_EXPORT must be defined as 0 or 1
+#endif /* MDBX_ENABLE_NON_READONLY_EXPORT */
 
 //------------------------------------------------------------------------------
 

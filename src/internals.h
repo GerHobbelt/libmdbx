@@ -1,7 +1,7 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
 /// \note Please refer to the COPYRIGHT file for explanations license change,
 /// credits and acknowledgments.
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #pragma once
 
@@ -41,7 +41,7 @@ typedef struct node_search_result {
 
 typedef struct bind_reader_slot_result {
   int err;
-  reader_slot_t *rslot;
+  reader_slot_t *slot;
 } bsr_t;
 
 #include "atomics-ops.h"
@@ -122,7 +122,7 @@ typedef struct clc {
  *    использования такого компаратора.
  *  - размер kvx_t становится равным 8 словам.
  *
- * Трюки и прочая экономия на списках:
+ * Трюки и прочая экономия на спичках:
  *  - не храним dbi внутри курсора, вместо этого вычисляем его как разницу между
  *    dbi_state курсора и началом таблицы dbi_state в транзакции. Смысл тут в
  *    экономии кол-ва полей при инициализации курсора. Затрат это не создает,
@@ -155,7 +155,8 @@ enum txn_flags {
   txn_rw_begin_flags = MDBX_TXN_NOMETASYNC | MDBX_TXN_NOSYNC | MDBX_TXN_TRY,
   txn_shrink_allowed = UINT32_C(0x40000000),
   txn_parked = MDBX_TXN_PARKED,
-  txn_gc_drained = 0x40 /* GC was depleted up to oldest reader */,
+  txn_gc_drained = 0x80 /* GC was depleted up to oldest reader */,
+  txn_may_have_cursors = 0x100,
   txn_state_flags = MDBX_TXN_FINISHED | MDBX_TXN_ERROR | MDBX_TXN_DIRTY | MDBX_TXN_SPILLS | MDBX_TXN_HAS_CHILD |
                     MDBX_TXN_INVALID | txn_gc_drained
 };
@@ -205,19 +206,19 @@ struct MDBX_txn {
 
   union {
     struct {
-      /* For read txns: This thread/txn's reader table slot, or nullptr. */
-      reader_slot_t *reader;
-    } to;
+      /* For read txns: This thread/txn's slot table slot, or nullptr. */
+      reader_slot_t *slot;
+    } ro;
     struct {
       troika_t troika;
-      /* In write txns, array of cursors for each DB */
-      pnl_t __restrict relist; /* Reclaimed GC pages */
+      pnl_t __restrict repnl; /* Reclaimed GC pages */
       struct {
-        /* The list of reclaimed txns from GC */
-        txl_t __restrict reclaimed;
+        /* The list of reclaimed txn-ids from GC */
+        txl_t __restrict retxl;
         txnid_t last_reclaimed; /* ID of last used record */
         uint64_t time_acc;
       } gc;
+      bool prefault_write_activated;
 #if MDBX_ENABLE_REFUND
       pgno_t loose_refund_wl /* FIXME: describe */;
 #endif /* MDBX_ENABLE_REFUND */
@@ -235,7 +236,7 @@ struct MDBX_txn {
       /* The list of loose pages that became unused and may be reused
        * in this transaction, linked through `page_next()`. */
       page_t *__restrict loose_pages;
-      /* Number of loose pages (tw.loose_pages) */
+      /* Number of loose pages (wr.loose_pages) */
       size_t loose_count;
       union {
         struct {
@@ -248,7 +249,8 @@ struct MDBX_txn {
         size_t writemap_dirty_npages;
         size_t writemap_spilled_npages;
       };
-    } tw;
+      /* In write txns, next is located the array of cursors for each DB */
+    } wr;
   };
 };
 
@@ -313,11 +315,6 @@ struct cursor_couple {
   MDBX_cursor outer;
   void *userctx; /* User-settable context */
   subcur_t inner;
-};
-
-struct defer_free_item {
-  struct defer_free_item *next;
-  uint64_t timestamp;
 };
 
 enum env_flags {
@@ -405,6 +402,7 @@ struct MDBX_env {
     bool prefault_write;
     bool prefer_waf_insteadof_balance; /* Strive to minimize WAF instead of
                                           balancing pages fullment */
+    bool need_dp_limit_adjust;
     struct {
       uint16_t limit;
       uint16_t room_threshold;
@@ -441,7 +439,6 @@ struct MDBX_env {
   } me_sysv_ipc;
 #endif /* MDBX_LOCKING == MDBX_LOCKING_SYSV */
   bool incore;
-  bool prefault_write_activated;
 
 #if MDBX_ENABLE_DBI_LOCKFREE
   defer_free_item_t *defer_free;

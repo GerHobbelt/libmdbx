@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
@@ -62,8 +62,9 @@ __cold static int lck_setup_locked(MDBX_env *env) {
   }
   env->max_readers = (maxreaders <= MDBX_READERS_LIMIT) ? (unsigned)maxreaders : (unsigned)MDBX_READERS_LIMIT;
 
-  err = osal_mmap((env->flags & MDBX_EXCLUSIVE) | MDBX_WRITEMAP, &env->lck_mmap, (size_t)size, (size_t)size,
-                  lck_seize_rc ? MMAP_OPTION_TRUNCATE | MMAP_OPTION_SEMAPHORE : MMAP_OPTION_SEMAPHORE);
+  err =
+      osal_mmap((env->flags & MDBX_EXCLUSIVE) | MDBX_WRITEMAP, &env->lck_mmap, (size_t)size, (size_t)size,
+                lck_seize_rc ? MMAP_OPTION_TRUNCATE | MMAP_OPTION_SEMAPHORE : MMAP_OPTION_SEMAPHORE, env->pathname.lck);
   if (unlikely(err != MDBX_SUCCESS))
     return err;
 
@@ -133,31 +134,33 @@ __cold int lck_setup(MDBX_env *env, mdbx_mode_t mode) {
   int err = osal_openfile(MDBX_OPEN_LCK, env, env->pathname.lck, &env->lck_mmap.fd, mode);
   if (err != MDBX_SUCCESS) {
     switch (err) {
-    default:
-      return err;
-    case MDBX_ENOFILE:
     case MDBX_EACCESS:
     case MDBX_EPERM:
-      if (!F_ISSET(env->flags, MDBX_RDONLY | MDBX_EXCLUSIVE))
-        return err;
-      break;
+      if (F_ISSET(env->flags, MDBX_RDONLY | MDBX_EXCLUSIVE))
+        break;
+      __fallthrough /* fall through */;
+    case MDBX_ENOFILE:
     case MDBX_EROFS:
-      if ((env->flags & MDBX_RDONLY) == 0)
-        return err;
-      break;
-    }
-
-    if (err != MDBX_ENOFILE) {
-      /* ENSURE the file system is read-only */
-      err = osal_check_fs_rdonly(env->lazy_fd, env->pathname.lck, err);
-      if (err != MDBX_SUCCESS &&
-          /* ignore ERROR_NOT_SUPPORTED for exclusive mode */
-          !(err == MDBX_ENOSYS && (env->flags & MDBX_EXCLUSIVE)))
-        return err;
+      if (env->flags & MDBX_RDONLY) {
+        /* ENSURE the file system is read-only */
+        int err_rofs = osal_check_fs_rdonly(env->lazy_fd, env->pathname.lck, err);
+        if (err_rofs == MDBX_SUCCESS ||
+            /* ignore ERROR_NOT_SUPPORTED for exclusive mode */
+            (err_rofs == MDBX_ENOSYS && (env->flags & MDBX_EXCLUSIVE)))
+          break;
+        if (err_rofs != MDBX_ENOSYS)
+          err = err_rofs;
+      }
+      __fallthrough /* fall through */;
+    default:
+      ERROR("unable to open lck-file %" MDBX_PRIsPATH ", env-flags 0x%X, err %d", env->pathname.lck, env->flags, err);
+      return err;
     }
 
     /* LY: without-lck mode (e.g. exclusive or on read-only filesystem) */
     env->lck_mmap.fd = INVALID_HANDLE_VALUE;
+    NOTICE("continue %" MDBX_PRIsPATH " within without-lck mode, env-flags 0x%X, lck-error %d", env->pathname.dxb,
+           env->flags, err);
   }
 
   rthc_lock();

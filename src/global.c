@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
@@ -424,6 +424,9 @@ __dll_export
 #ifdef MDBX_BUILD_FLAGS_CONFIG
     MDBX_BUILD_FLAGS_CONFIG
 #endif /* MDBX_BUILD_FLAGS_CONFIG */
+#if defined(MDBX_BUILD_FLAGS_CONFIG) && defined(MDBX_BUILD_FLAGS)
+    " "
+#endif
 #ifdef MDBX_BUILD_FLAGS
     MDBX_BUILD_FLAGS
 #endif /* MDBX_BUILD_FLAGS */

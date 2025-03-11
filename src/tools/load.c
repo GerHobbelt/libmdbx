@@ -1,7 +1,7 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
 /// \note Please refer to the COPYRIGHT file for explanations license change,
 /// credits and acknowledgments.
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 ///
 /// mdbx_load.c - memory-mapped database load tool
 ///
@@ -48,6 +48,21 @@ static void error(const char *func, int rc) {
               mdbx_strerror(rc));
     else
       fprintf(stderr, "%s: %s() error %d %s\n", prog, func, rc, mdbx_strerror(rc));
+  }
+}
+
+static void logger(MDBX_log_level_t level, const char *function, int line, const char *fmt, va_list args) {
+  static const char *const prefixes[] = {
+      "!!!fatal: ", // 0 fatal
+      " ! ",        // 1 error
+      " ~ ",        // 2 warning
+      "   ",        // 3 notice
+      "   //",      // 4 verbose
+  };
+  if (level < MDBX_LOG_DEBUG) {
+    if (function && line)
+      fprintf(stderr, "%s", prefixes[level]);
+    vfprintf(stderr, fmt, args);
   }
 }
 
@@ -544,10 +559,12 @@ int main(int argc, char *argv[]) {
 #endif /* !WINDOWS */
 
   envname = argv[optind];
-  if (!quiet)
+  if (!quiet) {
     printf("mdbx_load %s (%s, T-%s)\nRunning for %s...\n", mdbx_version.git.describe, mdbx_version.git.datetime,
            mdbx_version.git.tree, envname);
-  fflush(nullptr);
+    fflush(nullptr);
+    mdbx_setup_debug(MDBX_LOG_NOTICE, MDBX_DBG_DONTCHANGE, logger);
+  }
 
   dbuf.iov_len = 4096;
   dbuf.iov_base = osal_malloc(dbuf.iov_len);

@@ -1,7 +1,7 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
 /// \note Please refer to the COPYRIGHT file for explanations license change,
 /// credits and acknowledgments.
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #pragma once
 
@@ -62,7 +62,7 @@ typedef struct tree {
   uint16_t height;      /* height of this tree */
   uint32_t dupfix_size; /* key-size for MDBX_DUPFIXED (DUPFIX pages) */
   pgno_t root;          /* the root page of this tree */
-  pgno_t branch_pages;  /* number of internal pages */
+  pgno_t branch_pages;  /* number of branch pages */
   pgno_t leaf_pages;    /* number of leaf pages */
   pgno_t large_pages;   /* number of large pages */
   uint64_t sequence;    /* table sequence counter */

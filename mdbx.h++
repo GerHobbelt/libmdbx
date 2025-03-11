@@ -1,5 +1,5 @@
 ﻿/// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2020-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2020-2025
 ///
 /// Donations are welcome to ETH `0xD104d8f8B2dC312aaD74899F83EBf3EEBDC1EA3A`.
 /// Всё будет хорошо!
@@ -3071,7 +3071,7 @@ public:
     };
 
     /// \brief The lower bound of database size in bytes.
-    intptr_t size_lower{minimal_value};
+    intptr_t size_lower{default_value};
 
     /// \brief The size in bytes to setup the database size for now.
     /// \details It is recommended always pass \ref default_value in this
@@ -3088,7 +3088,7 @@ public:
     /// robustly because there may be a lack of appropriate system resources
     /// (which are extremely volatile in a multi-process multi-threaded
     /// environment).
-    intptr_t size_upper{maximal_value};
+    intptr_t size_upper{default_value};
 
     /// \brief The growth step in bytes, must be greater than zero to allow the
     /// database to grow.
@@ -3105,12 +3105,12 @@ public:
     intptr_t pagesize{default_value};
 
     inline geometry &make_fixed(intptr_t size) noexcept;
-    inline geometry &make_dynamic(intptr_t lower = minimal_value, intptr_t upper = maximal_value) noexcept;
+    inline geometry &make_dynamic(intptr_t lower = default_value, intptr_t upper = default_value) noexcept;
     MDBX_CXX11_CONSTEXPR geometry() noexcept {}
     MDBX_CXX11_CONSTEXPR
     geometry(const geometry &) noexcept = default;
     MDBX_CXX11_CONSTEXPR geometry(intptr_t size_lower, intptr_t size_now = default_value,
-                                  intptr_t size_upper = maximal_value, intptr_t growth_step = default_value,
+                                  intptr_t size_upper = default_value, intptr_t growth_step = default_value,
                                   intptr_t shrink_threshold = default_value, intptr_t pagesize = default_value) noexcept
         : size_lower(size_lower), size_now(size_now), size_upper(size_upper), growth_step(growth_step),
           shrink_threshold(shrink_threshold), pagesize(pagesize) {}
@@ -3799,6 +3799,9 @@ public:
   /// \brief Renew read-only transaction.
   inline void renew_reading();
 
+  /// \brief Marks transaction as broken to prevent further operations.
+  inline void make_broken();
+
   /// \brief Park read-only transaction.
   inline void park_reading(bool autounpark = true);
 
@@ -4471,11 +4474,11 @@ public:
 
   /// \brief Renew/bind a cursor with a new transaction and previously used
   /// key-value map handle.
-  inline void renew(const ::mdbx::txn &txn);
+  inline void renew(::mdbx::txn &txn);
 
   /// \brief Bind/renew a cursor with a new transaction and specified key-value
   /// map handle.
-  inline void bind(const ::mdbx::txn &txn, ::mdbx::map_handle map_handle);
+  inline void bind(::mdbx::txn &txn, ::mdbx::map_handle map_handle);
 
   /// \brief Unbind cursor from a transaction.
   inline void unbind();
@@ -5578,6 +5581,8 @@ inline uint64_t txn::id() const {
 
 inline void txn::reset_reading() { error::success_or_throw(::mdbx_txn_reset(handle_)); }
 
+inline void txn::make_broken() { error::success_or_throw(::mdbx_txn_break(handle_)); }
+
 inline void txn::renew_reading() { error::success_or_throw(::mdbx_txn_renew(handle_)); }
 
 inline void txn::park_reading(bool autounpark) { error::success_or_throw(::mdbx_txn_park(handle_, autounpark)); }
@@ -6162,9 +6167,9 @@ inline cursor::estimate_result cursor::estimate(move_operation operation) const 
   return estimate_result(*this, operation);
 }
 
-inline void cursor::renew(const ::mdbx::txn &txn) { error::success_or_throw(::mdbx_cursor_renew(txn, handle_)); }
+inline void cursor::renew(::mdbx::txn &txn) { error::success_or_throw(::mdbx_cursor_renew(txn, handle_)); }
 
-inline void cursor::bind(const ::mdbx::txn &txn, ::mdbx::map_handle map_handle) {
+inline void cursor::bind(::mdbx::txn &txn, ::mdbx::map_handle map_handle) {
   error::success_or_throw(::mdbx_cursor_bind(txn, handle_, map_handle.dbi));
 }
 

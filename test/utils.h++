@@ -1,4 +1,4 @@
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 /// \copyright SPDX-License-Identifier: Apache-2.0
 
 #pragma once
@@ -313,6 +313,7 @@ void prng_fill(uint64_t &state, void *ptr, size_t bytes);
 
 extern uint64_t prng_state;
 void prng_seed(uint64_t seed);
+void prng_salt(unsigned salt);
 uint32_t prng32(void);
 uint64_t prng64(void);
 void prng_fill(void *ptr, size_t bytes);

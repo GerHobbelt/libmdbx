@@ -1,11 +1,16 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
-bool env_txn0_owned(const MDBX_env *env) {
-  return (env->flags & MDBX_NOSTICKYTHREADS) ? (env->basal_txn->owner != 0)
-                                             : (env->basal_txn->owner == osal_thread_self());
+MDBX_txn *env_owned_wrtxn(const MDBX_env *env) {
+  if (likely(env->basal_txn)) {
+    const bool is_owned = (env->flags & MDBX_NOSTICKYTHREADS) ? (env->basal_txn->owner != 0)
+                                                              : (env->basal_txn->owner == osal_thread_self());
+    if (is_owned)
+      return env->txn ? env->txn : env->basal_txn;
+  }
+  return nullptr;
 }
 
 int env_page_auxbuffer(MDBX_env *env) {
@@ -52,30 +57,7 @@ __cold unsigned env_setup_pagesize(MDBX_env *env, const size_t pagesize) {
   eASSERT(env, bytes2pgno(env, pagesize + pagesize) == 2);
   recalculate_merge_thresholds(env);
   recalculate_subpage_thresholds(env);
-
-  const pgno_t max_pgno = bytes2pgno(env, MAX_MAPSIZE);
-  if (!env->options.flags.non_auto.dp_limit) {
-    /* auto-setup dp_limit by "The42" ;-) */
-    intptr_t total_ram_pages, avail_ram_pages;
-    int err = mdbx_get_sysraminfo(nullptr, &total_ram_pages, &avail_ram_pages);
-    if (unlikely(err != MDBX_SUCCESS))
-      ERROR("mdbx_get_sysraminfo(), rc %d", err);
-    else {
-      size_t reasonable_dpl_limit = (size_t)(total_ram_pages + avail_ram_pages) / 42;
-      if (pagesize > globals.sys_pagesize)
-        reasonable_dpl_limit /= pagesize / globals.sys_pagesize;
-      else if (pagesize < globals.sys_pagesize)
-        reasonable_dpl_limit *= globals.sys_pagesize / pagesize;
-      reasonable_dpl_limit = (reasonable_dpl_limit < PAGELIST_LIMIT) ? reasonable_dpl_limit : PAGELIST_LIMIT;
-      reasonable_dpl_limit =
-          (reasonable_dpl_limit > CURSOR_STACK_SIZE * 4) ? reasonable_dpl_limit : CURSOR_STACK_SIZE * 4;
-      env->options.dp_limit = (unsigned)reasonable_dpl_limit;
-    }
-  }
-  if (env->options.dp_limit > max_pgno - NUM_METAS)
-    env->options.dp_limit = max_pgno - NUM_METAS;
-  if (env->options.dp_initial > env->options.dp_limit)
-    env->options.dp_initial = env->options.dp_limit;
+  env_options_adjust_dp_limit(env);
   return env->ps;
 }
 
@@ -83,7 +65,7 @@ __cold int env_sync(MDBX_env *env, bool force, bool nonblock) {
   if (unlikely(env->flags & MDBX_RDONLY))
     return MDBX_EACCESS;
 
-  const bool txn0_owned = env_txn0_owned(env);
+  MDBX_txn *const txn_owned = env_owned_wrtxn(env);
   bool should_unlock = false;
   int rc = MDBX_RESULT_TRUE /* means "nothing to sync" */;
 
@@ -94,7 +76,7 @@ retry:;
     goto bailout;
   }
 
-  const troika_t troika = (txn0_owned | should_unlock) ? env->basal_txn->tw.troika : meta_tap(env);
+  const troika_t troika = (txn_owned || should_unlock) ? env->basal_txn->wr.troika : meta_tap(env);
   const meta_ptr_t head = meta_recent(env, &troika);
   const uint64_t unsynced_pages = atomic_load64(&env->lck->unsynced_pages, mo_Relaxed);
   if (unsynced_pages == 0) {
@@ -127,7 +109,7 @@ retry:;
        osal_monotime() - eoos_timestamp >= autosync_period))
     flags &= MDBX_WRITEMAP /* clear flags for full steady sync */;
 
-  if (!txn0_owned) {
+  if (!txn_owned) {
     if (!should_unlock) {
 #if MDBX_ENABLE_PGOP_STAT
       unsigned wops = 0;
@@ -176,7 +158,7 @@ retry:;
 #if MDBX_ENABLE_PGOP_STAT
       env->lck->pgops.wops.weak += wops;
 #endif /* MDBX_ENABLE_PGOP_STAT */
-      env->basal_txn->tw.troika = meta_tap(env);
+      env->basal_txn->wr.troika = meta_tap(env);
       eASSERT(env, !env->txn && !env->basal_txn->nested);
       goto retry;
     }
@@ -186,8 +168,8 @@ retry:;
     flags |= txn_shrink_allowed;
   }
 
-  eASSERT(env, txn0_owned || should_unlock);
-  eASSERT(env, !txn0_owned || (flags & txn_shrink_allowed) == 0);
+  eASSERT(env, txn_owned || should_unlock);
+  eASSERT(env, !txn_owned || (flags & txn_shrink_allowed) == 0);
 
   if (!head.is_steady && unlikely(env->stuck_meta >= 0) && troika.recent != (uint8_t)env->stuck_meta) {
     NOTICE("skip %s since wagering meta-page (%u) is mispatch the recent "
@@ -200,7 +182,7 @@ retry:;
     DEBUG("meta-head %" PRIaPGNO ", %s, sync_pending %" PRIu64, data_page(head.ptr_c)->pgno,
           durable_caption(head.ptr_c), unsynced_pages);
     meta_t meta = *head.ptr_c;
-    rc = dxb_sync_locked(env, flags, &meta, &env->basal_txn->tw.troika);
+    rc = dxb_sync_locked(env, flags, &meta, &env->basal_txn->wr.troika);
     if (unlikely(rc != MDBX_SUCCESS))
       goto bailout;
   }
@@ -611,12 +593,7 @@ __cold int env_close(MDBX_env *env, bool resurrect_after_fork) {
       env->pathname.buffer = nullptr;
     }
     if (env->basal_txn) {
-      dpl_free(env->basal_txn);
-      txl_free(env->basal_txn->tw.gc.reclaimed);
-      pnl_free(env->basal_txn->tw.retired_pages);
-      pnl_free(env->basal_txn->tw.spilled.list);
-      pnl_free(env->basal_txn->tw.relist);
-      osal_free(env->basal_txn);
+      txn_basal_destroy(env->basal_txn);
       env->basal_txn = nullptr;
     }
   }

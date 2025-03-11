@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
@@ -23,7 +23,7 @@ MDBX_cursor *mdbx_cursor_create(void *context) {
   return &couple->outer;
 }
 
-int mdbx_cursor_renew(const MDBX_txn *txn, MDBX_cursor *mc) {
+int mdbx_cursor_renew(MDBX_txn *txn, MDBX_cursor *mc) {
   return likely(mc) ? mdbx_cursor_bind(txn, mc, (kvx_t *)mc->clc - txn->env->kvs) : LOG_IFERR(MDBX_EINVAL);
 }
 
@@ -40,7 +40,7 @@ int mdbx_cursor_reset(MDBX_cursor *mc) {
   return MDBX_SUCCESS;
 }
 
-int mdbx_cursor_bind(const MDBX_txn *txn, MDBX_cursor *mc, MDBX_dbi dbi) {
+int mdbx_cursor_bind(MDBX_txn *txn, MDBX_cursor *mc, MDBX_dbi dbi) {
   if (unlikely(!mc))
     return LOG_IFERR(MDBX_EINVAL);
 
@@ -88,6 +88,7 @@ int mdbx_cursor_bind(const MDBX_txn *txn, MDBX_cursor *mc, MDBX_dbi dbi) {
 
   mc->next = txn->cursors[dbi];
   txn->cursors[dbi] = mc;
+  txn->flags |= txn_may_have_cursors;
   return MDBX_SUCCESS;
 }
 
@@ -114,19 +115,23 @@ int mdbx_cursor_unbind(MDBX_cursor *mc) {
     cASSERT(mc, dbi < mc->txn->n_dbi);
     if (dbi < mc->txn->n_dbi) {
       MDBX_cursor **prev = &mc->txn->cursors[dbi];
-      while (*prev && *prev != mc)
+      while (*prev) {
+        ENSURE(mc->txn->env, (*prev)->signature == cur_signature_live || (*prev)->signature == cur_signature_wait4eot);
+        if (*prev == mc)
+          break;
         prev = &(*prev)->next;
+      }
       cASSERT(mc, *prev == mc);
       *prev = mc->next;
     }
     mc->next = mc;
   }
+  be_poor(mc);
   mc->signature = cur_signature_ready4dispose;
-  mc->flags = 0;
   return MDBX_SUCCESS;
 }
 
-int mdbx_cursor_open(const MDBX_txn *txn, MDBX_dbi dbi, MDBX_cursor **ret) {
+int mdbx_cursor_open(MDBX_txn *txn, MDBX_dbi dbi, MDBX_cursor **ret) {
   if (unlikely(!ret))
     return LOG_IFERR(MDBX_EINVAL);
   *ret = nullptr;
@@ -158,8 +163,12 @@ void mdbx_cursor_close(MDBX_cursor *mc) {
         tASSERT(txn, dbi < txn->n_dbi);
         if (dbi < txn->n_dbi) {
           MDBX_cursor **prev = &txn->cursors[dbi];
-          while (*prev && *prev != mc)
+          while (*prev) {
+            ENSURE(txn->env, (*prev)->signature == cur_signature_live || (*prev)->signature == cur_signature_wait4eot);
+            if (*prev == mc)
+              break;
             prev = &(*prev)->next;
+          }
           tASSERT(txn, *prev == mc);
           *prev = mc->next;
         }
@@ -171,6 +180,7 @@ void mdbx_cursor_close(MDBX_cursor *mc) {
       /* Cursor closed before nested txn ends */
       tASSERT(txn, mc->signature == cur_signature_live);
       ENSURE(txn->env, check_txn_rw(txn, 0) == MDBX_SUCCESS);
+      be_poor(mc);
       mc->signature = cur_signature_wait4eot;
     }
   }
@@ -207,19 +217,20 @@ again:
   return MDBX_SUCCESS;
 }
 
-int mdbx_txn_release_all_cursors(const MDBX_txn *txn, bool unbind) {
+int mdbx_txn_release_all_cursors_ex(const MDBX_txn *txn, bool unbind, size_t *count) {
   int rc = check_txn(txn, MDBX_TXN_FINISHED | MDBX_TXN_HAS_CHILD);
+  size_t n = 0;
   if (likely(rc == MDBX_SUCCESS)) {
     TXN_FOREACH_DBI_FROM(txn, i, MAIN_DBI) {
       while (txn->cursors[i]) {
+        ++n;
         MDBX_cursor *mc = txn->cursors[i];
         ENSURE(nullptr, mc->signature == cur_signature_live && (mc->next != mc) && !mc->backup);
-        rc = likely(rc < INT_MAX) ? rc + 1 : rc;
         txn->cursors[i] = mc->next;
         mc->next = mc;
         if (unbind) {
+          be_poor(mc);
           mc->signature = cur_signature_ready4dispose;
-          mc->flags = 0;
         } else {
           mc->signature = 0;
           osal_free(mc);
@@ -227,9 +238,10 @@ int mdbx_txn_release_all_cursors(const MDBX_txn *txn, bool unbind) {
       }
     }
   } else {
-    eASSERT(nullptr, rc < 0);
     LOG_IFERR(rc);
   }
+  if (count)
+    *count = n;
   return rc;
 }
 
@@ -308,8 +320,7 @@ int mdbx_cursor_compare(const MDBX_cursor *l, const MDBX_cursor *r, bool ignore_
   return (l->flags & z_eof_hard) - (r->flags & z_eof_hard);
 }
 
-/* Return the count of duplicate data items for the current key */
-int mdbx_cursor_count(const MDBX_cursor *mc, size_t *countp) {
+int mdbx_cursor_count_ex(const MDBX_cursor *mc, size_t *count, MDBX_stat *ns, size_t bytes) {
   if (unlikely(mc == nullptr))
     return LOG_IFERR(MDBX_EINVAL);
 
@@ -320,19 +331,49 @@ int mdbx_cursor_count(const MDBX_cursor *mc, size_t *countp) {
   if (unlikely(rc != MDBX_SUCCESS))
     return LOG_IFERR(rc);
 
-  if (unlikely(countp == nullptr))
-    return LOG_IFERR(MDBX_EINVAL);
+  if (ns) {
+    const size_t size_before_modtxnid = offsetof(MDBX_stat, ms_mod_txnid);
+    if (unlikely(bytes != sizeof(MDBX_stat)) && bytes != size_before_modtxnid)
+      return LOG_IFERR(MDBX_EINVAL);
+    memset(ns, 0, sizeof(*ns));
+  }
 
-  if ((*countp = is_filled(mc)) > 0) {
+  size_t nvals = 0;
+  if (is_filled(mc)) {
+    nvals = 1;
     if (!inner_hollow(mc)) {
       const page_t *mp = mc->pg[mc->top];
       const node_t *node = page_node(mp, mc->ki[mc->top]);
       cASSERT(mc, node_flags(node) & N_DUP);
-      *countp =
-          unlikely(mc->subcur->nested_tree.items > PTRDIFF_MAX) ? PTRDIFF_MAX : (size_t)mc->subcur->nested_tree.items;
+      const tree_t *nt = &mc->subcur->nested_tree;
+      nvals = unlikely(nt->items > PTRDIFF_MAX) ? PTRDIFF_MAX : (size_t)nt->items;
+      if (ns) {
+        ns->ms_psize = (unsigned)node_ds(node);
+        if (node_flags(node) & N_TREE) {
+          ns->ms_psize = mc->txn->env->ps;
+          ns->ms_depth = nt->height;
+          ns->ms_branch_pages = nt->branch_pages;
+        }
+        cASSERT(mc, nt->large_pages == 0);
+        ns->ms_leaf_pages = nt->leaf_pages;
+        ns->ms_entries = nt->items;
+        if (likely(bytes >= offsetof(MDBX_stat, ms_mod_txnid) + sizeof(ns->ms_mod_txnid)))
+          ns->ms_mod_txnid = nt->mod_txnid;
+      }
     }
   }
+
+  if (likely(count))
+    *count = nvals;
+
   return MDBX_SUCCESS;
+}
+
+int mdbx_cursor_count(const MDBX_cursor *mc, size_t *count) {
+  if (unlikely(count == nullptr))
+    return LOG_IFERR(MDBX_EINVAL);
+
+  return mdbx_cursor_count_ex(mc, count, nullptr, 0);
 }
 
 int mdbx_cursor_on_first(const MDBX_cursor *mc) {

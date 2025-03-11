@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
@@ -28,8 +28,8 @@ __cold static int audit_ex_locked(MDBX_txn *txn, size_t retired_stored, bool don
   const MDBX_env *const env = txn->env;
   size_t pending = 0;
   if ((txn->flags & MDBX_TXN_RDONLY) == 0)
-    pending = txn->tw.loose_count + MDBX_PNL_GETSIZE(txn->tw.relist) +
-              (MDBX_PNL_GETSIZE(txn->tw.retired_pages) - retired_stored);
+    pending = txn->wr.loose_count + MDBX_PNL_GETSIZE(txn->wr.repnl) +
+              (MDBX_PNL_GETSIZE(txn->wr.retired_pages) - retired_stored);
 
   cursor_couple_t cx;
   int rc = cursor_init(&cx.outer, txn, FREE_DBI);
@@ -46,11 +46,7 @@ __cold static int audit_ex_locked(MDBX_txn *txn, size_t retired_stored, bool don
         return MDBX_CORRUPTED;
       }
       txnid_t id = unaligned_peek_u64(4, key.iov_base);
-      if (txn->tw.gc.reclaimed) {
-        for (size_t i = 1; i <= MDBX_PNL_GETSIZE(txn->tw.gc.reclaimed); ++i)
-          if (id == txn->tw.gc.reclaimed[i])
-            goto skip;
-      } else if (id <= txn->tw.gc.last_reclaimed)
+      if (txn->wr.gc.retxl ? txl_contain(txn->wr.gc.retxl, id) : (id <= txn->wr.gc.last_reclaimed))
         goto skip;
     }
     gc += *(pgno_t *)data.iov_base;
@@ -82,7 +78,7 @@ __cold static int audit_ex_locked(MDBX_txn *txn, size_t retired_stored, bool don
     if (db)
       ctx.used += audit_db_used(db);
     else if (dbi_state(txn, dbi))
-      WARNING("audit %s@%" PRIaTXN ": unable account dbi %zd / \"%*s\", state 0x%02x", txn->parent ? "nested-" : "",
+      WARNING("audit %s@%" PRIaTXN ": unable account dbi %zd / \"%.*s\", state 0x%02x", txn->parent ? "nested-" : "",
               txn->txnid, dbi, (int)env->kvs[dbi].name.iov_len, (const char *)env->kvs[dbi].name.iov_base,
               dbi_state(txn, dbi));
   }
@@ -93,8 +89,8 @@ __cold static int audit_ex_locked(MDBX_txn *txn, size_t retired_stored, bool don
   if ((txn->flags & MDBX_TXN_RDONLY) == 0)
     ERROR("audit @%" PRIaTXN ": %zu(pending) = %zu(loose) + "
           "%zu(reclaimed) + %zu(retired-pending) - %zu(retired-stored)",
-          txn->txnid, pending, txn->tw.loose_count, MDBX_PNL_GETSIZE(txn->tw.relist),
-          txn->tw.retired_pages ? MDBX_PNL_GETSIZE(txn->tw.retired_pages) : 0, retired_stored);
+          txn->txnid, pending, txn->wr.loose_count, MDBX_PNL_GETSIZE(txn->wr.repnl),
+          txn->wr.retired_pages ? MDBX_PNL_GETSIZE(txn->wr.retired_pages) : 0, retired_stored);
   ERROR("audit @%" PRIaTXN ": %zu(pending) + %zu"
         "(gc) + %zu(count) = %zu(total) <> %zu"
         "(allocated)",

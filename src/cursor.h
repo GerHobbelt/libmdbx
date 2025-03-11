@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #pragma once
 
@@ -151,7 +151,7 @@ MDBX_MAYBE_UNUSED MDBX_NOTHROW_PURE_FUNCTION static inline bool is_hollow(const 
     cASSERT(mc, mc->top >= 0);
     cASSERT(mc, (mc->flags & z_eof_hard) || mc->ki[mc->top] < page_numkeys(mc->pg[mc->top]));
   } else if (mc->subcur)
-    cASSERT(mc, is_poor(&mc->subcur->cursor));
+    cASSERT(mc, is_poor(&mc->subcur->cursor) || (is_pointed(mc) && mc->subcur->cursor.flags < 0));
   return r;
 }
 
@@ -174,7 +174,16 @@ MDBX_MAYBE_UNUSED MDBX_NOTHROW_PURE_FUNCTION static inline bool inner_pointed(co
 }
 
 MDBX_MAYBE_UNUSED MDBX_NOTHROW_PURE_FUNCTION static inline bool inner_hollow(const MDBX_cursor *mc) {
-  return !mc->subcur || is_hollow(&mc->subcur->cursor);
+  const bool r = !mc->subcur || is_hollow(&mc->subcur->cursor);
+#if MDBX_DEBUG || MDBX_FORCE_ASSERTIONS
+  if (!r) {
+    cASSERT(mc, is_filled(mc));
+    const page_t *mp = mc->pg[mc->top];
+    const node_t *node = page_node(mp, mc->ki[mc->top]);
+    cASSERT(mc, node_flags(node) & N_DUP);
+  }
+#endif /* MDBX_DEBUG || MDBX_FORCE_ASSERTIONS */
+  return r;
 }
 
 MDBX_MAYBE_UNUSED static inline void inner_gone(MDBX_cursor *mc) {
@@ -283,8 +292,8 @@ MDBX_NOTHROW_PURE_FUNCTION static inline bool check_leaf_type(const MDBX_cursor 
   return (((page_type(mp) ^ mc->checking) & (z_branch | z_leaf | z_largepage | z_dupfix)) == 0);
 }
 
-MDBX_INTERNAL void cursor_eot(MDBX_cursor *mc, const bool merge);
-MDBX_INTERNAL int cursor_shadow(MDBX_cursor *parent_cursor, MDBX_txn *nested_txn, const size_t dbi);
+MDBX_INTERNAL void cursor_eot(MDBX_cursor *cursor);
+MDBX_INTERNAL int cursor_shadow(MDBX_cursor *cursor, MDBX_txn *nested_txn, const size_t dbi);
 
 MDBX_INTERNAL MDBX_cursor *cursor_cpstk(const MDBX_cursor *csrc, MDBX_cursor *cdst);
 

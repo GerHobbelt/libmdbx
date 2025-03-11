@@ -1,4 +1,4 @@
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 /// \copyright SPDX-License-Identifier: Apache-2.0
 
 #include "test.h++"
@@ -72,6 +72,7 @@ void configure_actor(unsigned &last_space_id, const actor_testcase testcase, con
   log_trace("configure_actor: space %lu for %s", space_id, testcase2str(testcase));
   global::actors.emplace_back(actor_config(testcase, params, unsigned(space_id), wait4id));
   global::databases.insert(params.pathname_db);
+  params.prng_seed += bleach64(space_id);
 }
 
 void testcase_setup(const char *casename, const actor_params &params, unsigned &last_space_id) {

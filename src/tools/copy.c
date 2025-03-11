@@ -1,7 +1,7 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
 /// \note Please refer to the COPYRIGHT file for explanations license change,
 /// credits and acknowledgments.
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 ///
 /// mdbx_copy.c - memory-mapped database backup tool
 ///
@@ -51,6 +51,21 @@ static void usage(const char *prog) {
           "  dest_path\tdestination (stdout if not specified)\n",
           prog);
   exit(EXIT_FAILURE);
+}
+
+static void logger(MDBX_log_level_t level, const char *function, int line, const char *fmt, va_list args) {
+  static const char *const prefixes[] = {
+      "!!!fatal: ", // 0 fatal
+      " ! ",        // 1 error
+      " ~ ",        // 2 warning
+      "   ",        // 3 notice
+      "   //",      // 4 verbose
+  };
+  if (level < MDBX_LOG_DEBUG) {
+    if (function && line)
+      fprintf(stderr, "%s", prefixes[level]);
+    vfprintf(stderr, fmt, args);
+  }
 }
 
 int main(int argc, char *argv[]) {
@@ -117,6 +132,7 @@ int main(int argc, char *argv[]) {
             mdbx_version.git.describe, mdbx_version.git.datetime, mdbx_version.git.tree, argv[1],
             (argc == 2) ? "stdout" : argv[2]);
     fflush(nullptr);
+    mdbx_setup_debug(MDBX_LOG_NOTICE, MDBX_DBG_DONTCHANGE, logger);
   }
 
   act = "opening environment";

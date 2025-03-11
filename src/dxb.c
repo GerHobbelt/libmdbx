@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
@@ -368,9 +368,9 @@ void dxb_sanitize_tail(MDBX_env *env, MDBX_txn *txn) {
     if (env->pid != osal_getpid()) {
       /* resurrect after fork */
       return;
-    } else if (env->txn && env_txn0_owned(env)) {
+    } else if (env_owned_wrtxn(env)) {
       /* inside write-txn */
-      last = meta_recent(env, &env->basal_txn->tw.troika).ptr_v->geometry.first_unallocated;
+      last = meta_recent(env, &env->basal_txn->wr.troika).ptr_v->geometry.first_unallocated;
     } else if (env->flags & MDBX_RDONLY) {
       /* read-only mode, no write-txn, no wlock mutex */
       last = NUM_METAS;
@@ -567,6 +567,7 @@ __cold int dxb_setup(MDBX_env *env, const int lck_rc, const mdbx_mode_t mode_bit
       return err;
   }
 
+  size_t expected_filesize = 0;
   const size_t used_bytes = pgno2bytes(env, header.geometry.first_unallocated);
   const size_t used_aligned2os_bytes = ceil_powerof2(used_bytes, globals.sys_pagesize);
   if ((env->flags & MDBX_RDONLY)    /* readonly */
@@ -601,6 +602,8 @@ __cold int dxb_setup(MDBX_env *env, const int lck_rc, const mdbx_mode_t mode_bit
         /* pre-shrink if enabled */
         env->geo_in_bytes.now = used_bytes + env->geo_in_bytes.shrink - used_bytes % env->geo_in_bytes.shrink;
 
+      /* сейчас БД еще не открыта, поэтому этот вызов не изменит геометрию, но проверит и скорректирует параметры
+       * с учетом реального размера страницы. */
       err = mdbx_env_set_geometry(env, env->geo_in_bytes.lower, env->geo_in_bytes.now, env->geo_in_bytes.upper,
                                   env->geo_in_bytes.grow, env->geo_in_bytes.shrink, header.pagesize);
       if (unlikely(err != MDBX_SUCCESS)) {
@@ -608,27 +611,26 @@ __cold int dxb_setup(MDBX_env *env, const int lck_rc, const mdbx_mode_t mode_bit
         return (err == MDBX_EINVAL) ? MDBX_INCOMPATIBLE : err;
       }
 
-      /* update meta fields */
+      /* altering fields to match geometry given from user */
+      expected_filesize = pgno_align2os_bytes(env, header.geometry.now);
       header.geometry.now = bytes2pgno(env, env->geo_in_bytes.now);
       header.geometry.lower = bytes2pgno(env, env->geo_in_bytes.lower);
       header.geometry.upper = bytes2pgno(env, env->geo_in_bytes.upper);
       header.geometry.grow_pv = pages2pv(bytes2pgno(env, env->geo_in_bytes.grow));
       header.geometry.shrink_pv = pages2pv(bytes2pgno(env, env->geo_in_bytes.shrink));
 
-      VERBOSE("amended: root %" PRIaPGNO "/%" PRIaPGNO ", geo %" PRIaPGNO "/%" PRIaPGNO "-%" PRIaPGNO "/%" PRIaPGNO
+      VERBOSE("amending: root %" PRIaPGNO "/%" PRIaPGNO ", geo %" PRIaPGNO "/%" PRIaPGNO "-%" PRIaPGNO "/%" PRIaPGNO
               " +%u -%u, txn_id %" PRIaTXN ", %s",
               header.trees.main.root, header.trees.gc.root, header.geometry.lower, header.geometry.first_unallocated,
               header.geometry.now, header.geometry.upper, pv2pages(header.geometry.grow_pv),
               pv2pages(header.geometry.shrink_pv), unaligned_peek_u64(4, header.txnid_a), durable_caption(&header));
     } else {
-      /* fetch back 'now/current' size, since it was ignored during comparison
-       * and may differ. */
+      /* fetch back 'now/current' size, since it was ignored during comparison and may differ. */
       env->geo_in_bytes.now = pgno_align2os_bytes(env, header.geometry.now);
     }
     ENSURE(env, header.geometry.now >= header.geometry.first_unallocated);
   } else {
-    /* geo-params are not pre-configured by user,
-     * get current values from the meta. */
+    /* geo-params are not pre-configured by user, get current values from the meta. */
     env->geo_in_bytes.now = pgno2bytes(env, header.geometry.now);
     env->geo_in_bytes.lower = pgno2bytes(env, header.geometry.lower);
     env->geo_in_bytes.upper = pgno2bytes(env, header.geometry.upper);
@@ -638,17 +640,19 @@ __cold int dxb_setup(MDBX_env *env, const int lck_rc, const mdbx_mode_t mode_bit
 
   ENSURE(env, pgno_align2os_bytes(env, header.geometry.now) == env->geo_in_bytes.now);
   ENSURE(env, env->geo_in_bytes.now >= used_bytes);
+  if (!expected_filesize)
+    expected_filesize = env->geo_in_bytes.now;
   const uint64_t filesize_before = env->dxb_mmap.filesize;
   if (unlikely(filesize_before != env->geo_in_bytes.now)) {
     if (lck_rc != /* lck exclusive */ MDBX_RESULT_TRUE) {
-      VERBOSE("filesize mismatch (expect %" PRIuPTR "b/%" PRIaPGNO "p, have %" PRIu64 "b/%" PRIaPGNO "p), "
-              "assume other process working",
+      VERBOSE("filesize mismatch (expect %" PRIuPTR "b/%" PRIaPGNO "p, have %" PRIu64 "b/%" PRIu64
+              "p), assume other process working",
               env->geo_in_bytes.now, bytes2pgno(env, env->geo_in_bytes.now), filesize_before,
-              bytes2pgno(env, (size_t)filesize_before));
+              filesize_before >> env->ps2ln);
     } else {
-      WARNING("filesize mismatch (expect %" PRIuSIZE "b/%" PRIaPGNO "p, have %" PRIu64 "b/%" PRIaPGNO "p)",
-              env->geo_in_bytes.now, bytes2pgno(env, env->geo_in_bytes.now), filesize_before,
-              bytes2pgno(env, (size_t)filesize_before));
+      if (filesize_before != expected_filesize)
+        WARNING("filesize mismatch (expect %" PRIuSIZE "b/%" PRIaPGNO "p, have %" PRIu64 "b/%" PRIu64 "p)",
+                expected_filesize, bytes2pgno(env, expected_filesize), filesize_before, filesize_before >> env->ps2ln);
       if (filesize_before < used_bytes) {
         ERROR("last-page beyond end-of-file (last %" PRIaPGNO ", have %" PRIaPGNO ")",
               header.geometry.first_unallocated, bytes2pgno(env, (size_t)filesize_before));
@@ -656,8 +660,9 @@ __cold int dxb_setup(MDBX_env *env, const int lck_rc, const mdbx_mode_t mode_bit
       }
 
       if (env->flags & MDBX_RDONLY) {
-        if (filesize_before & (globals.sys_pagesize - 1)) {
-          ERROR("%s", "filesize should be rounded-up to system page");
+        if (filesize_before & (globals.sys_allocation_granularity - 1)) {
+          ERROR("filesize should be rounded-up to system allocation granularity %u",
+                globals.sys_allocation_granularity);
           return MDBX_WANNA_RECOVERY;
         }
         WARNING("%s", "ignore filesize mismatch in readonly-mode");
@@ -676,7 +681,7 @@ __cold int dxb_setup(MDBX_env *env, const int lck_rc, const mdbx_mode_t mode_bit
       !(env->flags & MDBX_NORDAHEAD) && mdbx_is_readahead_reasonable(used_bytes, 0) == MDBX_RESULT_TRUE;
 
   err = osal_mmap(env->flags, &env->dxb_mmap, env->geo_in_bytes.now, env->geo_in_bytes.upper,
-                  (lck_rc && env->stuck_meta < 0) ? MMAP_OPTION_TRUNCATE : 0);
+                  (lck_rc && env->stuck_meta < 0) ? MMAP_OPTION_TRUNCATE : 0, env->pathname.dxb);
   if (unlikely(err != MDBX_SUCCESS))
     return err;
 
@@ -1300,8 +1305,8 @@ int dxb_sync_locked(MDBX_env *env, unsigned flags, meta_t *const pending, troika
 
   *troika = meta_tap(env);
   for (MDBX_txn *txn = env->basal_txn; txn; txn = txn->nested)
-    if (troika != &txn->tw.troika)
-      txn->tw.troika = *troika;
+    if (troika != &txn->wr.troika)
+      txn->wr.troika = *troika;
 
   /* LY: shrink datafile if needed */
   if (unlikely(shrink)) {

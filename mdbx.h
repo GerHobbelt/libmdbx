@@ -31,7 +31,7 @@ developers. For the same reason ~~Github~~ is blacklisted forever.
 \copyright SPDX-License-Identifier: Apache-2.0
 \note Please refer to the COPYRIGHT file for explanations license change,
 credits and acknowledgments.
-\author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+\author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 *******************************************************************************/
 
@@ -581,9 +581,9 @@ typedef mode_t mdbx_mode_t;
 extern "C" {
 #endif
 
-/* MDBX version 0.13.x */
+/* MDBX version 0.14.x */
 #define MDBX_VERSION_MAJOR 0
-#define MDBX_VERSION_MINOR 13
+#define MDBX_VERSION_MINOR 14
 
 #ifndef LIBMDBX_API
 #if defined(LIBMDBX_EXPORTS) || defined(DOXYGEN)
@@ -1999,7 +1999,12 @@ typedef enum MDBX_error {
   MDBX_EPERM = EPERM,
   MDBX_EINTR = EINTR,
   MDBX_ENOFILE = ENOENT,
+#if defined(EREMOTEIO) || defined(DOXYGEN)
+  /** Cannot use the database on a network file system or when exporting it via NFS. */
+  MDBX_EREMOTE = EREMOTEIO,
+#else
   MDBX_EREMOTE = ENOTBLK,
+#endif /* EREMOTEIO */
   MDBX_EDEADLK = EDEADLK
 #endif /* !Windows */
 } MDBX_error_t;
@@ -2190,7 +2195,8 @@ typedef enum MDBX_option {
    * spill to disk instead.
    *
    * The `MDBX_opt_txn_dp_limit` controls described threshold for the current
-   * process. Default is 65536, it is usually enough for most cases. */
+   * process. Default is 1/42 of the sum of whole and currently available RAM
+   * size, which the same ones are reported by \ref mdbx_get_sysraminfo(). */
   MDBX_opt_txn_dp_limit,
 
   /** \brief Controls the in-process initial allocation size for dirty pages
@@ -4139,6 +4145,12 @@ struct MDBX_commit_latency {
     /** \brief Количество страничных промахов (page faults) внутри GC
      *  при выделении и подготовки страниц для самой GC. */
     uint32_t self_majflt;
+    /* Для разборок с pnl_merge() */
+    struct {
+      uint32_t time;
+      uint64_t volume;
+      uint32_t calls;
+    } pnl_merge_work, pnl_merge_self;
   } gc_prof;
 };
 #ifndef __cplusplus
@@ -4177,7 +4189,10 @@ LIBMDBX_API int mdbx_txn_commit_ex(MDBX_txn *txn, MDBX_commit_latency *latency);
  * \returns A non-zero error value on failure and 0 on success,
  *          some possible errors are:
  * \retval MDBX_RESULT_TRUE      Transaction was aborted since it should
- *                               be aborted due to previous errors.
+ *                               be aborted due to previous errors,
+ *                               either no changes were made during the transaction,
+ *                               and the build time option
+ *                               \ref MDBX_NOSUCCESS_PURE_COMMIT was enabled.
  * \retval MDBX_PANIC            A fatal error occurred earlier
  *                               and the environment must be shut down.
  * \retval MDBX_BAD_TXN          Transaction is already finished or never began.
@@ -4228,7 +4243,7 @@ LIBMDBX_INLINE_API(int, mdbx_txn_commit, (MDBX_txn * txn)) { return mdbx_txn_com
  * \retval MDBX_EINVAL           Transaction handle is NULL. */
 LIBMDBX_API int mdbx_txn_abort(MDBX_txn *txn);
 
-/** \brief Marks transaction as broken.
+/** \brief Marks transaction as broken to prevent further operations.
  * \ingroup c_transactions
  *
  * Function keeps the transaction handle and corresponding locks, but makes
@@ -5124,7 +5139,7 @@ MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API void *mdbx_cursor_get_userctx(const MDBX_
  * \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
  *                               by current thread.
  * \retval MDBX_EINVAL  An invalid parameter was specified. */
-LIBMDBX_API int mdbx_cursor_bind(const MDBX_txn *txn, MDBX_cursor *cursor, MDBX_dbi dbi);
+LIBMDBX_API int mdbx_cursor_bind(MDBX_txn *txn, MDBX_cursor *cursor, MDBX_dbi dbi);
 
 /** \brief Unbind cursor from a transaction.
  * \ingroup c_cursors
@@ -5193,7 +5208,7 @@ LIBMDBX_API int mdbx_cursor_reset(MDBX_cursor *cursor);
  * \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
  *                               by current thread.
  * \retval MDBX_EINVAL  An invalid parameter was specified. */
-LIBMDBX_API int mdbx_cursor_open(const MDBX_txn *txn, MDBX_dbi dbi, MDBX_cursor **cursor);
+LIBMDBX_API int mdbx_cursor_open(MDBX_txn *txn, MDBX_dbi dbi, MDBX_cursor **cursor);
 
 /** \brief Close a cursor handle.
  * \ingroup c_cursors
@@ -5220,17 +5235,42 @@ LIBMDBX_API void mdbx_cursor_close(MDBX_cursor *cursor);
  * \see mdbx_cursor_unbind()
  * \see mdbx_cursor_close()
  *
- * \param [in] txn      A transaction handle returned by \ref mdbx_txn_begin().
- * \param [in] unbind   If non-zero, unbinds cursors and leaves ones reusable.
- *                      Otherwise close and dispose cursors.
+ * \param [in] txn        A transaction handle returned by \ref mdbx_txn_begin().
+ * \param [in] unbind     If non-zero, unbinds cursors and leaves ones reusable.
+ *                        Otherwise close and dispose cursors.
+ * \param [in,out] count  An optional pointer to return the number of cursors
+ *                        processed by the requested operation.
  *
- * \returns A negative error value on failure or the number of closed cursors
- *          on success, some possible errors are:
+ * \returns A non-zero error value on failure and 0 on success,
+ *          some possible errors are:
  * \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
  *                               by current thread.
  * \retval MDBX_BAD_TXN          Given transaction is invalid or has
  *                               a child/nested transaction transaction. */
-LIBMDBX_API int mdbx_txn_release_all_cursors(const MDBX_txn *txn, bool unbind);
+LIBMDBX_API int mdbx_txn_release_all_cursors_ex(const MDBX_txn *txn, bool unbind, size_t *count);
+
+/** \brief Unbind or closes all cursors of a given transaction.
+ * \ingroup c_cursors
+ *
+ * Unbinds either closes all cursors associated (opened or renewed) with
+ * a given transaction in a bulk with minimal overhead.
+ *
+ * \see mdbx_cursor_unbind()
+ * \see mdbx_cursor_close()
+ *
+ * \param [in] txn      A transaction handle returned by \ref mdbx_txn_begin().
+ * \param [in] unbind   If non-zero, unbinds cursors and leaves ones reusable.
+ *                      Otherwise close and dispose cursors.
+ *
+ * \returns A non-zero error value on failure and 0 on success,
+ *          some possible errors are:
+ * \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+ *                               by current thread.
+ * \retval MDBX_BAD_TXN          Given transaction is invalid or has
+ *                               a child/nested transaction transaction. */
+LIBMDBX_INLINE_API(int, mdbx_txn_release_all_cursors, (const MDBX_txn *txn, bool unbind)) {
+  return mdbx_txn_release_all_cursors_ex(txn, unbind, NULL);
+}
 
 /** \brief Renew a cursor handle for use within the given transaction.
  * \ingroup c_cursors
@@ -5256,7 +5296,7 @@ LIBMDBX_API int mdbx_txn_release_all_cursors(const MDBX_txn *txn, bool unbind);
  * \retval MDBX_EINVAL  An invalid parameter was specified.
  * \retval MDBX_BAD_DBI The cursor was not bound to a DBI-handle
  *                      or such a handle became invalid. */
-LIBMDBX_API int mdbx_cursor_renew(const MDBX_txn *txn, MDBX_cursor *cursor);
+LIBMDBX_API int mdbx_cursor_renew(MDBX_txn *txn, MDBX_cursor *cursor);
 
 /** \brief Return the cursor's transaction handle.
  * \ingroup c_cursors
@@ -5701,14 +5741,16 @@ LIBMDBX_API int mdbx_cursor_put(MDBX_cursor *cursor, const MDBX_val *key, MDBX_v
  * \retval MDBX_EINVAL        An invalid parameter was specified. */
 LIBMDBX_API int mdbx_cursor_del(MDBX_cursor *cursor, MDBX_put_flags_t flags);
 
-/** \brief Return count of duplicates for current key.
+/** \brief Return count values (aka duplicates) for current key.
  * \ingroup c_crud
+ *
+ * \see mdbx_cursor_count_ex
  *
  * This call is valid for all tables, but reasonable only for that support
  * sorted duplicate data items \ref MDBX_DUPSORT.
  *
  * \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
- * \param [out] pcount   Address where the count will be stored.
+ * \param [out] count    Address where the count will be stored.
  *
  * \returns A non-zero error value on failure and 0 on success,
  *          some possible errors are:
@@ -5716,7 +5758,31 @@ LIBMDBX_API int mdbx_cursor_del(MDBX_cursor *cursor, MDBX_put_flags_t flags);
  *                               by current thread.
  * \retval MDBX_EINVAL   Cursor is not initialized, or an invalid parameter
  *                       was specified. */
-LIBMDBX_API int mdbx_cursor_count(const MDBX_cursor *cursor, size_t *pcount);
+LIBMDBX_API int mdbx_cursor_count(const MDBX_cursor *cursor, size_t *count);
+
+/** \brief Return count values (aka duplicates) and nested b-tree statistics for current key.
+ * \ingroup c_crud
+ *
+ * \see mdbx_dbi_stat
+ * \see mdbx_dbi_dupsort_depthmask
+ * \see mdbx_cursor_count
+ *
+ * This call is valid for all tables, but reasonable only for that support
+ * sorted duplicate data items \ref MDBX_DUPSORT.
+ *
+ * \param [in] cursor    A cursor handle returned by \ref mdbx_cursor_open().
+ * \param [out] count    Address where the count will be stored.
+ * \param [out] stat     The address of an \ref MDBX_stat structure where
+ *                       the statistics of a nested b-tree will be copied.
+ * \param [in] bytes     The size of \ref MDBX_stat.
+ *
+ * \returns A non-zero error value on failure and 0 on success,
+ *          some possible errors are:
+ * \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+ *                               by current thread.
+ * \retval MDBX_EINVAL   Cursor is not initialized, or an invalid parameter
+ *                       was specified. */
+LIBMDBX_API int mdbx_cursor_count_ex(const MDBX_cursor *cursor, size_t *count, MDBX_stat *stat, size_t bytes);
 
 /** \brief Determines whether the cursor is pointed to a key-value pair or not,
  * i.e. was not positioned or points to the end of data.

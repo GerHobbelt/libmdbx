@@ -1,5 +1,5 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
@@ -20,17 +20,17 @@ static inline size_t dpl_size2bytes(ptrdiff_t size) {
 
 static inline size_t dpl_bytes2size(const ptrdiff_t bytes) {
   size_t size = (bytes - sizeof(dpl_t)) / sizeof(dp_t);
-  assert(size > CURSOR_STACK_SIZE && size <= PAGELIST_LIMIT + MDBX_PNL_GRANULATE);
 #if MDBX_DPL_PREALLOC_FOR_RADIXSORT
   size >>= 1;
 #endif /* MDBX_DPL_PREALLOC_FOR_RADIXSORT */
+  assert(size > CURSOR_STACK_SIZE && size <= PAGELIST_LIMIT + MDBX_PNL_GRANULATE);
   return size;
 }
 
 void dpl_free(MDBX_txn *txn) {
-  if (likely(txn->tw.dirtylist)) {
-    osal_free(txn->tw.dirtylist);
-    txn->tw.dirtylist = nullptr;
+  if (likely(txn->wr.dirtylist)) {
+    osal_free(txn->wr.dirtylist);
+    txn->wr.dirtylist = nullptr;
   }
 }
 
@@ -39,14 +39,14 @@ dpl_t *dpl_reserve(MDBX_txn *txn, size_t size) {
   tASSERT(txn, (txn->flags & MDBX_WRITEMAP) == 0 || MDBX_AVOID_MSYNC);
 
   size_t bytes = dpl_size2bytes((size < PAGELIST_LIMIT) ? size : PAGELIST_LIMIT);
-  dpl_t *const dl = osal_realloc(txn->tw.dirtylist, bytes);
+  dpl_t *const dl = osal_realloc(txn->wr.dirtylist, bytes);
   if (likely(dl)) {
-#if __GLIBC_PREREQ(2, 12) || defined(__FreeBSD__) || defined(malloc_usable_size)
-    bytes = malloc_usable_size(dl);
-#endif /* malloc_usable_size */
+#ifdef osal_malloc_usable_size
+    bytes = osal_malloc_usable_size(dl);
+#endif /* osal_malloc_usable_size */
     dl->detent = dpl_bytes2size(bytes);
-    tASSERT(txn, txn->tw.dirtylist == nullptr || dl->length <= dl->detent);
-    txn->tw.dirtylist = dl;
+    tASSERT(txn, txn->wr.dirtylist == nullptr || dl->length <= dl->detent);
+    txn->wr.dirtylist = dl;
   }
   return dl;
 }
@@ -57,15 +57,15 @@ int dpl_alloc(MDBX_txn *txn) {
 
   const size_t wanna = (txn->env->options.dp_initial < txn->geo.upper) ? txn->env->options.dp_initial : txn->geo.upper;
 #if MDBX_FORCE_ASSERTIONS || MDBX_DEBUG
-  if (txn->tw.dirtylist)
+  if (txn->wr.dirtylist)
     /* обнуляем чтобы не сработал ассерт внутри dpl_reserve() */
-    txn->tw.dirtylist->sorted = txn->tw.dirtylist->length = 0;
+    txn->wr.dirtylist->sorted = txn->wr.dirtylist->length = 0;
 #endif /* asertions enabled */
-  if (unlikely(!txn->tw.dirtylist || txn->tw.dirtylist->detent < wanna || txn->tw.dirtylist->detent > wanna + wanna) &&
+  if (unlikely(!txn->wr.dirtylist || txn->wr.dirtylist->detent < wanna || txn->wr.dirtylist->detent > wanna + wanna) &&
       unlikely(!dpl_reserve(txn, wanna)))
     return MDBX_ENOMEM;
 
-  dpl_clear(txn->tw.dirtylist);
+  dpl_clear(txn->wr.dirtylist);
   return MDBX_SUCCESS;
 }
 
@@ -79,7 +79,7 @@ __hot __noinline dpl_t *dpl_sort_slowpath(const MDBX_txn *txn) {
   tASSERT(txn, (txn->flags & MDBX_TXN_RDONLY) == 0);
   tASSERT(txn, (txn->flags & MDBX_WRITEMAP) == 0 || MDBX_AVOID_MSYNC);
 
-  dpl_t *dl = txn->tw.dirtylist;
+  dpl_t *dl = txn->wr.dirtylist;
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
   const size_t unsorted = dl->length - dl->sorted;
   if (likely(unsorted < MDBX_RADIXSORT_THRESHOLD) || unlikely(!dp_radixsort(dl->items + 1, dl->length))) {
@@ -129,11 +129,11 @@ __hot __noinline dpl_t *dpl_sort_slowpath(const MDBX_txn *txn) {
 #define DP_SEARCH_CMP(dp, id) ((dp).pgno < (id))
 SEARCH_IMPL(dp_bsearch, dp_t, pgno_t, DP_SEARCH_CMP)
 
-__hot __noinline MDBX_INTERNAL size_t dpl_search(const MDBX_txn *txn, pgno_t pgno) {
+__hot __noinline size_t dpl_search(const MDBX_txn *txn, pgno_t pgno) {
   tASSERT(txn, (txn->flags & MDBX_TXN_RDONLY) == 0);
   tASSERT(txn, (txn->flags & MDBX_WRITEMAP) == 0 || MDBX_AVOID_MSYNC);
 
-  dpl_t *dl = txn->tw.dirtylist;
+  dpl_t *dl = txn->wr.dirtylist;
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
   if (AUDIT_ENABLED()) {
     for (const dp_t *ptr = dl->items + dl->sorted; --ptr > dl->items;) {
@@ -175,7 +175,7 @@ __hot __noinline MDBX_INTERNAL size_t dpl_search(const MDBX_txn *txn, pgno_t pgn
 
 const page_t *debug_dpl_find(const MDBX_txn *txn, const pgno_t pgno) {
   tASSERT(txn, (txn->flags & MDBX_TXN_RDONLY) == 0);
-  const dpl_t *dl = txn->tw.dirtylist;
+  const dpl_t *dl = txn->wr.dirtylist;
   if (dl) {
     tASSERT(txn, (txn->flags & MDBX_WRITEMAP) == 0 || MDBX_AVOID_MSYNC);
     assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
@@ -198,7 +198,7 @@ void dpl_remove_ex(const MDBX_txn *txn, size_t i, size_t npages) {
   tASSERT(txn, (txn->flags & MDBX_TXN_RDONLY) == 0);
   tASSERT(txn, (txn->flags & MDBX_WRITEMAP) == 0 || MDBX_AVOID_MSYNC);
 
-  dpl_t *dl = txn->tw.dirtylist;
+  dpl_t *dl = txn->wr.dirtylist;
   assert((intptr_t)i > 0 && i <= dl->length);
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
   dl->pages_including_loose -= npages;
@@ -214,10 +214,10 @@ int __must_check_result dpl_append(MDBX_txn *txn, pgno_t pgno, page_t *page, siz
   const dp_t dp = {page, pgno, (pgno_t)npages};
   if ((txn->flags & MDBX_WRITEMAP) == 0) {
     size_t *const ptr = ptr_disp(page, -(ptrdiff_t)sizeof(size_t));
-    *ptr = txn->tw.dirtylru;
+    *ptr = txn->wr.dirtylru;
   }
 
-  dpl_t *dl = txn->tw.dirtylist;
+  dpl_t *dl = txn->wr.dirtylist;
   tASSERT(txn, dl->length <= PAGELIST_LIMIT + MDBX_PNL_GRANULATE);
   tASSERT(txn, dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
   if (AUDIT_ENABLED()) {
@@ -313,7 +313,7 @@ int __must_check_result dpl_append(MDBX_txn *txn, pgno_t pgno, page_t *page, siz
 
 __cold bool dpl_check(MDBX_txn *txn) {
   tASSERT(txn, (txn->flags & MDBX_TXN_RDONLY) == 0);
-  const dpl_t *const dl = txn->tw.dirtylist;
+  const dpl_t *const dl = txn->wr.dirtylist;
   if (!dl) {
     tASSERT(txn, (txn->flags & MDBX_WRITEMAP) != 0 && !MDBX_AVOID_MSYNC);
     return true;
@@ -322,7 +322,7 @@ __cold bool dpl_check(MDBX_txn *txn) {
 
   assert(dl->items[0].pgno == 0 && dl->items[dl->length + 1].pgno == P_INVALID);
   tASSERT(txn,
-          txn->tw.dirtyroom + dl->length == (txn->parent ? txn->parent->tw.dirtyroom : txn->env->options.dp_limit));
+          txn->wr.dirtyroom + dl->length == (txn->parent ? txn->parent->wr.dirtyroom : txn->env->options.dp_limit));
 
   if (!AUDIT_ENABLED())
     return true;
@@ -362,28 +362,28 @@ __cold bool dpl_check(MDBX_txn *txn) {
         return false;
     }
 
-    const size_t rpa = pnl_search(txn->tw.relist, dp->pgno, txn->geo.first_unallocated);
-    tASSERT(txn, rpa > MDBX_PNL_GETSIZE(txn->tw.relist) || txn->tw.relist[rpa] != dp->pgno);
-    if (rpa <= MDBX_PNL_GETSIZE(txn->tw.relist) && unlikely(txn->tw.relist[rpa] == dp->pgno))
+    const size_t rpa = pnl_search(txn->wr.repnl, dp->pgno, txn->geo.first_unallocated);
+    tASSERT(txn, rpa > MDBX_PNL_GETSIZE(txn->wr.repnl) || txn->wr.repnl[rpa] != dp->pgno);
+    if (rpa <= MDBX_PNL_GETSIZE(txn->wr.repnl) && unlikely(txn->wr.repnl[rpa] == dp->pgno))
       return false;
     if (num > 1) {
-      const size_t rpb = pnl_search(txn->tw.relist, dp->pgno + num - 1, txn->geo.first_unallocated);
+      const size_t rpb = pnl_search(txn->wr.repnl, dp->pgno + num - 1, txn->geo.first_unallocated);
       tASSERT(txn, rpa == rpb);
       if (unlikely(rpa != rpb))
         return false;
     }
   }
 
-  tASSERT(txn, loose == txn->tw.loose_count);
-  if (unlikely(loose != txn->tw.loose_count))
+  tASSERT(txn, loose == txn->wr.loose_count);
+  if (unlikely(loose != txn->wr.loose_count))
     return false;
 
   tASSERT(txn, pages == dl->pages_including_loose);
   if (unlikely(pages != dl->pages_including_loose))
     return false;
 
-  for (size_t i = 1; i <= MDBX_PNL_GETSIZE(txn->tw.retired_pages); ++i) {
-    const page_t *const dp = debug_dpl_find(txn, txn->tw.retired_pages[i]);
+  for (size_t i = 1; i <= MDBX_PNL_GETSIZE(txn->wr.retired_pages); ++i) {
+    const page_t *const dp = debug_dpl_find(txn, txn->wr.retired_pages[i]);
     tASSERT(txn, !dp);
     if (unlikely(dp))
       return false;
@@ -395,11 +395,11 @@ __cold bool dpl_check(MDBX_txn *txn) {
 /*----------------------------------------------------------------------------*/
 
 __noinline void dpl_lru_reduce(MDBX_txn *txn) {
-  NOTICE("lru-reduce %u -> %u", txn->tw.dirtylru, txn->tw.dirtylru >> 1);
+  NOTICE("lru-reduce %u -> %u", txn->wr.dirtylru, txn->wr.dirtylru >> 1);
   tASSERT(txn, (txn->flags & (MDBX_TXN_RDONLY | MDBX_WRITEMAP)) == 0);
   do {
-    txn->tw.dirtylru >>= 1;
-    dpl_t *dl = txn->tw.dirtylist;
+    txn->wr.dirtylru >>= 1;
+    dpl_t *dl = txn->wr.dirtylist;
     for (size_t i = 1; i <= dl->length; ++i) {
       size_t *const ptr = ptr_disp(dl->items[i].ptr, -(ptrdiff_t)sizeof(size_t));
       *ptr >>= 1;
@@ -411,7 +411,7 @@ __noinline void dpl_lru_reduce(MDBX_txn *txn) {
 void dpl_sift(MDBX_txn *const txn, pnl_t pl, const bool spilled) {
   tASSERT(txn, (txn->flags & MDBX_TXN_RDONLY) == 0);
   tASSERT(txn, (txn->flags & MDBX_WRITEMAP) == 0 || MDBX_AVOID_MSYNC);
-  if (MDBX_PNL_GETSIZE(pl) && txn->tw.dirtylist->length) {
+  if (MDBX_PNL_GETSIZE(pl) && txn->wr.dirtylist->length) {
     tASSERT(txn, pnl_check_allocated(pl, (size_t)txn->geo.first_unallocated << spilled));
     dpl_t *dl = dpl_sort(txn);
 
@@ -466,9 +466,9 @@ void dpl_sift(MDBX_txn *const txn, pnl_t pl, const bool spilled) {
         }
       }
       dl->sorted = dpl_setlen(dl, w - 1);
-      txn->tw.dirtyroom += r - w;
-      tASSERT(txn, txn->tw.dirtyroom + txn->tw.dirtylist->length ==
-                       (txn->parent ? txn->parent->tw.dirtyroom : txn->env->options.dp_limit));
+      txn->wr.dirtyroom += r - w;
+      tASSERT(txn, txn->wr.dirtyroom + txn->wr.dirtylist->length ==
+                       (txn->parent ? txn->parent->wr.dirtyroom : txn->env->options.dp_limit));
       return;
     }
   }
@@ -477,7 +477,7 @@ void dpl_sift(MDBX_txn *const txn, pnl_t pl, const bool spilled) {
 void dpl_release_shadows(MDBX_txn *txn) {
   tASSERT(txn, (txn->flags & (MDBX_TXN_RDONLY | MDBX_WRITEMAP)) == 0);
   MDBX_env *env = txn->env;
-  dpl_t *const dl = txn->tw.dirtylist;
+  dpl_t *const dl = txn->wr.dirtylist;
 
   for (size_t i = 1; i <= dl->length; i++)
     page_shadow_release(env, dl->items[i].ptr, dpl_npages(dl, i));

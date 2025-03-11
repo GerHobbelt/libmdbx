@@ -1,17 +1,17 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
 /// \note Please refer to the COPYRIGHT file for explanations license change,
 /// credits and acknowledgments.
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
 __cold int cursor_check(const MDBX_cursor *mc) {
-  if (!mc->txn->tw.dirtylist) {
+  if (!mc->txn->wr.dirtylist) {
     cASSERT(mc, (mc->txn->flags & MDBX_WRITEMAP) != 0 && !MDBX_AVOID_MSYNC);
   } else {
     cASSERT(mc, (mc->txn->flags & MDBX_WRITEMAP) == 0 || MDBX_AVOID_MSYNC);
-    cASSERT(mc, mc->txn->tw.dirtyroom + mc->txn->tw.dirtylist->length ==
-                    (mc->txn->parent ? mc->txn->parent->tw.dirtyroom : mc->txn->env->options.dp_limit));
+    cASSERT(mc, mc->txn->wr.dirtyroom + mc->txn->wr.dirtylist->length ==
+                    (mc->txn->parent ? mc->txn->parent->wr.dirtyroom : mc->txn->env->options.dp_limit));
   }
 
   cASSERT(mc, (mc->checking & z_updating) ? mc->top + 1 <= mc->tree->height : mc->top + 1 == mc->tree->height);
@@ -145,7 +145,7 @@ __hot int cursor_touch(MDBX_cursor *const mc, const MDBX_val *key, const MDBX_va
     if (!cursor_is_gc(mc)) {
       need += txn->dbs[FREE_DBI].height + (size_t)3;
       /* 3) Named DBs also dirty the main DB */
-      if (cursor_is_main(mc))
+      if (!cursor_is_main(mc))
         need += txn->dbs[MAIN_DBI].height + (size_t)3;
     }
 #if xMDBX_DEBUG_SPILLING != 2
@@ -168,7 +168,7 @@ __hot int cursor_touch(MDBX_cursor *const mc, const MDBX_val *key, const MDBX_va
       return err;
   }
 
-  if (likely(mc->top >= 0) && !is_modifable(mc->txn, mc->pg[mc->top])) {
+  if (likely(is_pointed(mc)) && ((mc->txn->flags & MDBX_TXN_SPILLS) || !is_modifable(mc->txn, mc->pg[mc->top]))) {
     const int8_t top = mc->top;
     mc->top = 0;
     do {
@@ -184,78 +184,73 @@ __hot int cursor_touch(MDBX_cursor *const mc, const MDBX_val *key, const MDBX_va
 
 /*----------------------------------------------------------------------------*/
 
-int cursor_shadow(MDBX_cursor *parent_cursor, MDBX_txn *nested_txn, const size_t dbi) {
-
+int cursor_shadow(MDBX_cursor *cursor, MDBX_txn *nested_txn, const size_t dbi) {
+  tASSERT(nested_txn, cursor->signature == cur_signature_live);
+  tASSERT(nested_txn, cursor->txn != nested_txn);
+  cASSERT(cursor, cursor->txn->flags & txn_may_have_cursors);
+  cASSERT(cursor, dbi == cursor_dbi(cursor));
   tASSERT(nested_txn, dbi > FREE_DBI && dbi < nested_txn->n_dbi);
-  const size_t size = parent_cursor->subcur ? sizeof(MDBX_cursor) + sizeof(subcur_t) : sizeof(MDBX_cursor);
-  for (MDBX_cursor *bk; parent_cursor; parent_cursor = bk->next) {
-    cASSERT(parent_cursor, parent_cursor != parent_cursor->next);
-    bk = parent_cursor;
-    if (parent_cursor->signature != cur_signature_live)
-      continue;
-    bk = osal_malloc(size);
-    if (unlikely(!bk))
-      return MDBX_ENOMEM;
+
+  const size_t size = cursor->subcur ? sizeof(MDBX_cursor) + sizeof(subcur_t) : sizeof(MDBX_cursor);
+  MDBX_cursor *const shadow = osal_malloc(size);
+  if (unlikely(!shadow))
+    return MDBX_ENOMEM;
+
 #if MDBX_DEBUG
-    memset(bk, 0xCD, size);
-    VALGRIND_MAKE_MEM_UNDEFINED(bk, size);
+  memset(shadow, 0xCD, size);
+  VALGRIND_MAKE_MEM_UNDEFINED(shadow, size);
 #endif /* MDBX_DEBUG */
-    *bk = *parent_cursor;
-    parent_cursor->backup = bk;
-    /* Kill pointers into src to reduce abuse: The
-     * user may not use mc until dst ends. But we need a valid
-     * txn pointer here for cursor fixups to keep working. */
-    parent_cursor->txn = nested_txn;
-    parent_cursor->tree = &nested_txn->dbs[dbi];
-    parent_cursor->dbi_state = &nested_txn->dbi_state[dbi];
-    subcur_t *mx = parent_cursor->subcur;
-    if (mx != nullptr) {
-      *(subcur_t *)(bk + 1) = *mx;
-      mx->cursor.txn = nested_txn;
-      mx->cursor.dbi_state = parent_cursor->dbi_state;
-    }
-    parent_cursor->next = nested_txn->cursors[dbi];
-    nested_txn->cursors[dbi] = parent_cursor;
+  *shadow = *cursor;
+  cursor->backup = shadow;
+  cursor->txn = nested_txn;
+  cursor->tree = &nested_txn->dbs[dbi];
+  cursor->dbi_state = &nested_txn->dbi_state[dbi];
+  subcur_t *subcur = cursor->subcur;
+  if (subcur) {
+    *(subcur_t *)(shadow + 1) = *subcur;
+    subcur->cursor.txn = nested_txn;
+    subcur->cursor.dbi_state = cursor->dbi_state;
   }
   return MDBX_SUCCESS;
 }
 
-void cursor_eot(MDBX_cursor *mc, const bool merge) {
-  const unsigned stage = mc->signature;
-  MDBX_cursor *const bk = mc->backup;
-  ENSURE(mc->txn->env, stage == cur_signature_live || (stage == cur_signature_wait4eot && bk));
-  if (bk) {
-    subcur_t *mx = mc->subcur;
-    cASSERT(mc, mc->txn->parent != nullptr);
-    /* Zap: Using uninitialized memory '*mc->backup'. */
+void cursor_eot(MDBX_cursor *cursor) {
+  const unsigned stage = cursor->signature;
+  MDBX_cursor *const shadow = cursor->backup;
+  ENSURE(cursor->txn->env, stage == cur_signature_live || (stage == cur_signature_wait4eot && shadow));
+  if (shadow) {
+    subcur_t *subcur = cursor->subcur;
+    cASSERT(cursor, cursor->txn->parent != nullptr);
+    /* Zap: Using uninitialized memory '*cursor->backup'. */
     MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(6001);
-    ENSURE(mc->txn->env, bk->signature == cur_signature_live);
-    cASSERT(mc, mx == bk->subcur);
-    if (merge) {
+    ENSURE(cursor->txn->env, shadow->signature == cur_signature_live);
+    cASSERT(cursor, subcur == shadow->subcur);
+    if (((cursor->txn->flags | cursor->txn->parent->flags) & MDBX_TXN_ERROR) == 0) {
       /* Update pointers to parent txn */
-      mc->next = bk->next;
-      mc->backup = bk->backup;
-      mc->txn = bk->txn;
-      mc->tree = bk->tree;
-      mc->dbi_state = bk->dbi_state;
-      if (mx) {
-        mx->cursor.txn = mc->txn;
-        mx->cursor.dbi_state = mc->dbi_state;
+      cursor->next = shadow->next;
+      cursor->backup = shadow->backup;
+      cursor->txn = shadow->txn;
+      cursor->tree = shadow->tree;
+      cursor->dbi_state = shadow->dbi_state;
+      if (subcur) {
+        subcur->cursor.txn = cursor->txn;
+        subcur->cursor.dbi_state = cursor->dbi_state;
       }
     } else {
       /* Restore from backup, i.e. rollback/abort nested txn */
-      *mc = *bk;
-      if (mx)
-        *mx = *(subcur_t *)(bk + 1);
+      *cursor = *shadow;
+      if (subcur)
+        *subcur = *(subcur_t *)(shadow + 1);
     }
     if (stage == cur_signature_wait4eot /* Cursor was closed by user */)
-      mc->signature = stage /* Promote closed state to parent txn */;
-    bk->signature = 0;
-    osal_free(bk);
+      cursor->signature = stage /* Promote closed state to parent txn */;
+    shadow->signature = 0;
+    osal_free(shadow);
   } else {
-    ENSURE(mc->txn->env, stage == cur_signature_live);
-    mc->signature = cur_signature_ready4dispose /* Cursor may be reused */;
-    mc->next = mc;
+    ENSURE(cursor->txn->env, stage == cur_signature_live);
+    be_poor(cursor);
+    cursor->signature = cur_signature_ready4dispose /* Cursor may be reused */;
+    cursor->next = cursor;
   }
 }
 
@@ -643,7 +638,7 @@ static __always_inline int cursor_step(const bool inner, const bool forward, MDB
       inner_gone(mc);
   } else {
     if (mc->flags & z_hollow) {
-      cASSERT(mc, !inner_pointed(mc));
+      cASSERT(mc, !inner_pointed(mc) || inner_hollow(mc));
       return MDBX_ENODATA;
     }
 
@@ -775,8 +770,9 @@ __hot int cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data, unsig
     rc = MDBX_NO_ROOT;
   } else if ((flags & MDBX_CURRENT) == 0) {
     bool exact = false;
-    MDBX_val last_key, old_data;
+    MDBX_val old_data;
     if ((flags & MDBX_APPEND) && mc->tree->items > 0) {
+      MDBX_val last_key;
       old_data.iov_base = nullptr;
       old_data.iov_len = 0;
       rc = (mc->flags & z_inner) ? inner_last(mc, &last_key) : outer_last(mc, &last_key, &old_data);
@@ -794,51 +790,53 @@ __hot int cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data, unsig
         }
       }
     } else {
-      csr_t csr =
-          /* olddata may not be updated in case DUPFIX-page of dupfix-table */
-          cursor_seek(mc, (MDBX_val *)key, &old_data, MDBX_SET);
+      csr_t csr = cursor_seek(mc, (MDBX_val *)key, &old_data, MDBX_SET);
       rc = csr.err;
       exact = csr.exact;
     }
-    if (likely(rc == MDBX_SUCCESS)) {
-      if (exact) {
-        if (unlikely(flags & MDBX_NOOVERWRITE)) {
-          DEBUG("duplicate key [%s]", DKEY_DEBUG(key));
-          *data = old_data;
-          return MDBX_KEYEXIST;
-        }
-        if (unlikely(mc->flags & z_inner)) {
-          /* nested subtree of DUPSORT-database with the same key,
-           * nothing to update */
-          eASSERT(env, data->iov_len == 0 && (old_data.iov_len == 0 ||
-                                              /* olddata may not be updated in case
-                                                 DUPFIX-page of dupfix-table */
-                                              (mc->tree->flags & MDBX_DUPFIXED)));
-          return MDBX_SUCCESS;
-        }
-        if (unlikely(flags & MDBX_ALLDUPS) && inner_pointed(mc)) {
-          err = cursor_del(mc, MDBX_ALLDUPS);
-          if (unlikely(err != MDBX_SUCCESS))
-            return err;
+    if (exact) {
+      cASSERT(mc, rc == MDBX_SUCCESS);
+      if (unlikely(flags & MDBX_NOOVERWRITE)) {
+        DEBUG("duplicate key [%s]", DKEY_DEBUG(key));
+        *data = old_data;
+        return MDBX_KEYEXIST;
+      }
+      if (unlikely(mc->flags & z_inner)) {
+        /* nested subtree of DUPSORT-database with the same key, nothing to update */
+        cASSERT(mc, !"Should not happen since");
+        return (flags & MDBX_NODUPDATA) ? MDBX_KEYEXIST : MDBX_SUCCESS;
+      }
+      if (inner_pointed(mc)) {
+        if (unlikely(flags & MDBX_ALLDUPS)) {
+          rc = cursor_del(mc, MDBX_ALLDUPS);
+          if (unlikely(rc != MDBX_SUCCESS))
+            return rc;
           flags -= MDBX_ALLDUPS;
           cASSERT(mc, mc->top + 1 == mc->tree->height);
           rc = (mc->top >= 0) ? MDBX_NOTFOUND : MDBX_NO_ROOT;
-          exact = false;
-        } else if (!(flags & (MDBX_RESERVE | MDBX_MULTIPLE))) {
-          /* checking for early exit without dirtying pages */
-          if (unlikely(eq_fast(data, &old_data))) {
-            cASSERT(mc, mc->clc->v.cmp(data, &old_data) == 0);
-            if (mc->subcur) {
-              if (flags & MDBX_NODUPDATA)
-                return MDBX_KEYEXIST;
-              if (flags & MDBX_APPENDDUP)
-                return MDBX_EKEYMISMATCH;
-            }
+        } else if ((flags & (MDBX_RESERVE | MDBX_MULTIPLE)) == 0) {
+          old_data = *data;
+          csr_t csr = cursor_seek(&mc->subcur->cursor, &old_data, nullptr, MDBX_SET_RANGE);
+          if (unlikely(csr.exact)) {
+            cASSERT(mc, csr.err == MDBX_SUCCESS);
+            if (flags & MDBX_NODUPDATA)
+              return MDBX_KEYEXIST;
+            if (flags & MDBX_APPENDDUP)
+              return MDBX_EKEYMISMATCH;
             /* the same data, nothing to update */
             return MDBX_SUCCESS;
+          } else if (csr.err != MDBX_SUCCESS && unlikely(csr.err != MDBX_NOTFOUND)) {
+            be_poor(mc);
+            return csr.err;
           }
-          cASSERT(mc, mc->clc->v.cmp(data, &old_data) != 0);
         }
+      } else if ((flags & MDBX_RESERVE) == 0) {
+        if (unlikely(eq_fast(data, &old_data))) {
+          cASSERT(mc, mc->clc->v.cmp(data, &old_data) == 0);
+          /* the same data, nothing to update */
+          return (mc->subcur && (flags & MDBX_NODUPDATA)) ? MDBX_KEYEXIST : MDBX_SUCCESS;
+        }
+        cASSERT(mc, mc->clc->v.cmp(data, &old_data) != 0);
       }
     } else if (unlikely(rc != MDBX_NOTFOUND))
       return rc;
@@ -1042,6 +1040,7 @@ __hot int cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data, unsig
               return MDBX_EKEYMISMATCH;
           } else if (eq_fast(data, &old_data)) {
             cASSERT(mc, mc->clc->v.cmp(data, &old_data) == 0);
+            cASSERT(mc, !"Should not happen since" || batch_dupfix_done);
             if (flags & MDBX_NODUPDATA)
               return MDBX_KEYEXIST;
             /* data is match exactly byte-to-byte, nothing to update */
@@ -1701,7 +1700,9 @@ __hot csr_t cursor_seek(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data, MDBX_cur
 
   csr_t ret;
   ret.exact = false;
-  if (unlikely(key->iov_len < mc->clc->k.lmin || key->iov_len > mc->clc->k.lmax)) {
+  if (unlikely(key->iov_len < mc->clc->k.lmin ||
+               (key->iov_len > mc->clc->k.lmax &&
+                (mc->clc->k.lmin == mc->clc->k.lmax || MDBX_DEBUG || MDBX_FORCE_ASSERTIONS)))) {
     cASSERT(mc, !"Invalid key-size");
     ret.err = MDBX_BAD_VALSIZE;
     return ret;
@@ -1817,8 +1818,9 @@ __hot csr_t cursor_seek(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data, MDBX_cur
          * Поэтому переводим курсор в неустановленное состояние, но без сброса
          * top, что позволяет работать fastpath при последующем поиске по дереву
          * страниц. */
-        mc->flags = z_hollow | (mc->flags & z_clear_mask);
-        inner_gone(mc);
+        mc->flags |= z_hollow;
+        if (inner_pointed(mc))
+          mc->subcur->cursor.flags |= z_hollow;
         ret.err = MDBX_NOTFOUND;
         return ret;
       }

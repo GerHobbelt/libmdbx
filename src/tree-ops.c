@@ -1,7 +1,7 @@
 /// \copyright SPDX-License-Identifier: Apache-2.0
 /// \note Please refer to the COPYRIGHT file for explanations license change,
 /// credits and acknowledgments.
-/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2025
 
 #include "internals.h"
 
@@ -56,7 +56,7 @@ int tree_drop(MDBX_cursor *mc, const bool may_have_tables) {
     if (!(may_have_tables | mc->tree->large_pages))
       cursor_pop(mc);
 
-    rc = pnl_need(&txn->tw.retired_pages,
+    rc = pnl_need(&txn->wr.retired_pages,
                   (size_t)mc->tree->branch_pages + (size_t)mc->tree->leaf_pages + (size_t)mc->tree->large_pages);
     if (unlikely(rc != MDBX_SUCCESS))
       goto bailout;
@@ -889,7 +889,7 @@ retry:
     goto retry;
   }
   if (likely(!involve) &&
-      (likely(mc->tree != &mc->txn->dbs[FREE_DBI]) || mc->txn->tw.loose_pages || MDBX_PNL_GETSIZE(mc->txn->tw.relist) ||
+      (likely(mc->tree != &mc->txn->dbs[FREE_DBI]) || mc->txn->wr.loose_pages || MDBX_PNL_GETSIZE(mc->txn->wr.repnl) ||
        (mc->flags & z_gcu_preparation) || (mc->txn->flags & txn_gc_drained) || room_threshold)) {
     involve = true;
     goto retry;
