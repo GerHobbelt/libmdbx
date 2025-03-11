@@ -39,8 +39,7 @@ static int ntstatus2errcode(NTSTATUS status) {
   ov.Internal = status;
   /* Zap: '_Param_(1)' could be '0' */
   MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(6387);
-  return GetOverlappedResult(nullptr, &ov, &dummy, FALSE) ? MDBX_SUCCESS
-                                                          : (int)GetLastError();
+  return GetOverlappedResult(nullptr, &ov, &dummy, FALSE) ? MDBX_SUCCESS : (int)GetLastError();
 }
 
 /* We use native NT APIs to setup the memory map, so that we can
@@ -51,11 +50,10 @@ static int ntstatus2errcode(NTSTATUS status) {
  * declare them here. Using these APIs also means we must link to
  * ntdll.dll, which is not linked by default in user code. */
 
-extern NTSTATUS NTAPI NtCreateSection(
-    OUT PHANDLE SectionHandle, IN ACCESS_MASK DesiredAccess,
-    IN OPTIONAL POBJECT_ATTRIBUTES ObjectAttributes,
-    IN OPTIONAL PLARGE_INTEGER MaximumSize, IN ULONG SectionPageProtection,
-    IN ULONG AllocationAttributes, IN OPTIONAL HANDLE FileHandle);
+extern NTSTATUS NTAPI NtCreateSection(OUT PHANDLE SectionHandle, IN ACCESS_MASK DesiredAccess,
+                                      IN OPTIONAL POBJECT_ATTRIBUTES ObjectAttributes,
+                                      IN OPTIONAL PLARGE_INTEGER MaximumSize, IN ULONG SectionPageProtection,
+                                      IN ULONG AllocationAttributes, IN OPTIONAL HANDLE FileHandle);
 
 typedef struct _SECTION_BASIC_INFORMATION {
   ULONG Unknown;
@@ -63,27 +61,22 @@ typedef struct _SECTION_BASIC_INFORMATION {
   LARGE_INTEGER SectionSize;
 } SECTION_BASIC_INFORMATION, *PSECTION_BASIC_INFORMATION;
 
-extern NTSTATUS NTAPI NtMapViewOfSection(
-    IN HANDLE SectionHandle, IN HANDLE ProcessHandle, IN OUT PVOID *BaseAddress,
-    IN ULONG_PTR ZeroBits, IN SIZE_T CommitSize,
-    IN OUT OPTIONAL PLARGE_INTEGER SectionOffset, IN OUT PSIZE_T ViewSize,
-    IN SECTION_INHERIT InheritDisposition, IN ULONG AllocationType,
-    IN ULONG Win32Protect);
+extern NTSTATUS NTAPI NtMapViewOfSection(IN HANDLE SectionHandle, IN HANDLE ProcessHandle, IN OUT PVOID *BaseAddress,
+                                         IN ULONG_PTR ZeroBits, IN SIZE_T CommitSize,
+                                         IN OUT OPTIONAL PLARGE_INTEGER SectionOffset, IN OUT PSIZE_T ViewSize,
+                                         IN SECTION_INHERIT InheritDisposition, IN ULONG AllocationType,
+                                         IN ULONG Win32Protect);
 
-extern NTSTATUS NTAPI NtUnmapViewOfSection(IN HANDLE ProcessHandle,
-                                           IN OPTIONAL PVOID BaseAddress);
+extern NTSTATUS NTAPI NtUnmapViewOfSection(IN HANDLE ProcessHandle, IN OPTIONAL PVOID BaseAddress);
 
 /* Zap: Inconsistent annotation for 'NtClose'... */
 MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(28251)
 extern NTSTATUS NTAPI NtClose(HANDLE Handle);
 
-extern NTSTATUS NTAPI NtAllocateVirtualMemory(
-    IN HANDLE ProcessHandle, IN OUT PVOID *BaseAddress, IN ULONG_PTR ZeroBits,
-    IN OUT PSIZE_T RegionSize, IN ULONG AllocationType, IN ULONG Protect);
+extern NTSTATUS NTAPI NtAllocateVirtualMemory(IN HANDLE ProcessHandle, IN OUT PVOID *BaseAddress, IN ULONG_PTR ZeroBits,
+                                              IN OUT PSIZE_T RegionSize, IN ULONG AllocationType, IN ULONG Protect);
 
-extern NTSTATUS NTAPI NtFreeVirtualMemory(IN HANDLE ProcessHandle,
-                                          IN PVOID *BaseAddress,
-                                          IN OUT PSIZE_T RegionSize,
+extern NTSTATUS NTAPI NtFreeVirtualMemory(IN HANDLE ProcessHandle, IN PVOID *BaseAddress, IN OUT PSIZE_T RegionSize,
                                           IN ULONG FreeType);
 
 #ifndef WOF_CURRENT_VERSION
@@ -127,8 +120,7 @@ typedef struct _FILE_PROVIDER_EXTERNAL_INFO_V1 {
 #endif
 
 #ifndef FSCTL_GET_EXTERNAL_BACKING
-#define FSCTL_GET_EXTERNAL_BACKING                                             \
-  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 196, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define FSCTL_GET_EXTERNAL_BACKING CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 196, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #endif
 
 #ifndef ERROR_NOT_CAPABLE
@@ -140,38 +132,33 @@ typedef struct _FILE_PROVIDER_EXTERNAL_INFO_V1 {
 /*----------------------------------------------------------------------------*/
 
 #if defined(__ANDROID_API__)
-__extern_C void __assert2(const char *file, int line, const char *function,
-                          const char *msg) __noreturn;
-#define __assert_fail(assertion, file, line, function)                         \
-  __assert2(file, line, function, assertion)
+__extern_C void __assert2(const char *file, int line, const char *function, const char *msg) __noreturn;
+#define __assert_fail(assertion, file, line, function) __assert2(file, line, function, assertion)
 
 #elif defined(__UCLIBC__)
-__extern_C void __assert(const char *, const char *, unsigned, const char *)
+MDBX_NORETURN __extern_C void __assert(const char *, const char *, unsigned, const char *)
 #ifdef __THROW
     __THROW
 #else
     __nothrow
 #endif /* __THROW */
-    MDBX_NORETURN;
-#define __assert_fail(assertion, file, line, function)                         \
-  __assert(assertion, file, line, function)
+    ;
+#define __assert_fail(assertion, file, line, function) __assert(assertion, file, line, function)
 
-#elif _POSIX_C_SOURCE > 200212 &&                                              \
-    /* workaround for avoid musl libc wrong prototype */ (                     \
-        defined(__GLIBC__) || defined(__GNU_LIBRARY__))
+#elif _POSIX_C_SOURCE > 200212 &&                                                                                      \
+    /* workaround for avoid musl libc wrong prototype */ (defined(__GLIBC__) || defined(__GNU_LIBRARY__))
 /* Prototype should match libc runtime. ISO POSIX (2003) & LSB 1.x-3.x */
-__extern_C void __assert_fail(const char *assertion, const char *file,
-                              unsigned line, const char *function)
+MDBX_NORETURN __extern_C void __assert_fail(const char *assertion, const char *file, unsigned line,
+                                            const char *function)
 #ifdef __THROW
     __THROW
 #else
     __nothrow
 #endif /* __THROW */
-    MDBX_NORETURN;
+    ;
 
 #elif defined(__APPLE__) || defined(__MACH__)
-__extern_C void __assert_rtn(const char *function, const char *file, int line,
-                             const char *assertion) /* __nothrow */
+__extern_C void __assert_rtn(const char *function, const char *file, int line, const char *assertion) /* __nothrow */
 #ifdef __dead2
     __dead2
 #else
@@ -182,29 +169,20 @@ __extern_C void __assert_rtn(const char *function, const char *file, int line,
 #endif /* __disable_tail_calls */
     ;
 
-#define __assert_fail(assertion, file, line, function)                         \
-  __assert_rtn(function, file, line, assertion)
+#define __assert_fail(assertion, file, line, function) __assert_rtn(function, file, line, assertion)
 #elif defined(__sun) || defined(__SVR4) || defined(__svr4__)
-__extern_C void __assert_c99(const char *assection, const char *file, int line,
-                             const char *function) MDBX_NORETURN;
-#define __assert_fail(assertion, file, line, function)                         \
-  __assert_c99(assertion, file, line, function)
+MDBX_NORETURN __extern_C void __assert_c99(const char *assection, const char *file, int line, const char *function);
+#define __assert_fail(assertion, file, line, function) __assert_c99(assertion, file, line, function)
 #elif defined(__OpenBSD__)
-__extern_C __dead void __assert2(const char *file, int line,
-                                 const char *function,
+__extern_C __dead void __assert2(const char *file, int line, const char *function,
                                  const char *assertion) /* __nothrow */;
-#define __assert_fail(assertion, file, line, function)                         \
-  __assert2(file, line, function, assertion)
+#define __assert_fail(assertion, file, line, function) __assert2(file, line, function, assertion)
 #elif defined(__NetBSD__)
-__extern_C __dead void __assert13(const char *file, int line,
-                                  const char *function,
+__extern_C __dead void __assert13(const char *file, int line, const char *function,
                                   const char *assertion) /* __nothrow */;
-#define __assert_fail(assertion, file, line, function)                         \
-  __assert13(file, line, function, assertion)
-#elif defined(__FreeBSD__) || defined(__BSD__) || defined(__bsdi__) ||         \
-    defined(__DragonFly__)
-__extern_C void __assert(const char *function, const char *file, int line,
-                         const char *assertion) /* __nothrow */
+#define __assert_fail(assertion, file, line, function) __assert13(file, line, function, assertion)
+#elif defined(__FreeBSD__) || defined(__BSD__) || defined(__bsdi__) || defined(__DragonFly__)
+__extern_C void __assert(const char *function, const char *file, int line, const char *assertion) /* __nothrow */
 #ifdef __dead2
     __dead2
 #else
@@ -214,13 +192,11 @@ __extern_C void __assert(const char *function, const char *file, int line,
     __disable_tail_calls
 #endif /* __disable_tail_calls */
     ;
-#define __assert_fail(assertion, file, line, function)                         \
-  __assert(function, file, line, assertion)
+#define __assert_fail(assertion, file, line, function) __assert(function, file, line, assertion)
 
 #endif /* __assert_fail */
 
-__cold void mdbx_assert_fail(const MDBX_env *env, const char *msg,
-                             const char *func, unsigned line) {
+__cold void mdbx_assert_fail(const MDBX_env *env, const char *msg, const char *func, unsigned line) {
 #if MDBX_DEBUG
   if (env && env->assert_func)
     env->assert_func(env, msg, func, line);
@@ -229,8 +205,7 @@ __cold void mdbx_assert_fail(const MDBX_env *env, const char *msg,
   assert_fail(msg, func, line);
 }
 
-MDBX_NORETURN __cold void assert_fail(const char *msg, const char *func,
-                                      unsigned line) {
+MDBX_NORETURN __cold void assert_fail(const char *msg, const char *func, unsigned line) {
 #endif /* MDBX_DEBUG */
 
   if (globals.logger.ptr)
@@ -238,8 +213,7 @@ MDBX_NORETURN __cold void assert_fail(const char *msg, const char *func,
   else {
 #if defined(_WIN32) || defined(_WIN64)
     char *message = nullptr;
-    const int num = osal_asprintf(&message, "\r\nMDBX-ASSERTION: %s, %s:%u",
-                                  msg, func ? func : "unknown", line);
+    const int num = osal_asprintf(&message, "\r\nMDBX-ASSERTION: %s, %s:%u", msg, func ? func : "unknown", line);
     if (num < 1 || !message)
       message = "<troubles with assertion-message preparation>";
     OutputDebugStringA(message);
@@ -251,8 +225,7 @@ MDBX_NORETURN __cold void assert_fail(const char *msg, const char *func,
   while (1) {
 #if defined(_WIN32) || defined(_WIN64)
 #if !MDBX_WITHOUT_MSVC_CRT && defined(_DEBUG)
-    _CrtDbgReport(_CRT_ASSERT, func ? func : "unknown", line, "libmdbx",
-                  "assertion failed: %s", msg);
+    _CrtDbgReport(_CRT_ASSERT, func ? func : "unknown", line, "libmdbx", "assertion failed: %s", msg);
 #else
     if (IsDebuggerPresent())
       DebugBreak();
@@ -272,9 +245,7 @@ __cold void mdbx_panic(const char *fmt, ...) {
   const int num = osal_vasprintf(&message, fmt, ap);
   va_end(ap);
   const char *const const_message =
-      unlikely(num < 1 || !message)
-          ? "<troubles with panic-message preparation>"
-          : message;
+      unlikely(num < 1 || !message) ? "<troubles with panic-message preparation>" : message;
 
   if (globals.logger.ptr)
     debug_log(MDBX_LOG_FATAL, "panic", 0, "%s", const_message);
@@ -282,8 +253,7 @@ __cold void mdbx_panic(const char *fmt, ...) {
   while (1) {
 #if defined(_WIN32) || defined(_WIN64)
 #if !MDBX_WITHOUT_MSVC_CRT && defined(_DEBUG)
-    _CrtDbgReport(_CRT_ASSERT, "mdbx.c", 0, "libmdbx", "panic: %s",
-                  const_message);
+    _CrtDbgReport(_CRT_ASSERT, "mdbx.c", 0, "libmdbx", "panic: %s", const_message);
 #else
     OutputDebugStringA("\r\nMDBX-PANIC: ");
     OutputDebugStringA(const_message);
@@ -343,19 +313,16 @@ MDBX_INTERNAL int osal_asprintf(char **strp, const char *fmt, ...) {
 #endif /* osal_asprintf */
 
 #ifndef osal_memalign_alloc
-MDBX_INTERNAL int osal_memalign_alloc(size_t alignment, size_t bytes,
-                                      void **result) {
+MDBX_INTERNAL int osal_memalign_alloc(size_t alignment, size_t bytes, void **result) {
   assert(is_powerof2(alignment) && alignment >= sizeof(void *));
 #if defined(_WIN32) || defined(_WIN64)
   (void)alignment;
-  *result =
-      VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  *result = VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
   return *result ? MDBX_SUCCESS : MDBX_ENOMEM /* ERROR_OUTOFMEMORY */;
 #elif defined(_ISOC11_SOURCE)
   *result = aligned_alloc(alignment, ceil_powerof2(bytes, alignment));
   return *result ? MDBX_SUCCESS : errno;
-#elif _POSIX_VERSION >= 200112L &&                                             \
-    (!defined(__ANDROID_API__) || __ANDROID_API__ >= 17)
+#elif _POSIX_VERSION >= 200112L && (!defined(__ANDROID_API__) || __ANDROID_API__ >= 17)
   *result = nullptr;
   return posix_memalign(result, alignment, bytes);
 #elif __GLIBC_PREREQ(2, 16) || __STDC_VERSION__ >= 201112L
@@ -471,8 +438,7 @@ MDBX_INTERNAL int osal_condpair_signal(osal_condpair_t *condpair, bool part) {
 
 MDBX_INTERNAL int osal_condpair_wait(osal_condpair_t *condpair, bool part) {
 #if defined(_WIN32) || defined(_WIN64)
-  DWORD code = SignalObjectAndWait(condpair->mutex, condpair->event[part],
-                                   INFINITE, FALSE);
+  DWORD code = SignalObjectAndWait(condpair->mutex, condpair->event[part], INFINITE, FALSE);
   if (code == WAIT_OBJECT_0) {
     code = WaitForSingleObject(condpair->mutex, INFINITE);
     if (code == WAIT_OBJECT_0)
@@ -518,11 +484,9 @@ MDBX_INTERNAL int osal_fastmutex_acquire(osal_fastmutex_t *fastmutex) {
 #if defined(_WIN32) || defined(_WIN64)
   __try {
     EnterCriticalSection(fastmutex);
-  } __except (
-      (GetExceptionCode() ==
-       0xC0000194 /* STATUS_POSSIBLE_DEADLOCK / EXCEPTION_POSSIBLE_DEADLOCK */)
-          ? EXCEPTION_EXECUTE_HANDLER
-          : EXCEPTION_CONTINUE_SEARCH) {
+  } __except ((GetExceptionCode() == 0xC0000194 /* STATUS_POSSIBLE_DEADLOCK / EXCEPTION_POSSIBLE_DEADLOCK */)
+                  ? EXCEPTION_EXECUTE_HANDLER
+                  : EXCEPTION_CONTINUE_SEARCH) {
     return MDBX_EDEADLK;
   }
   return MDBX_SUCCESS;
@@ -545,8 +509,7 @@ MDBX_INTERNAL int osal_fastmutex_release(osal_fastmutex_t *fastmutex) {
 #if defined(_WIN32) || defined(_WIN64)
 
 MDBX_INTERNAL int osal_mb2w(const char *const src, wchar_t **const pdst) {
-  const size_t dst_wlen = MultiByteToWideChar(
-      CP_THREAD_ACP, MB_ERR_INVALID_CHARS, src, -1, nullptr, 0);
+  const size_t dst_wlen = MultiByteToWideChar(CP_THREAD_ACP, MB_ERR_INVALID_CHARS, src, -1, nullptr, 0);
   wchar_t *dst = *pdst;
   int rc = ERROR_INVALID_NAME;
   if (unlikely(dst_wlen < 2 || dst_wlen > /* MAX_PATH */ INT16_MAX))
@@ -558,9 +521,7 @@ MDBX_INTERNAL int osal_mb2w(const char *const src, wchar_t **const pdst) {
     goto bailout;
 
   *pdst = dst;
-  if (likely(dst_wlen == (size_t)MultiByteToWideChar(CP_THREAD_ACP,
-                                                     MB_ERR_INVALID_CHARS, src,
-                                                     -1, dst, (int)dst_wlen)))
+  if (likely(dst_wlen == (size_t)MultiByteToWideChar(CP_THREAD_ACP, MB_ERR_INVALID_CHARS, src, -1, dst, (int)dst_wlen)))
     return MDBX_SUCCESS;
 
   rc = ERROR_INVALID_NAME;
@@ -620,8 +581,7 @@ static size_t osal_iov_max;
 MDBX_INTERNAL int osal_ioring_create(osal_ioring_t *ior
 #if defined(_WIN32) || defined(_WIN64)
                                      ,
-                                     bool enable_direct,
-                                     mdbx_filehandle_t overlapped_fd
+                                     bool enable_direct, mdbx_filehandle_t overlapped_fd
 #endif /* Windows */
 ) {
   memset(ior, 0, sizeof(osal_ioring_t));
@@ -646,9 +606,8 @@ MDBX_INTERNAL int osal_ioring_create(osal_ioring_t *ior
 
 static inline size_t ior_offset(const ior_item_t *item) {
 #if defined(_WIN32) || defined(_WIN64)
-  return item->ov.Offset | (size_t)((sizeof(size_t) > sizeof(item->ov.Offset))
-                                        ? (uint64_t)item->ov.OffsetHigh << 32
-                                        : 0);
+  return item->ov.Offset |
+         (size_t)((sizeof(size_t) > sizeof(item->ov.Offset)) ? (uint64_t)item->ov.OffsetHigh << 32 : 0);
 #else
   return item->offset;
 #endif /* !Windows */
@@ -657,9 +616,7 @@ static inline size_t ior_offset(const ior_item_t *item) {
 static inline ior_item_t *ior_next(ior_item_t *item, size_t sgvcnt) {
 #if defined(ior_sgv_element)
   assert(sgvcnt > 0);
-  return (ior_item_t *)ptr_disp(item, sizeof(ior_item_t) -
-                                          sizeof(ior_sgv_element) +
-                                          sizeof(ior_sgv_element) * sgvcnt);
+  return (ior_item_t *)ptr_disp(item, sizeof(ior_item_t) - sizeof(ior_sgv_element) + sizeof(ior_sgv_element) * sgvcnt);
 #else
   assert(sgvcnt == 1);
   (void)sgvcnt;
@@ -667,17 +624,14 @@ static inline ior_item_t *ior_next(ior_item_t *item, size_t sgvcnt) {
 #endif
 }
 
-MDBX_INTERNAL int osal_ioring_add(osal_ioring_t *ior, const size_t offset,
-                                  void *data, const size_t bytes) {
+MDBX_INTERNAL int osal_ioring_add(osal_ioring_t *ior, const size_t offset, void *data, const size_t bytes) {
   assert(bytes && data);
   assert(bytes % MDBX_MIN_PAGESIZE == 0 && bytes <= MAX_WRITE);
-  assert(offset % MDBX_MIN_PAGESIZE == 0 &&
-         offset + (uint64_t)bytes <= MAX_MAPSIZE);
+  assert(offset % MDBX_MIN_PAGESIZE == 0 && offset + (uint64_t)bytes <= MAX_MAPSIZE);
 
 #if defined(_WIN32) || defined(_WIN64)
   const unsigned segments = (unsigned)(bytes >> ior->pagesize_ln2);
-  const bool use_gather =
-      ior->direct && ior->overlapped_fd && ior->slots_left >= segments;
+  const bool use_gather = ior->direct && ior->overlapped_fd && ior->slots_left >= segments;
 #endif /* Windows */
 
   ior_item_t *item = ior->pool;
@@ -687,8 +641,7 @@ MDBX_INTERNAL int osal_ioring_add(osal_ioring_t *ior, const size_t offset,
         likely(ior_last_bytes(ior, item) + bytes <= MAX_WRITE)) {
 #if defined(_WIN32) || defined(_WIN64)
       if (use_gather &&
-          ((bytes | (uintptr_t)data | ior->last_bytes |
-            (uintptr_t)(uint64_t)item->sgv[0].Buffer) &
+          ((bytes | (uintptr_t)data | ior->last_bytes | (uintptr_t)(uint64_t)item->sgv[0].Buffer) &
            ior_alignment_mask) == 0 &&
           ior->last_sgvcnt + (size_t)segments < OSAL_IOV_MAX) {
         assert(ior->overlapped_fd);
@@ -705,8 +658,7 @@ MDBX_INTERNAL int osal_ioring_add(osal_ioring_t *ior, const size_t offset,
         assert((item->single.iov_len & ior_WriteFile_flag) == 0);
         return MDBX_SUCCESS;
       }
-      const void *end = ptr_disp(item->single.iov_base,
-                                 item->single.iov_len - ior_WriteFile_flag);
+      const void *end = ptr_disp(item->single.iov_base, item->single.iov_len - ior_WriteFile_flag);
       if (unlikely(end == data)) {
         assert((item->single.iov_len & ior_WriteFile_flag) != 0);
         item->single.iov_len += bytes;
@@ -714,8 +666,7 @@ MDBX_INTERNAL int osal_ioring_add(osal_ioring_t *ior, const size_t offset,
       }
 #elif MDBX_HAVE_PWRITEV
       assert((int)item->sgvcnt > 0);
-      const void *end = ptr_disp(item->sgv[item->sgvcnt - 1].iov_base,
-                                 item->sgv[item->sgvcnt - 1].iov_len);
+      const void *end = ptr_disp(item->sgv[item->sgvcnt - 1].iov_base, item->sgv[item->sgvcnt - 1].iov_len);
       if (unlikely(end == data)) {
         item->sgv[item->sgvcnt - 1].iov_len += bytes;
         ior->last_bytes += bytes;
@@ -751,8 +702,7 @@ MDBX_INTERNAL int osal_ioring_add(osal_ioring_t *ior, const size_t offset,
   item->ov.Offset = (DWORD)offset;
   item->ov.OffsetHigh = HIGH_DWORD(offset);
   item->ov.hEvent = 0;
-  if (!use_gather || ((bytes | (uintptr_t)(data)) & ior_alignment_mask) != 0 ||
-      segments > OSAL_IOV_MAX) {
+  if (!use_gather || ((bytes | (uintptr_t)(data)) & ior_alignment_mask) != 0 || segments > OSAL_IOV_MAX) {
     /* WriteFile() */
     item->single.iov_base = data;
     item->single.iov_len = bytes + ior_WriteFile_flag;
@@ -787,9 +737,7 @@ MDBX_INTERNAL int osal_ioring_add(osal_ioring_t *ior, const size_t offset,
 }
 
 MDBX_INTERNAL void osal_ioring_walk(osal_ioring_t *ior, iov_ctx_t *ctx,
-                                    void (*callback)(iov_ctx_t *ctx,
-                                                     size_t offset, void *data,
-                                                     size_t bytes)) {
+                                    void (*callback)(iov_ctx_t *ctx, size_t offset, void *data, size_t bytes)) {
   for (ior_item_t *item = ior->pool; item <= ior->last;) {
 #if defined(_WIN32) || defined(_WIN64)
     size_t offset = ior_offset(item);
@@ -830,14 +778,12 @@ MDBX_INTERNAL void osal_ioring_walk(osal_ioring_t *ior, iov_ctx_t *ctx,
   }
 }
 
-MDBX_INTERNAL osal_ioring_write_result_t
-osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
+MDBX_INTERNAL osal_ioring_write_result_t osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
   osal_ioring_write_result_t r = {MDBX_SUCCESS, 0};
 
 #if defined(_WIN32) || defined(_WIN64)
-  HANDLE *const end_wait_for =
-      ior->event_pool + ior->allocated +
-      /* был выделен один дополнительный элемент для async_done */ 1;
+  HANDLE *const end_wait_for = ior->event_pool + ior->allocated +
+                               /* был выделен один дополнительный элемент для async_done */ 1;
   HANDLE *wait_for = end_wait_for;
   LONG async_started = 0;
   for (ior_item_t *item = ior->pool; item <= ior->last;) {
@@ -864,8 +810,7 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
         return r;
       }
       if (WriteFileGather(fd, item->sgv, (DWORD)bytes, nullptr, &item->ov)) {
-        assert(item->ov.Internal == 0 &&
-               WaitForSingleObject(item->ov.hEvent, 0) == WAIT_OBJECT_0);
+        assert(item->ov.Internal == 0 && WaitForSingleObject(item->ov.hEvent, 0) == WAIT_OBJECT_0);
         ior_put_event(ior, item->ov.hEvent);
         item->ov.hEvent = 0;
       } else {
@@ -874,9 +819,8 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
           void *data = Ptr64ToPtr(item->sgv[0].Buffer);
           ERROR("%s: fd %p, item %p (%zu), addr %p pgno %u, bytes %zu,"
                 " offset %" PRId64 ", err %d",
-                "WriteFileGather", fd, __Wpedantic_format_voidptr(item),
-                item - ior->pool, data, ((page_t *)data)->pgno, bytes,
-                item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32), r.err);
+                "WriteFileGather", fd, __Wpedantic_format_voidptr(item), item - ior->pool, data, ((page_t *)data)->pgno,
+                bytes, item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32), r.err);
           goto bailout_rc;
         }
         assert(wait_for > ior->event_pool + ior->event_stack);
@@ -886,8 +830,7 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
       assert(bytes < MAX_WRITE);
     retry:
       item->ov.hEvent = ior;
-      if (WriteFileEx(fd, item->single.iov_base, (DWORD)bytes, &item->ov,
-                      ior_wocr)) {
+      if (WriteFileEx(fd, item->single.iov_base, (DWORD)bytes, &item->ov, ior_wocr)) {
         async_started += 1;
       } else {
         r.err = (int)GetLastError();
@@ -895,21 +838,18 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
         default:
           ERROR("%s: fd %p, item %p (%zu), addr %p pgno %u, bytes %zu,"
                 " offset %" PRId64 ", err %d",
-                "WriteFileEx", fd, __Wpedantic_format_voidptr(item),
-                item - ior->pool, item->single.iov_base,
-                ((page_t *)item->single.iov_base)->pgno, bytes,
-                item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32), r.err);
+                "WriteFileEx", fd, __Wpedantic_format_voidptr(item), item - ior->pool, item->single.iov_base,
+                ((page_t *)item->single.iov_base)->pgno, bytes, item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32),
+                r.err);
           goto bailout_rc;
         case ERROR_NOT_FOUND:
         case ERROR_USER_MAPPED_FILE:
         case ERROR_LOCK_VIOLATION:
           WARNING("%s: fd %p, item %p (%zu), addr %p pgno %u, bytes %zu,"
                   " offset %" PRId64 ", err %d",
-                  "WriteFileEx", fd, __Wpedantic_format_voidptr(item),
-                  item - ior->pool, item->single.iov_base,
+                  "WriteFileEx", fd, __Wpedantic_format_voidptr(item), item - ior->pool, item->single.iov_base,
                   ((page_t *)item->single.iov_base)->pgno, bytes,
-                  item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32),
-                  r.err);
+                  item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32), r.err);
           SleepEx(0, true);
           goto retry;
         case ERROR_INVALID_USER_BUFFER:
@@ -924,15 +864,13 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
     } else {
       assert(bytes < MAX_WRITE);
       DWORD written = 0;
-      if (!WriteFile(fd, item->single.iov_base, (DWORD)bytes, &written,
-                     &item->ov)) {
+      if (!WriteFile(fd, item->single.iov_base, (DWORD)bytes, &written, &item->ov)) {
         r.err = (int)GetLastError();
         ERROR("%s: fd %p, item %p (%zu), addr %p pgno %u, bytes %zu,"
               " offset %" PRId64 ", err %d",
-              "WriteFile", fd, __Wpedantic_format_voidptr(item),
-              item - ior->pool, item->single.iov_base,
-              ((page_t *)item->single.iov_base)->pgno, bytes,
-              item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32), r.err);
+              "WriteFile", fd, __Wpedantic_format_voidptr(item), item - ior->pool, item->single.iov_base,
+              ((page_t *)item->single.iov_base)->pgno, bytes, item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32),
+              r.err);
         goto bailout_rc;
       } else if (unlikely(written != bytes)) {
         r.err = ERROR_WRITE_FAULT;
@@ -942,8 +880,7 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
     item = ior_next(item, i);
   }
 
-  assert(ior->async_waiting > ior->async_completed &&
-         ior->async_waiting == INT_MAX);
+  assert(ior->async_waiting > ior->async_completed && ior->async_waiting == INT_MAX);
   ior->async_waiting = async_started;
   if (async_started > ior->async_completed && end_wait_for == wait_for) {
     assert(wait_for > ior->event_pool + ior->event_stack);
@@ -960,18 +897,15 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
      * WaitForMultipleObjectsEx(), но тогда это проблемы на стороне M$. */
     DWORD madness;
     do
-      madness = WaitForMultipleObjectsEx((pending_count < MAXIMUM_WAIT_OBJECTS)
-                                             ? (DWORD)pending_count
-                                             : MAXIMUM_WAIT_OBJECTS,
-                                         wait_for, true,
-                                         /* сутки */ 86400000ul, true);
+      madness = WaitForMultipleObjectsEx(
+          (pending_count < MAXIMUM_WAIT_OBJECTS) ? (DWORD)pending_count : MAXIMUM_WAIT_OBJECTS, wait_for, true,
+          /* сутки */ 86400000ul, true);
     while (madness == WAIT_IO_COMPLETION);
     STATIC_ASSERT(WAIT_OBJECT_0 == 0);
     if (/* madness >= WAIT_OBJECT_0 && */
         madness < WAIT_OBJECT_0 + MAXIMUM_WAIT_OBJECTS)
       r.err = MDBX_SUCCESS;
-    else if (madness >= WAIT_ABANDONED_0 &&
-             madness < WAIT_ABANDONED_0 + MAXIMUM_WAIT_OBJECTS) {
+    else if (madness >= WAIT_ABANDONED_0 && madness < WAIT_ABANDONED_0 + MAXIMUM_WAIT_OBJECTS) {
       r.err = ERROR_ABANDONED_WAIT_0;
       goto bailout_rc;
     } else if (madness == WAIT_TIMEOUT) {
@@ -1000,9 +934,8 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
           if (unlikely(!GetOverlappedResult(fd, &item->ov, &written, true))) {
             ERROR("%s: item %p (%zu), addr %p pgno %u, bytes %zu,"
                   " offset %" PRId64 ", err %d",
-                  "GetOverlappedResult", __Wpedantic_format_voidptr(item),
-                  item - ior->pool, data, ((page_t *)data)->pgno, bytes,
-                  item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32),
+                  "GetOverlappedResult", __Wpedantic_format_voidptr(item), item - ior->pool, data,
+                  ((page_t *)data)->pgno, bytes, item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32),
                   (int)GetLastError());
             goto bailout_geterr;
           }
@@ -1016,15 +949,12 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
       if (unlikely(item->ov.Internal != MDBX_SUCCESS)) {
         DWORD written = 0;
         r.err = (int)item->ov.Internal;
-        if ((r.err & 0x80000000) &&
-            GetOverlappedResult(nullptr, &item->ov, &written, true))
+        if ((r.err & 0x80000000) && GetOverlappedResult(nullptr, &item->ov, &written, true))
           r.err = (int)GetLastError();
         ERROR("%s: item %p (%zu), addr %p pgno %u, bytes %zu,"
               " offset %" PRId64 ", err %d",
-              "Result", __Wpedantic_format_voidptr(item), item - ior->pool,
-              data, ((page_t *)data)->pgno, bytes,
-              item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32),
-              (int)GetLastError());
+              "Result", __Wpedantic_format_voidptr(item), item - ior->pool, data, ((page_t *)data)->pgno, bytes,
+              item->ov.Offset + ((uint64_t)item->ov.OffsetHigh << 32), (int)GetLastError());
         goto bailout_rc;
       }
       if (unlikely(item->ov.InternalHigh != bytes)) {
@@ -1040,14 +970,12 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
   assert(ior->async_waiting == ior->async_completed);
 
 #else
-  STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t),
-                    "libmdbx requires 64-bit file I/O on 64-bit systems");
+  STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t), "libmdbx requires 64-bit file I/O on 64-bit systems");
   for (ior_item_t *item = ior->pool; item <= ior->last;) {
 #if MDBX_HAVE_PWRITEV
     assert(item->sgvcnt > 0);
     if (item->sgvcnt == 1)
-      r.err = osal_pwrite(fd, item->sgv[0].iov_base, item->sgv[0].iov_len,
-                          item->offset);
+      r.err = osal_pwrite(fd, item->sgv[0].iov_base, item->sgv[0].iov_len, item->offset);
     else
       r.err = osal_pwritev(fd, item->sgv, item->sgvcnt, item->offset);
 
@@ -1055,8 +983,7 @@ osal_ioring_write(osal_ioring_t *ior, mdbx_filehandle_t fd) {
 
     item = ior_next(item, item->sgvcnt);
 #else
-    r.err = osal_pwrite(fd, item->single.iov_base, item->single.iov_len,
-                        item->offset);
+    r.err = osal_pwrite(fd, item->single.iov_base, item->single.iov_len, item->offset);
     item = ior_next(item, 1);
 #endif
     r.wops += 1;
@@ -1119,12 +1046,9 @@ MDBX_INTERNAL int osal_ioring_resize(osal_ioring_t *ior, size_t items) {
 #if defined(_WIN32) || defined(_WIN64)
   if (ior->state & IOR_STATE_LOCKED)
     return MDBX_SUCCESS;
-  const bool useSetFileIoOverlappedRange =
-      ior->overlapped_fd && imports.SetFileIoOverlappedRange && items > 42;
+  const bool useSetFileIoOverlappedRange = ior->overlapped_fd && imports.SetFileIoOverlappedRange && items > 42;
   const size_t ceiling =
-      useSetFileIoOverlappedRange
-          ? ((items < 65536 / 2 / sizeof(ior_item_t)) ? 65536 : 65536 * 4)
-          : 1024;
+      useSetFileIoOverlappedRange ? ((items < 65536 / 2 / sizeof(ior_item_t)) ? 65536 : 65536 * 4) : 1024;
   const size_t bytes = ceil_powerof2(sizeof(ior_item_t) * items, ceiling);
   items = bytes / sizeof(ior_item_t);
 #endif /* Windows */
@@ -1134,9 +1058,7 @@ MDBX_INTERNAL int osal_ioring_resize(osal_ioring_t *ior, size_t items) {
     if (items < ior->allocated)
       ior_cleanup(ior, items);
 #if defined(_WIN32) || defined(_WIN64)
-    void *ptr = osal_realloc(
-        ior->event_pool,
-        (items + /* extra for waiting the async_done */ 1) * sizeof(HANDLE));
+    void *ptr = osal_realloc(ior->event_pool, (items + /* extra for waiting the async_done */ 1) * sizeof(HANDLE));
     if (unlikely(!ptr))
       return MDBX_ENOMEM;
     ior->event_pool = ptr;
@@ -1156,14 +1078,12 @@ MDBX_INTERNAL int osal_ioring_resize(osal_ioring_t *ior, size_t items) {
     ior->pool = ptr;
 
     if (items > ior->allocated)
-      memset(ior->pool + ior->allocated, 0,
-             sizeof(ior_item_t) * (items - ior->allocated));
+      memset(ior->pool + ior->allocated, 0, sizeof(ior_item_t) * (items - ior->allocated));
     ior->allocated = (unsigned)items;
     ior->boundary = ptr_disp(ior->pool, ior->allocated);
 #if defined(_WIN32) || defined(_WIN64)
     if (useSetFileIoOverlappedRange) {
-      if (imports.SetFileIoOverlappedRange(ior->overlapped_fd, ptr,
-                                           (ULONG)bytes))
+      if (imports.SetFileIoOverlappedRange(ior->overlapped_fd, ptr, (ULONG)bytes))
         ior->state += IOR_STATE_LOCKED;
       else
         return GetLastError();
@@ -1215,9 +1135,7 @@ MDBX_INTERNAL int osal_fileexists(const pathchar_t *pathname) {
   if (GetFileAttributesW(pathname) != INVALID_FILE_ATTRIBUTES)
     return MDBX_RESULT_TRUE;
   int err = GetLastError();
-  return (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
-             ? MDBX_RESULT_FALSE
-             : err;
+  return (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) ? MDBX_RESULT_FALSE : err;
 #else
   if (access(pathname, F_OK) == 0)
     return MDBX_RESULT_TRUE;
@@ -1236,8 +1154,7 @@ MDBX_INTERNAL pathchar_t *osal_fileext(const pathchar_t *pathname, size_t len) {
   return (pathchar_t *)ext;
 }
 
-MDBX_INTERNAL bool osal_pathequal(const pathchar_t *l, const pathchar_t *r,
-                                  size_t len) {
+MDBX_INTERNAL bool osal_pathequal(const pathchar_t *l, const pathchar_t *r, size_t len) {
 #if defined(_WIN32) || defined(_WIN64)
   for (size_t i = 0; i < len; ++i) {
     pathchar_t a = l[i];
@@ -1253,19 +1170,15 @@ MDBX_INTERNAL bool osal_pathequal(const pathchar_t *l, const pathchar_t *r,
 #endif
 }
 
-MDBX_INTERNAL int osal_openfile(const enum osal_openfile_purpose purpose,
-                                const MDBX_env *env, const pathchar_t *pathname,
-                                mdbx_filehandle_t *fd,
-                                mdbx_mode_t unix_mode_bits) {
+MDBX_INTERNAL int osal_openfile(const enum osal_openfile_purpose purpose, const MDBX_env *env,
+                                const pathchar_t *pathname, mdbx_filehandle_t *fd, mdbx_mode_t unix_mode_bits) {
   *fd = INVALID_HANDLE_VALUE;
 
 #if defined(_WIN32) || defined(_WIN64)
   DWORD CreationDisposition = unix_mode_bits ? OPEN_ALWAYS : OPEN_EXISTING;
-  DWORD FlagsAndAttributes =
-      FILE_FLAG_POSIX_SEMANTICS | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+  DWORD FlagsAndAttributes = FILE_FLAG_POSIX_SEMANTICS | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
   DWORD DesiredAccess = FILE_READ_ATTRIBUTES;
-  DWORD ShareMode =
-      (env->flags & MDBX_EXCLUSIVE) ? 0 : (FILE_SHARE_READ | FILE_SHARE_WRITE);
+  DWORD ShareMode = (env->flags & MDBX_EXCLUSIVE) ? 0 : (FILE_SHARE_READ | FILE_SHARE_WRITE);
 
   switch (purpose) {
   default:
@@ -1306,18 +1219,15 @@ MDBX_INTERNAL int osal_openfile(const enum osal_openfile_purpose purpose,
   case MDBX_OPEN_DELETE:
     CreationDisposition = OPEN_EXISTING;
     ShareMode |= FILE_SHARE_DELETE;
-    DesiredAccess =
-        FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | DELETE | SYNCHRONIZE;
+    DesiredAccess = FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | DELETE | SYNCHRONIZE;
     break;
   }
 
-  *fd = CreateFileW(pathname, DesiredAccess, ShareMode, nullptr,
-                    CreationDisposition, FlagsAndAttributes, nullptr);
+  *fd = CreateFileW(pathname, DesiredAccess, ShareMode, nullptr, CreationDisposition, FlagsAndAttributes, nullptr);
   if (*fd == INVALID_HANDLE_VALUE) {
     int err = (int)GetLastError();
     if (err == ERROR_ACCESS_DENIED && purpose == MDBX_OPEN_LCK) {
-      if (GetFileAttributesW(pathname) == INVALID_FILE_ATTRIBUTES &&
-          GetLastError() == ERROR_FILE_NOT_FOUND)
+      if (GetFileAttributesW(pathname) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND)
         err = ERROR_FILE_NOT_FOUND;
     }
     return err;
@@ -1331,9 +1241,8 @@ MDBX_INTERNAL int osal_openfile(const enum osal_openfile_purpose purpose,
     return err;
   }
   const DWORD AttributesDiff =
-      (info.dwFileAttributes ^ FlagsAndAttributes) &
-      (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED |
-       FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_COMPRESSED);
+      (info.dwFileAttributes ^ FlagsAndAttributes) & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED |
+                                                      FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_COMPRESSED);
   if (AttributesDiff)
     (void)SetFileAttributesW(pathname, info.dwFileAttributes ^ AttributesDiff);
 
@@ -1369,8 +1278,7 @@ MDBX_INTERNAL int osal_openfile(const enum osal_openfile_purpose purpose,
     break;
   }
 
-  const bool direct_nocache_for_copy =
-      env->ps >= globals.sys_pagesize && purpose == MDBX_OPEN_COPY;
+  const bool direct_nocache_for_copy = env->ps >= globals.sys_pagesize && purpose == MDBX_OPEN_COPY;
   if (direct_nocache_for_copy) {
 #if defined(O_DIRECT)
     flags |= O_DIRECT;
@@ -1389,18 +1297,15 @@ MDBX_INTERNAL int osal_openfile(const enum osal_openfile_purpose purpose,
   int stub_fd0 = -1, stub_fd1 = -1, stub_fd2 = -1;
   static const char dev_null[] = "/dev/null";
   if (!is_valid_fd(STDIN_FILENO)) {
-    WARNING("STD%s_FILENO/%d is invalid, open %s for temporary stub", "IN",
-            STDIN_FILENO, dev_null);
+    WARNING("STD%s_FILENO/%d is invalid, open %s for temporary stub", "IN", STDIN_FILENO, dev_null);
     stub_fd0 = open(dev_null, O_RDONLY | O_NOCTTY);
   }
   if (!is_valid_fd(STDOUT_FILENO)) {
-    WARNING("STD%s_FILENO/%d is invalid, open %s for temporary stub", "OUT",
-            STDOUT_FILENO, dev_null);
+    WARNING("STD%s_FILENO/%d is invalid, open %s for temporary stub", "OUT", STDOUT_FILENO, dev_null);
     stub_fd1 = open(dev_null, O_WRONLY | O_NOCTTY);
   }
   if (!is_valid_fd(STDERR_FILENO)) {
-    WARNING("STD%s_FILENO/%d is invalid, open %s for temporary stub", "ERR",
-            STDERR_FILENO, dev_null);
+    WARNING("STD%s_FILENO/%d is invalid, open %s for temporary stub", "ERR", STDERR_FILENO, dev_null);
     stub_fd2 = open(dev_null, O_WRONLY | O_NOCTTY);
   }
 #else
@@ -1409,8 +1314,7 @@ MDBX_INTERNAL int osal_openfile(const enum osal_openfile_purpose purpose,
 
   *fd = open(pathname, flags, unix_mode_bits);
 #if defined(O_DIRECT)
-  if (*fd < 0 && (flags & O_DIRECT) &&
-      (errno == EINVAL || errno == EAFNOSUPPORT)) {
+  if (*fd < 0 && (flags & O_DIRECT) && (errno == EINVAL || errno == EAFNOSUPPORT)) {
     flags &= ~(O_DIRECT | O_EXCL);
     *fd = open(pathname, flags, unix_mode_bits);
   }
@@ -1425,20 +1329,17 @@ MDBX_INTERNAL int osal_openfile(const enum osal_openfile_purpose purpose,
   /* Safeguard for https://libmdbx.dqdkfa.ru/dead-github/issues/144 */
 #if STDIN_FILENO == 0 && STDOUT_FILENO == 1 && STDERR_FILENO == 2
   if (*fd == STDIN_FILENO) {
-    WARNING("Got STD%s_FILENO/%d, avoid using it by dup(fd)", "IN",
-            STDIN_FILENO);
+    WARNING("Got STD%s_FILENO/%d, avoid using it by dup(fd)", "IN", STDIN_FILENO);
     assert(stub_fd0 == -1);
     *fd = dup(stub_fd0 = *fd);
   }
   if (*fd == STDOUT_FILENO) {
-    WARNING("Got STD%s_FILENO/%d, avoid using it by dup(fd)", "OUT",
-            STDOUT_FILENO);
+    WARNING("Got STD%s_FILENO/%d, avoid using it by dup(fd)", "OUT", STDOUT_FILENO);
     assert(stub_fd1 == -1);
     *fd = dup(stub_fd1 = *fd);
   }
   if (*fd == STDERR_FILENO) {
-    WARNING("Got STD%s_FILENO/%d, avoid using it by dup(fd)", "ERR",
-            STDERR_FILENO);
+    WARNING("Got STD%s_FILENO/%d, avoid using it by dup(fd)", "ERR", STDERR_FILENO);
     assert(stub_fd2 == -1);
     *fd = dup(stub_fd2 = *fd);
   }
@@ -1487,8 +1388,7 @@ MDBX_INTERNAL int osal_closefile(mdbx_filehandle_t fd) {
 #endif
 }
 
-MDBX_INTERNAL int osal_pread(mdbx_filehandle_t fd, void *buf, size_t bytes,
-                             uint64_t offset) {
+MDBX_INTERNAL int osal_pread(mdbx_filehandle_t fd, void *buf, size_t bytes, uint64_t offset) {
   if (bytes > MAX_WRITE)
     return MDBX_EINVAL;
 #if defined(_WIN32) || defined(_WIN64)
@@ -1503,8 +1403,7 @@ MDBX_INTERNAL int osal_pread(mdbx_filehandle_t fd, void *buf, size_t bytes,
     return (rc == MDBX_SUCCESS) ? /* paranoia */ ERROR_READ_FAULT : rc;
   }
 #else
-  STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t),
-                    "libmdbx requires 64-bit file I/O on 64-bit systems");
+  STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t), "libmdbx requires 64-bit file I/O on 64-bit systems");
   intptr_t read = pread(fd, buf, bytes, offset);
   if (read < 0) {
     int rc = errno;
@@ -1514,8 +1413,7 @@ MDBX_INTERNAL int osal_pread(mdbx_filehandle_t fd, void *buf, size_t bytes,
   return (bytes == (size_t)read) ? MDBX_SUCCESS : MDBX_ENODATA;
 }
 
-MDBX_INTERNAL int osal_pwrite(mdbx_filehandle_t fd, const void *buf,
-                              size_t bytes, uint64_t offset) {
+MDBX_INTERNAL int osal_pwrite(mdbx_filehandle_t fd, const void *buf, size_t bytes, uint64_t offset) {
   while (true) {
 #if defined(_WIN32) || defined(_WIN64)
     OVERLAPPED ov;
@@ -1524,17 +1422,13 @@ MDBX_INTERNAL int osal_pwrite(mdbx_filehandle_t fd, const void *buf,
     ov.OffsetHigh = HIGH_DWORD(offset);
 
     DWORD written;
-    if (unlikely(!WriteFile(
-            fd, buf, likely(bytes <= MAX_WRITE) ? (DWORD)bytes : MAX_WRITE,
-            &written, &ov)))
+    if (unlikely(!WriteFile(fd, buf, likely(bytes <= MAX_WRITE) ? (DWORD)bytes : MAX_WRITE, &written, &ov)))
       return (int)GetLastError();
     if (likely(bytes == written))
       return MDBX_SUCCESS;
 #else
-    STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t),
-                      "libmdbx requires 64-bit file I/O on 64-bit systems");
-    const intptr_t written =
-        pwrite(fd, buf, likely(bytes <= MAX_WRITE) ? bytes : MAX_WRITE, offset);
+    STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t), "libmdbx requires 64-bit file I/O on 64-bit systems");
+    const intptr_t written = pwrite(fd, buf, likely(bytes <= MAX_WRITE) ? bytes : MAX_WRITE, offset);
     if (likely(bytes == (size_t)written))
       return MDBX_SUCCESS;
     if (written < 0) {
@@ -1550,22 +1444,17 @@ MDBX_INTERNAL int osal_pwrite(mdbx_filehandle_t fd, const void *buf,
   }
 }
 
-MDBX_INTERNAL int osal_write(mdbx_filehandle_t fd, const void *buf,
-                             size_t bytes) {
+MDBX_INTERNAL int osal_write(mdbx_filehandle_t fd, const void *buf, size_t bytes) {
   while (true) {
 #if defined(_WIN32) || defined(_WIN64)
     DWORD written;
-    if (unlikely(!WriteFile(
-            fd, buf, likely(bytes <= MAX_WRITE) ? (DWORD)bytes : MAX_WRITE,
-            &written, nullptr)))
+    if (unlikely(!WriteFile(fd, buf, likely(bytes <= MAX_WRITE) ? (DWORD)bytes : MAX_WRITE, &written, nullptr)))
       return (int)GetLastError();
     if (likely(bytes == written))
       return MDBX_SUCCESS;
 #else
-    STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t),
-                      "libmdbx requires 64-bit file I/O on 64-bit systems");
-    const intptr_t written =
-        write(fd, buf, likely(bytes <= MAX_WRITE) ? bytes : MAX_WRITE);
+    STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t), "libmdbx requires 64-bit file I/O on 64-bit systems");
+    const intptr_t written = write(fd, buf, likely(bytes <= MAX_WRITE) ? bytes : MAX_WRITE);
     if (likely(bytes == (size_t)written))
       return MDBX_SUCCESS;
     if (written < 0) {
@@ -1580,8 +1469,7 @@ MDBX_INTERNAL int osal_write(mdbx_filehandle_t fd, const void *buf,
   }
 }
 
-int osal_pwritev(mdbx_filehandle_t fd, struct iovec *iov, size_t sgvcnt,
-                 uint64_t offset) {
+int osal_pwritev(mdbx_filehandle_t fd, struct iovec *iov, size_t sgvcnt, uint64_t offset) {
   size_t expected = 0;
   for (size_t i = 0; i < sgvcnt; ++i)
     expected += iov[i].iov_len;
@@ -1594,14 +1482,12 @@ int osal_pwritev(mdbx_filehandle_t fd, struct iovec *iov, size_t sgvcnt,
     written += iov[i].iov_len;
     offset += iov[i].iov_len;
   }
-  return (expected == written) ? MDBX_SUCCESS
-                               : MDBX_EIO /* ERROR_WRITE_FAULT */;
+  return (expected == written) ? MDBX_SUCCESS : MDBX_EIO /* ERROR_WRITE_FAULT */;
 #else
   int rc;
   intptr_t written;
   do {
-    STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t),
-                      "libmdbx requires 64-bit file I/O on 64-bit systems");
+    STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t), "libmdbx requires 64-bit file I/O on 64-bit systems");
     written = pwritev(fd, iov, sgvcnt, offset);
     if (likely(expected == (size_t)written))
       return MDBX_SUCCESS;
@@ -1611,16 +1497,14 @@ int osal_pwritev(mdbx_filehandle_t fd, struct iovec *iov, size_t sgvcnt,
 #endif
 }
 
-MDBX_INTERNAL int osal_fsync(mdbx_filehandle_t fd,
-                             enum osal_syncmode_bits mode_bits) {
+MDBX_INTERNAL int osal_fsync(mdbx_filehandle_t fd, enum osal_syncmode_bits mode_bits) {
 #if defined(_WIN32) || defined(_WIN64)
   if ((mode_bits & (MDBX_SYNC_DATA | MDBX_SYNC_IODQ)) && !FlushFileBuffers(fd))
     return (int)GetLastError();
   return MDBX_SUCCESS;
 #else
 
-#if defined(__APPLE__) &&                                                      \
-    MDBX_OSX_SPEED_INSTEADOF_DURABILITY == MDBX_OSX_WANNA_DURABILITY
+#if defined(__APPLE__) && MDBX_APPLE_SPEED_INSTEADOF_DURABILITY == MDBX_OSX_WANNA_DURABILITY
   if (mode_bits & MDBX_SYNC_IODQ)
     return likely(fcntl(fd, F_FULLFSYNC) != -1) ? MDBX_SUCCESS : errno;
 #endif /* MacOS */
@@ -1667,8 +1551,7 @@ int osal_filesize(mdbx_filehandle_t fd, uint64_t *length) {
 #else
   struct stat st;
 
-  STATIC_ASSERT_MSG(sizeof(off_t) <= sizeof(uint64_t),
-                    "libmdbx requires 64-bit file I/O on 64-bit systems");
+  STATIC_ASSERT_MSG(sizeof(off_t) <= sizeof(uint64_t), "libmdbx requires 64-bit file I/O on 64-bit systems");
   if (fstat(fd, &st))
     return errno;
 
@@ -1713,21 +1596,16 @@ MDBX_INTERNAL int osal_ftruncate(mdbx_filehandle_t fd, uint64_t length) {
   if (imports.SetFileInformationByHandle) {
     FILE_END_OF_FILE_INFO EndOfFileInfo;
     EndOfFileInfo.EndOfFile.QuadPart = length;
-    return imports.SetFileInformationByHandle(fd, FileEndOfFileInfo,
-                                              &EndOfFileInfo,
-                                              sizeof(FILE_END_OF_FILE_INFO))
+    return imports.SetFileInformationByHandle(fd, FileEndOfFileInfo, &EndOfFileInfo, sizeof(FILE_END_OF_FILE_INFO))
                ? MDBX_SUCCESS
                : (int)GetLastError();
   } else {
     LARGE_INTEGER li;
     li.QuadPart = length;
-    return (SetFilePointerEx(fd, li, nullptr, FILE_BEGIN) && SetEndOfFile(fd))
-               ? MDBX_SUCCESS
-               : (int)GetLastError();
+    return (SetFilePointerEx(fd, li, nullptr, FILE_BEGIN) && SetEndOfFile(fd)) ? MDBX_SUCCESS : (int)GetLastError();
   }
 #else
-  STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t),
-                    "libmdbx requires 64-bit file I/O on 64-bit systems");
+  STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t), "libmdbx requires 64-bit file I/O on 64-bit systems");
   return ftruncate(fd, length) == 0 ? MDBX_SUCCESS : errno;
 #endif
 }
@@ -1736,21 +1614,17 @@ MDBX_INTERNAL int osal_fseek(mdbx_filehandle_t fd, uint64_t pos) {
 #if defined(_WIN32) || defined(_WIN64)
   LARGE_INTEGER li;
   li.QuadPart = pos;
-  return SetFilePointerEx(fd, li, nullptr, FILE_BEGIN) ? MDBX_SUCCESS
-                                                       : (int)GetLastError();
+  return SetFilePointerEx(fd, li, nullptr, FILE_BEGIN) ? MDBX_SUCCESS : (int)GetLastError();
 #else
-  STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t),
-                    "libmdbx requires 64-bit file I/O on 64-bit systems");
+  STATIC_ASSERT_MSG(sizeof(off_t) >= sizeof(size_t), "libmdbx requires 64-bit file I/O on 64-bit systems");
   return (lseek(fd, pos, SEEK_SET) < 0) ? errno : MDBX_SUCCESS;
 #endif
 }
 
 /*----------------------------------------------------------------------------*/
 
-MDBX_INTERNAL int
-osal_thread_create(osal_thread_t *thread,
-                   THREAD_RESULT(THREAD_CALL *start_routine)(void *),
-                   void *arg) {
+MDBX_INTERNAL int osal_thread_create(osal_thread_t *thread, THREAD_RESULT(THREAD_CALL *start_routine)(void *),
+                                     void *arg) {
 #if defined(_WIN32) || defined(_WIN64)
   *thread = CreateThread(nullptr, 0, start_routine, arg, 0, nullptr);
   return *thread ? MDBX_SUCCESS : (int)GetLastError();
@@ -1771,17 +1645,15 @@ MDBX_INTERNAL int osal_thread_join(osal_thread_t thread) {
 
 /*----------------------------------------------------------------------------*/
 
-MDBX_INTERNAL int osal_msync(const osal_mmap_t *map, size_t offset,
-                             size_t length, enum osal_syncmode_bits mode_bits) {
-  if (!MDBX_MMAP_USE_MS_ASYNC && mode_bits == MDBX_SYNC_NONE)
+MDBX_INTERNAL int osal_msync(const osal_mmap_t *map, size_t offset, size_t length, enum osal_syncmode_bits mode_bits) {
+  if (!MDBX_MMAP_NEEDS_JOLT && mode_bits == MDBX_SYNC_NONE)
     return MDBX_SUCCESS;
 
   void *ptr = ptr_disp(map->base, offset);
 #if defined(_WIN32) || defined(_WIN64)
   if (!FlushViewOfFile(ptr, length))
     return (int)GetLastError();
-  if ((mode_bits & (MDBX_SYNC_DATA | MDBX_SYNC_IODQ)) &&
-      !FlushFileBuffers(map->fd))
+  if ((mode_bits & (MDBX_SYNC_DATA | MDBX_SYNC_IODQ)) && !FlushFileBuffers(map->fd))
     return (int)GetLastError();
 #else
 #if defined(__linux__) || defined(__gnu_linux__)
@@ -1790,7 +1662,7 @@ MDBX_INTERNAL int osal_msync(const osal_mmap_t *map, size_t offset,
   //
   // However, this behavior may be changed in custom kernels,
   // so just leave such optimization to the libc discretion.
-  // NOTE: The MDBX_MMAP_USE_MS_ASYNC must be defined to 1 for such cases.
+  // NOTE: The MDBX_MMAP_NEEDS_JOLT must be defined to 1 for such cases.
   //
   // assert(mdbx.linux_kernel_version > 0x02061300);
   // if (mode_bits <= MDBX_SYNC_KICK)
@@ -1804,16 +1676,14 @@ MDBX_INTERNAL int osal_msync(const osal_mmap_t *map, size_t offset,
   return MDBX_SUCCESS;
 }
 
-MDBX_INTERNAL int osal_check_fs_rdonly(mdbx_filehandle_t handle,
-                                       const pathchar_t *pathname, int err) {
+MDBX_INTERNAL int osal_check_fs_rdonly(mdbx_filehandle_t handle, const pathchar_t *pathname, int err) {
 #if defined(_WIN32) || defined(_WIN64)
   (void)pathname;
   (void)err;
   if (!imports.GetVolumeInformationByHandleW)
     return MDBX_ENOSYS;
   DWORD unused, flags;
-  if (!imports.GetVolumeInformationByHandleW(handle, nullptr, 0, nullptr,
-                                             &unused, &flags, nullptr, 0))
+  if (!imports.GetVolumeInformationByHandleW(handle, nullptr, 0, nullptr, &unused, &flags, nullptr, 0))
     return (int)GetLastError();
   if ((flags & FILE_READ_ONLY_VOLUME) == 0)
     return MDBX_EACCESS;
@@ -1855,9 +1725,8 @@ MDBX_INTERNAL int osal_check_fs_incore(mdbx_filehandle_t handle) {
     return MDBX_RESULT_TRUE;
   }
 
-#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) ||     \
-    defined(__BSD__) || defined(__bsdi__) || defined(__DragonFly__) ||         \
-    defined(__APPLE__) || defined(__MACH__) || defined(MFSNAMELEN) ||          \
+#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__BSD__) || defined(__bsdi__) ||    \
+    defined(__DragonFly__) || defined(__APPLE__) || defined(__MACH__) || defined(MFSNAMELEN) ||                        \
     defined(MFSTYPENAMELEN) || defined(VFS_NAMELEN)
   const char *const name = statfs_info.f_fstypename;
   const size_t name_len = sizeof(statfs_info.f_fstypename);
@@ -1866,9 +1735,7 @@ MDBX_INTERNAL int osal_check_fs_incore(mdbx_filehandle_t handle) {
   const size_t name_len = 0;
 #endif
   if (name_len) {
-    if (strncasecmp("tmpfs", name, 6) == 0 ||
-        strncasecmp("mfs", name, 4) == 0 ||
-        strncasecmp("ramfs", name, 6) == 0 ||
+    if (strncasecmp("tmpfs", name, 6) == 0 || strncasecmp("mfs", name, 4) == 0 || strncasecmp("ramfs", name, 6) == 0 ||
         strncasecmp("romfs", name, 6) == 0)
       return MDBX_RESULT_TRUE;
   }
@@ -1887,14 +1754,11 @@ static int osal_check_fs_local(mdbx_filehandle_t handle, int flags) {
 
   if (imports.GetFileInformationByHandleEx) {
     FILE_REMOTE_PROTOCOL_INFO RemoteProtocolInfo;
-    if (imports.GetFileInformationByHandleEx(handle, FileRemoteProtocolInfo,
-                                             &RemoteProtocolInfo,
+    if (imports.GetFileInformationByHandleEx(handle, FileRemoteProtocolInfo, &RemoteProtocolInfo,
                                              sizeof(RemoteProtocolInfo))) {
-      if ((RemoteProtocolInfo.Flags & REMOTE_PROTOCOL_INFO_FLAG_OFFLINE) &&
-          !(flags & MDBX_RDONLY))
+      if ((RemoteProtocolInfo.Flags & REMOTE_PROTOCOL_INFO_FLAG_OFFLINE) && !(flags & MDBX_RDONLY))
         return ERROR_FILE_OFFLINE;
-      if (!(RemoteProtocolInfo.Flags & REMOTE_PROTOCOL_INFO_FLAG_LOOPBACK) &&
-          !(flags & MDBX_EXCLUSIVE))
+      if (!(RemoteProtocolInfo.Flags & REMOTE_PROTOCOL_INFO_FLAG_LOOPBACK) && !(flags & MDBX_EXCLUSIVE))
         return ERROR_REMOTE_STORAGE_MEDIA_ERROR;
     }
   }
@@ -1910,46 +1774,37 @@ static int osal_check_fs_local(mdbx_filehandle_t handle, int flags) {
       size_t reserved_for_microsoft_madness[42];
     } GetExternalBacking_OutputBuffer;
     IO_STATUS_BLOCK StatusBlock;
-    rc = imports.NtFsControlFile(handle, nullptr, nullptr, nullptr,
-                                 &StatusBlock, FSCTL_GET_EXTERNAL_BACKING,
-                                 nullptr, 0, &GetExternalBacking_OutputBuffer,
-                                 sizeof(GetExternalBacking_OutputBuffer));
+    rc = imports.NtFsControlFile(handle, nullptr, nullptr, nullptr, &StatusBlock, FSCTL_GET_EXTERNAL_BACKING, nullptr,
+                                 0, &GetExternalBacking_OutputBuffer, sizeof(GetExternalBacking_OutputBuffer));
     if (NT_SUCCESS(rc)) {
       if (!(flags & MDBX_EXCLUSIVE))
         return ERROR_REMOTE_STORAGE_MEDIA_ERROR;
-    } else if (rc != STATUS_OBJECT_NOT_EXTERNALLY_BACKED &&
-               rc != STATUS_INVALID_DEVICE_REQUEST &&
+    } else if (rc != STATUS_OBJECT_NOT_EXTERNALLY_BACKED && rc != STATUS_INVALID_DEVICE_REQUEST &&
                rc != STATUS_NOT_SUPPORTED)
       return ntstatus2errcode(rc);
   }
 
-  if (imports.GetVolumeInformationByHandleW &&
-      imports.GetFinalPathNameByHandleW) {
+  if (imports.GetVolumeInformationByHandleW && imports.GetFinalPathNameByHandleW) {
     WCHAR *PathBuffer = osal_malloc(sizeof(WCHAR) * INT16_MAX);
     if (!PathBuffer)
       return MDBX_ENOMEM;
 
     int rc = MDBX_SUCCESS;
     DWORD VolumeSerialNumber, FileSystemFlags;
-    if (!imports.GetVolumeInformationByHandleW(handle, PathBuffer, INT16_MAX,
-                                               &VolumeSerialNumber, nullptr,
+    if (!imports.GetVolumeInformationByHandleW(handle, PathBuffer, INT16_MAX, &VolumeSerialNumber, nullptr,
                                                &FileSystemFlags, nullptr, 0)) {
       rc = (int)GetLastError();
       goto bailout;
     }
 
     if ((flags & MDBX_RDONLY) == 0) {
-      if (FileSystemFlags &
-          (FILE_SEQUENTIAL_WRITE_ONCE | FILE_READ_ONLY_VOLUME |
-           FILE_VOLUME_IS_COMPRESSED)) {
+      if (FileSystemFlags & (FILE_SEQUENTIAL_WRITE_ONCE | FILE_READ_ONLY_VOLUME | FILE_VOLUME_IS_COMPRESSED)) {
         rc = ERROR_REMOTE_STORAGE_MEDIA_ERROR;
         goto bailout;
       }
     }
 
-    if (imports.GetFinalPathNameByHandleW(handle, PathBuffer, INT16_MAX,
-                                          FILE_NAME_NORMALIZED |
-                                              VOLUME_NAME_NT)) {
+    if (imports.GetFinalPathNameByHandleW(handle, PathBuffer, INT16_MAX, FILE_NAME_NORMALIZED | VOLUME_NAME_NT)) {
       if (_wcsnicmp(PathBuffer, L"\\Device\\Mup\\", 12) == 0) {
         if (!(flags & MDBX_EXCLUSIVE)) {
           rc = ERROR_REMOTE_STORAGE_MEDIA_ERROR;
@@ -1958,18 +1813,14 @@ static int osal_check_fs_local(mdbx_filehandle_t handle, int flags) {
       }
     }
 
-    if (F_ISSET(flags, MDBX_RDONLY | MDBX_EXCLUSIVE) &&
-        (FileSystemFlags & FILE_READ_ONLY_VOLUME)) {
+    if (F_ISSET(flags, MDBX_RDONLY | MDBX_EXCLUSIVE) && (FileSystemFlags & FILE_READ_ONLY_VOLUME)) {
       /* without-LCK (exclusive readonly) mode for DB on a read-only volume */
       goto bailout;
     }
 
-    if (imports.GetFinalPathNameByHandleW(handle, PathBuffer, INT16_MAX,
-                                          FILE_NAME_NORMALIZED |
-                                              VOLUME_NAME_DOS)) {
+    if (imports.GetFinalPathNameByHandleW(handle, PathBuffer, INT16_MAX, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)) {
       UINT DriveType = GetDriveTypeW(PathBuffer);
-      if (DriveType == DRIVE_NO_ROOT_DIR &&
-          _wcsnicmp(PathBuffer, L"\\\\?\\", 4) == 0 &&
+      if (DriveType == DRIVE_NO_ROOT_DIR && _wcsnicmp(PathBuffer, L"\\\\?\\", 4) == 0 &&
           _wcsnicmp(PathBuffer + 5, L":\\", 2) == 0) {
         PathBuffer[7] = 0;
         DriveType = GetDriveTypeW(PathBuffer + 4);
@@ -2024,8 +1875,7 @@ static int osal_check_fs_local(mdbx_filehandle_t handle, int flags) {
   const unsigned type = 0;
   const char *const name = statvfs_info.f_basetype;
   const size_t name_len = sizeof(statvfs_info.f_basetype);
-#elif defined(__sun) || defined(__SVR4) || defined(__svr4__) ||                \
-    defined(ST_FSTYPSZ) || defined(_ST_FSTYPSZ)
+#elif defined(__sun) || defined(__SVR4) || defined(__svr4__) || defined(ST_FSTYPSZ) || defined(_ST_FSTYPSZ)
   const unsigned type = 0;
   struct stat st;
   if (fstat(handle, &st))
@@ -2044,9 +1894,8 @@ static int osal_check_fs_local(mdbx_filehandle_t handle, int flags) {
 #if defined(MNT_LOCAL) || defined(MNT_EXPORTED)
   const unsigned long mnt_flags = statfs_info.f_flags;
 #endif /* MNT_LOCAL || MNT_EXPORTED */
-#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) ||     \
-    defined(__BSD__) || defined(__bsdi__) || defined(__DragonFly__) ||         \
-    defined(__APPLE__) || defined(__MACH__) || defined(MFSNAMELEN) ||          \
+#if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__BSD__) || defined(__bsdi__) ||    \
+    defined(__DragonFly__) || defined(__APPLE__) || defined(__MACH__) || defined(MFSNAMELEN) ||                        \
     defined(MFSTYPENAMELEN) || defined(VFS_NAMELEN)
   const char *const name = statfs_info.f_fstypename;
   const size_t name_len = sizeof(statfs_info.f_fstypename);
@@ -2071,12 +1920,11 @@ static int osal_check_fs_local(mdbx_filehandle_t handle, int flags) {
     mounted = setmntent("/etc/mtab", "r");
   if (mounted) {
     const struct mntent *ent;
-#if defined(_BSD_SOURCE) || defined(_SVID_SOURCE) || defined(__BIONIC__) ||    \
+#if defined(_BSD_SOURCE) || defined(_SVID_SOURCE) || defined(__BIONIC__) ||                                            \
     (defined(_DEFAULT_SOURCE) && __GLIBC_PREREQ(2, 19))
     struct mntent entbuf;
     const bool should_copy = false;
-    while (nullptr !=
-           (ent = getmntent_r(mounted, &entbuf, pathbuf, sizeof(pathbuf))))
+    while (nullptr != (ent = getmntent_r(mounted, &entbuf, pathbuf, sizeof(pathbuf))))
 #else
     const bool should_copy = true;
     while (nullptr != (ent = getmntent(mounted)))
@@ -2085,8 +1933,7 @@ static int osal_check_fs_local(mdbx_filehandle_t handle, int flags) {
       struct stat mnt;
       if (!stat(ent->mnt_dir, &mnt) && mnt.st_dev == st.st_dev) {
         if (should_copy) {
-          name =
-              strncpy(pathbuf, ent->mnt_fsname, name_len = sizeof(pathbuf) - 1);
+          name = strncpy(pathbuf, ent->mnt_fsname, name_len = sizeof(pathbuf) - 1);
           pathbuf[name_len] = 0;
         } else {
           name = ent->mnt_fsname;
@@ -2101,17 +1948,13 @@ static int osal_check_fs_local(mdbx_filehandle_t handle, int flags) {
 #endif
 
   if (name_len) {
-    if (((name_len > 2 && strncasecmp("nfs", name, 3) == 0) ||
-         strncasecmp("cifs", name, name_len) == 0 ||
-         strncasecmp("ncpfs", name, name_len) == 0 ||
-         strncasecmp("smbfs", name, name_len) == 0 ||
+    if (((name_len > 2 && strncasecmp("nfs", name, 3) == 0) || strncasecmp("cifs", name, name_len) == 0 ||
+         strncasecmp("ncpfs", name, name_len) == 0 || strncasecmp("smbfs", name, name_len) == 0 ||
          strcasecmp("9P" /* WSL2 */, name) == 0 ||
-         ((name_len > 3 && strncasecmp("fuse", name, 4) == 0) &&
-          strncasecmp("fuseblk", name, name_len) != 0)) &&
+         ((name_len > 3 && strncasecmp("fuse", name, 4) == 0) && strncasecmp("fuseblk", name, name_len) != 0)) &&
         !(flags & MDBX_EXCLUSIVE))
       return MDBX_EREMOTE;
-    if (strcasecmp("ftp", name) == 0 || strcasecmp("http", name) == 0 ||
-        strcasecmp("sshfs", name) == 0)
+    if (strcasecmp("ftp", name) == 0 || strcasecmp("http", name) == 0 || strcasecmp("sshfs", name) == 0)
       return MDBX_EREMOTE;
   }
 
@@ -2163,18 +2006,15 @@ static int check_mmap_limit(const size_t limit) {
 
   if (should_check) {
     intptr_t pagesize, total_ram_pages, avail_ram_pages;
-    int err =
-        mdbx_get_sysraminfo(&pagesize, &total_ram_pages, &avail_ram_pages);
+    int err = mdbx_get_sysraminfo(&pagesize, &total_ram_pages, &avail_ram_pages);
     if (unlikely(err != MDBX_SUCCESS))
       return err;
 
     const int log2page = log2n_powerof2(pagesize);
-    if ((limit >> (log2page + 7)) > (size_t)total_ram_pages ||
-        (limit >> (log2page + 6)) > (size_t)avail_ram_pages) {
+    if ((limit >> (log2page + 7)) > (size_t)total_ram_pages || (limit >> (log2page + 6)) > (size_t)avail_ram_pages) {
       ERROR("%s (%zu pages) is too large for available (%zu pages) or total "
             "(%zu pages) system RAM",
-            "database upper size limit", limit >> log2page, avail_ram_pages,
-            total_ram_pages);
+            "database upper size limit", limit >> log2page, avail_ram_pages, total_ram_pages);
       return MDBX_TOO_LARGE;
     }
   }
@@ -2182,8 +2022,8 @@ static int check_mmap_limit(const size_t limit) {
   return MDBX_SUCCESS;
 }
 
-MDBX_INTERNAL int osal_mmap(const int flags, osal_mmap_t *map, size_t size,
-                            const size_t limit, const unsigned options) {
+MDBX_INTERNAL int osal_mmap(const int flags, osal_mmap_t *map, size_t size, const size_t limit,
+                            const unsigned options) {
   assert(size <= limit);
   map->limit = 0;
   map->current = 0;
@@ -2217,8 +2057,7 @@ MDBX_INTERNAL int osal_mmap(const int flags, osal_mmap_t *map, size_t size,
       return err;
 #if defined(_WIN32) || defined(_WIN64)
     if (map->filesize < size) {
-      WARNING("file size (%zu) less than requested for mapping (%zu)",
-              (size_t)map->filesize, size);
+      WARNING("file size (%zu) less than requested for mapping (%zu)", (size_t)map->filesize, size);
       size = (size_t)map->filesize;
     }
 #else
@@ -2232,10 +2071,8 @@ MDBX_INTERNAL int osal_mmap(const int flags, osal_mmap_t *map, size_t size,
   err = NtCreateSection(&map->section,
                         /* DesiredAccess */
                         (flags & MDBX_WRITEMAP)
-                            ? SECTION_QUERY | SECTION_MAP_READ |
-                                  SECTION_EXTEND_SIZE | SECTION_MAP_WRITE
-                            : SECTION_QUERY | SECTION_MAP_READ |
-                                  SECTION_EXTEND_SIZE,
+                            ? SECTION_QUERY | SECTION_MAP_READ | SECTION_EXTEND_SIZE | SECTION_MAP_WRITE
+                            : SECTION_QUERY | SECTION_MAP_READ | SECTION_EXTEND_SIZE,
                         /* ObjectAttributes */ nullptr,
                         /* MaximumSize (InitialSize) */ &SectionSize,
                         /* SectionPageProtection */
@@ -2244,18 +2081,15 @@ MDBX_INTERNAL int osal_mmap(const int flags, osal_mmap_t *map, size_t size,
   if (!NT_SUCCESS(err))
     return ntstatus2errcode(err);
 
-  SIZE_T ViewSize = (flags & MDBX_RDONLY)        ? 0
-                    : globals.running_under_Wine ? size
-                                                 : limit;
-  err = NtMapViewOfSection(
-      map->section, GetCurrentProcess(), &map->base,
-      /* ZeroBits */ 0,
-      /* CommitSize */ 0,
-      /* SectionOffset */ nullptr, &ViewSize,
-      /* InheritDisposition */ ViewUnmap,
-      /* AllocationType */ (flags & MDBX_RDONLY) ? 0 : MEM_RESERVE,
-      /* Win32Protect */
-      (flags & MDBX_WRITEMAP) ? PAGE_READWRITE : PAGE_READONLY);
+  SIZE_T ViewSize = (flags & MDBX_RDONLY) ? 0 : globals.running_under_Wine ? size : limit;
+  err = NtMapViewOfSection(map->section, GetCurrentProcess(), &map->base,
+                           /* ZeroBits */ 0,
+                           /* CommitSize */ 0,
+                           /* SectionOffset */ nullptr, &ViewSize,
+                           /* InheritDisposition */ ViewUnmap,
+                           /* AllocationType */ (flags & MDBX_RDONLY) ? 0 : MEM_RESERVE,
+                           /* Win32Protect */
+                           (flags & MDBX_WRITEMAP) ? PAGE_READWRITE : PAGE_READONLY);
   if (!NT_SUCCESS(err)) {
     NtClose(map->section);
     map->section = 0;
@@ -2293,13 +2127,9 @@ MDBX_INTERNAL int osal_mmap(const int flags, osal_mmap_t *map, size_t size,
 #define MAP_NORESERVE 0
 #endif
 
-  map->base = mmap(nullptr, limit,
-                   (flags & MDBX_WRITEMAP) ? PROT_READ | PROT_WRITE : PROT_READ,
-                   MAP_SHARED | MAP_FILE | MAP_NORESERVE |
-                       (F_ISSET(flags, MDBX_UTTERLY_NOSYNC) ? MAP_NOSYNC : 0) |
-                       ((options & MMAP_OPTION_SEMAPHORE)
-                            ? MAP_HASSEMAPHORE | MAP_NOSYNC
-                            : MAP_CONCEAL),
+  map->base = mmap(nullptr, limit, (flags & MDBX_WRITEMAP) ? PROT_READ | PROT_WRITE : PROT_READ,
+                   MAP_SHARED | MAP_FILE | MAP_NORESERVE | (F_ISSET(flags, MDBX_UTTERLY_NOSYNC) ? MAP_NOSYNC : 0) |
+                       ((options & MMAP_OPTION_SEMAPHORE) ? MAP_HASSEMAPHORE | MAP_NOSYNC : MAP_CONCEAL),
                    map->fd, 0);
 
   if (unlikely(map->base == MAP_FAILED)) {
@@ -2311,7 +2141,6 @@ MDBX_INTERNAL int osal_mmap(const int flags, osal_mmap_t *map, size_t size,
   }
   map->limit = limit;
 
-#if MDBX_ENABLE_MADVISE
 #ifdef MADV_DONTFORK
   if (unlikely(madvise(map->base, map->limit, MADV_DONTFORK) != 0))
     return errno;
@@ -2319,7 +2148,6 @@ MDBX_INTERNAL int osal_mmap(const int flags, osal_mmap_t *map, size_t size,
 #ifdef MADV_NOHUGEPAGE
   (void)madvise(map->base, map->limit, MADV_NOHUGEPAGE);
 #endif /* MADV_NOHUGEPAGE */
-#endif /* MDBX_ENABLE_MADVISE */
 
 #endif /* ! Windows */
 
@@ -2333,9 +2161,8 @@ MDBX_INTERNAL int osal_munmap(osal_mmap_t *map) {
   /* Unpoisoning is required for ASAN to avoid false-positive diagnostic
    * when this memory will re-used by malloc or another mmapping.
    * See https://libmdbx.dqdkfa.ru/dead-github/pull/93#issuecomment-613687203 */
-  MDBX_ASAN_UNPOISON_MEMORY_REGION(
-      map->base, (map->filesize && map->filesize < map->limit) ? map->filesize
-                                                               : map->limit);
+  MDBX_ASAN_UNPOISON_MEMORY_REGION(map->base,
+                                   (map->filesize && map->filesize < map->limit) ? map->filesize : map->limit);
 #if defined(_WIN32) || defined(_WIN64)
   if (map->section)
     NtClose(map->section);
@@ -2355,11 +2182,9 @@ MDBX_INTERNAL int osal_munmap(osal_mmap_t *map) {
   return MDBX_SUCCESS;
 }
 
-MDBX_INTERNAL int osal_mresize(const int flags, osal_mmap_t *map, size_t size,
-                               size_t limit) {
+MDBX_INTERNAL int osal_mresize(const int flags, osal_mmap_t *map, size_t size, size_t limit) {
   int rc = osal_filesize(map->fd, &map->filesize);
-  VERBOSE("flags 0x%x, size %zu, limit %zu, filesize %" PRIu64, flags, size,
-          limit, map->filesize);
+  VERBOSE("flags 0x%x, size %zu, limit %zu, filesize %" PRIu64, flags, size, limit, map->filesize);
   assert(size <= limit);
   if (rc != MDBX_SUCCESS) {
     map->filesize = 0;
@@ -2399,15 +2224,13 @@ MDBX_INTERNAL int osal_mresize(const int flags, osal_mmap_t *map, size_t size,
     /* check ability of address space for growth before unmap */
     PVOID BaseAddress = (PBYTE)map->base + map->limit;
     SIZE_T RegionSize = limit - map->limit;
-    status = NtAllocateVirtualMemory(GetCurrentProcess(), &BaseAddress, 0,
-                                     &RegionSize, MEM_RESERVE, PAGE_NOACCESS);
+    status = NtAllocateVirtualMemory(GetCurrentProcess(), &BaseAddress, 0, &RegionSize, MEM_RESERVE, PAGE_NOACCESS);
     if (status == (NTSTATUS) /* STATUS_CONFLICTING_ADDRESSES */ 0xC0000018)
       return MDBX_UNABLE_EXTEND_MAPSIZE;
     if (!NT_SUCCESS(status))
       return ntstatus2errcode(status);
 
-    status = NtFreeVirtualMemory(GetCurrentProcess(), &BaseAddress, &RegionSize,
-                                 MEM_RELEASE);
+    status = NtFreeVirtualMemory(GetCurrentProcess(), &BaseAddress, &RegionSize, MEM_RELEASE);
     if (!NT_SUCCESS(status))
       return ntstatus2errcode(status);
   }
@@ -2442,8 +2265,7 @@ MDBX_INTERNAL int osal_mresize(const int flags, osal_mmap_t *map, size_t size,
     map->current = map->limit = 0;
     if (ReservedAddress) {
       ReservedSize = 0;
-      status = NtFreeVirtualMemory(GetCurrentProcess(), &ReservedAddress,
-                                   &ReservedSize, MEM_RELEASE);
+      status = NtFreeVirtualMemory(GetCurrentProcess(), &ReservedAddress, &ReservedSize, MEM_RELEASE);
       assert(NT_SUCCESS(status));
       (void)status;
     }
@@ -2454,8 +2276,7 @@ retry_file_and_section:
   /* resizing of the file may take a while,
    * therefore we reserve address space to avoid occupy it by other threads */
   ReservedAddress = map->base;
-  status = NtAllocateVirtualMemory(GetCurrentProcess(), &ReservedAddress, 0,
-                                   &ReservedSize, MEM_RESERVE, PAGE_NOACCESS);
+  status = NtAllocateVirtualMemory(GetCurrentProcess(), &ReservedAddress, 0, &ReservedSize, MEM_RESERVE, PAGE_NOACCESS);
   if (!NT_SUCCESS(status)) {
     ReservedAddress = nullptr;
     if (status != (NTSTATUS) /* STATUS_CONFLICTING_ADDRESSES */ 0xC0000018)
@@ -2475,18 +2296,16 @@ retry_file_and_section:
   }
 
   SectionSize.QuadPart = size;
-  status = NtCreateSection(
-      &map->section,
-      /* DesiredAccess */
-      (flags & MDBX_WRITEMAP)
-          ? SECTION_QUERY | SECTION_MAP_READ | SECTION_EXTEND_SIZE |
-                SECTION_MAP_WRITE
-          : SECTION_QUERY | SECTION_MAP_READ | SECTION_EXTEND_SIZE,
-      /* ObjectAttributes */ nullptr,
-      /* MaximumSize (InitialSize) */ &SectionSize,
-      /* SectionPageProtection */
-      (flags & MDBX_RDONLY) ? PAGE_READONLY : PAGE_READWRITE,
-      /* AllocationAttributes */ SEC_RESERVE, map->fd);
+  status = NtCreateSection(&map->section,
+                           /* DesiredAccess */
+                           (flags & MDBX_WRITEMAP)
+                               ? SECTION_QUERY | SECTION_MAP_READ | SECTION_EXTEND_SIZE | SECTION_MAP_WRITE
+                               : SECTION_QUERY | SECTION_MAP_READ | SECTION_EXTEND_SIZE,
+                           /* ObjectAttributes */ nullptr,
+                           /* MaximumSize (InitialSize) */ &SectionSize,
+                           /* SectionPageProtection */
+                           (flags & MDBX_RDONLY) ? PAGE_READONLY : PAGE_READWRITE,
+                           /* AllocationAttributes */ SEC_RESERVE, map->fd);
 
   if (!NT_SUCCESS(status))
     goto bailout_ntstatus;
@@ -2494,8 +2313,7 @@ retry_file_and_section:
   if (ReservedAddress) {
     /* release reserved address space */
     ReservedSize = 0;
-    status = NtFreeVirtualMemory(GetCurrentProcess(), &ReservedAddress,
-                                 &ReservedSize, MEM_RELEASE);
+    status = NtFreeVirtualMemory(GetCurrentProcess(), &ReservedAddress, &ReservedSize, MEM_RELEASE);
     ReservedAddress = nullptr;
     if (!NT_SUCCESS(status))
       goto bailout_ntstatus;
@@ -2503,19 +2321,18 @@ retry_file_and_section:
 
 retry_mapview:;
   SIZE_T ViewSize = (flags & MDBX_RDONLY) ? size : limit;
-  status = NtMapViewOfSection(
-      map->section, GetCurrentProcess(), &map->base,
-      /* ZeroBits */ 0,
-      /* CommitSize */ 0,
-      /* SectionOffset */ nullptr, &ViewSize,
-      /* InheritDisposition */ ViewUnmap,
-      /* AllocationType */ (flags & MDBX_RDONLY) ? 0 : MEM_RESERVE,
-      /* Win32Protect */
-      (flags & MDBX_WRITEMAP) ? PAGE_READWRITE : PAGE_READONLY);
+  status = NtMapViewOfSection(map->section, GetCurrentProcess(), &map->base,
+                              /* ZeroBits */ 0,
+                              /* CommitSize */ 0,
+                              /* SectionOffset */ nullptr, &ViewSize,
+                              /* InheritDisposition */ ViewUnmap,
+                              /* AllocationType */ (flags & MDBX_RDONLY) ? 0 : MEM_RESERVE,
+                              /* Win32Protect */
+                              (flags & MDBX_WRITEMAP) ? PAGE_READWRITE : PAGE_READONLY);
 
   if (!NT_SUCCESS(status)) {
-    if (status == (NTSTATUS) /* STATUS_CONFLICTING_ADDRESSES */ 0xC0000018 &&
-        map->base && (flags & MDBX_MRESIZE_MAY_MOVE) != 0) {
+    if (status == (NTSTATUS) /* STATUS_CONFLICTING_ADDRESSES */ 0xC0000018 && map->base &&
+        (flags & MDBX_MRESIZE_MAY_MOVE) != 0) {
       /* try remap at another base address */
       map->base = nullptr;
       goto retry_mapview;
@@ -2549,8 +2366,7 @@ retry_mapview:;
       rc = MDBX_EPERM;
     map->current = (map->filesize > limit) ? limit : (size_t)map->filesize;
   } else {
-    if (size > map->filesize ||
-        (size < map->filesize && (flags & txn_shrink_allowed))) {
+    if (size > map->filesize || (size < map->filesize && (flags & txn_shrink_allowed))) {
       rc = osal_ftruncate(map->fd, size);
       VERBOSE("ftruncate %zu, err %d", size, rc);
       if (rc != MDBX_SUCCESS)
@@ -2565,9 +2381,8 @@ retry_mapview:;
        *    this region and (therefore) do not need the help of ASAN.
        *  - this allows us to clear the mask only within the file size
        *    when closing the mapping. */
-      MDBX_ASAN_UNPOISON_MEMORY_REGION(
-          ptr_disp(map->base, size),
-          ((map->current < map->limit) ? map->current : map->limit) - size);
+      MDBX_ASAN_UNPOISON_MEMORY_REGION(ptr_disp(map->base, size),
+                                       ((map->current < map->limit) ? map->current : map->limit) - size);
     }
     map->current = (size < map->limit) ? size : map->limit;
   }
@@ -2616,15 +2431,13 @@ retry_mapview:;
 #endif /* Linux & _GNU_SOURCE */
 
   const unsigned mmap_flags =
-      MAP_CONCEAL | MAP_SHARED | MAP_FILE | MAP_NORESERVE |
-      (F_ISSET(flags, MDBX_UTTERLY_NOSYNC) ? MAP_NOSYNC : 0);
-  const unsigned mmap_prot =
-      (flags & MDBX_WRITEMAP) ? PROT_READ | PROT_WRITE : PROT_READ;
+      MAP_CONCEAL | MAP_SHARED | MAP_FILE | MAP_NORESERVE | (F_ISSET(flags, MDBX_UTTERLY_NOSYNC) ? MAP_NOSYNC : 0);
+  const unsigned mmap_prot = (flags & MDBX_WRITEMAP) ? PROT_READ | PROT_WRITE : PROT_READ;
 
   if (ptr == MAP_FAILED) {
     /* Try to mmap additional space beyond the end of mapping. */
-    ptr = mmap(ptr_disp(map->base, map->limit), limit - map->limit, mmap_prot,
-               mmap_flags | MAP_FIXED_NOREPLACE, map->fd, map->limit);
+    ptr = mmap(ptr_disp(map->base, map->limit), limit - map->limit, mmap_prot, mmap_flags | MAP_FIXED_NOREPLACE,
+               map->fd, map->limit);
     if (ptr == ptr_disp(map->base, map->limit))
       /* успешно прилепили отображение в конец */
       ptr = map->base;
@@ -2667,33 +2480,25 @@ retry_mapview:;
 
     // coverity[pass_freed_arg : FALSE]
     ptr = mmap(map->base, limit, mmap_prot,
-               (flags & MDBX_MRESIZE_MAY_MOVE)
-                   ? mmap_flags
-                   : mmap_flags | (MAP_FIXED_NOREPLACE ? MAP_FIXED_NOREPLACE
-                                                       : MAP_FIXED),
+               (flags & MDBX_MRESIZE_MAY_MOVE) ? mmap_flags
+                                               : mmap_flags | (MAP_FIXED_NOREPLACE ? MAP_FIXED_NOREPLACE : MAP_FIXED),
                map->fd, 0);
-    if (MAP_FIXED_NOREPLACE != 0 && MAP_FIXED_NOREPLACE != MAP_FIXED &&
-        unlikely(ptr == MAP_FAILED) && !(flags & MDBX_MRESIZE_MAY_MOVE) &&
-        errno == /* kernel don't support MAP_FIXED_NOREPLACE */ EINVAL)
+    if (MAP_FIXED_NOREPLACE != 0 && MAP_FIXED_NOREPLACE != MAP_FIXED && unlikely(ptr == MAP_FAILED) &&
+        !(flags & MDBX_MRESIZE_MAY_MOVE) && errno == /* kernel don't support MAP_FIXED_NOREPLACE */ EINVAL)
       // coverity[pass_freed_arg : FALSE]
-      ptr =
-          mmap(map->base, limit, mmap_prot, mmap_flags | MAP_FIXED, map->fd, 0);
+      ptr = mmap(map->base, limit, mmap_prot, mmap_flags | MAP_FIXED, map->fd, 0);
 
     if (unlikely(ptr == MAP_FAILED)) {
       /* try to restore prev mapping */
       // coverity[pass_freed_arg : FALSE]
       ptr = mmap(map->base, map->limit, mmap_prot,
-                 (flags & MDBX_MRESIZE_MAY_MOVE)
-                     ? mmap_flags
-                     : mmap_flags | (MAP_FIXED_NOREPLACE ? MAP_FIXED_NOREPLACE
-                                                         : MAP_FIXED),
+                 (flags & MDBX_MRESIZE_MAY_MOVE) ? mmap_flags
+                                                 : mmap_flags | (MAP_FIXED_NOREPLACE ? MAP_FIXED_NOREPLACE : MAP_FIXED),
                  map->fd, 0);
-      if (MAP_FIXED_NOREPLACE != 0 && MAP_FIXED_NOREPLACE != MAP_FIXED &&
-          unlikely(ptr == MAP_FAILED) && !(flags & MDBX_MRESIZE_MAY_MOVE) &&
-          errno == /* kernel don't support MAP_FIXED_NOREPLACE */ EINVAL)
+      if (MAP_FIXED_NOREPLACE != 0 && MAP_FIXED_NOREPLACE != MAP_FIXED && unlikely(ptr == MAP_FAILED) &&
+          !(flags & MDBX_MRESIZE_MAY_MOVE) && errno == /* kernel don't support MAP_FIXED_NOREPLACE */ EINVAL)
         // coverity[pass_freed_arg : FALSE]
-        ptr = mmap(map->base, map->limit, mmap_prot, mmap_flags | MAP_FIXED,
-                   map->fd, 0);
+        ptr = mmap(map->base, map->limit, mmap_prot, mmap_flags | MAP_FIXED, map->fd, 0);
       if (unlikely(ptr == MAP_FAILED)) {
         VALGRIND_MAKE_MEM_NOACCESS(map->base, map->current);
         /* Unpoisoning is required for ASAN to avoid false-positive diagnostic
@@ -2701,8 +2506,7 @@ retry_mapview:;
          * See
          * https://libmdbx.dqdkfa.ru/dead-github/pull/93#issuecomment-613687203
          */
-        MDBX_ASAN_UNPOISON_MEMORY_REGION(
-            map->base, (map->current < map->limit) ? map->current : map->limit);
+        MDBX_ASAN_UNPOISON_MEMORY_REGION(map->base, (map->current < map->limit) ? map->current : map->limit);
         map->limit = 0;
         map->current = 0;
         map->base = nullptr;
@@ -2722,8 +2526,7 @@ retry_mapview:;
      * See
      * https://libmdbx.dqdkfa.ru/dead-github/pull/93#issuecomment-613687203
      */
-    MDBX_ASAN_UNPOISON_MEMORY_REGION(
-        map->base, (map->current < map->limit) ? map->current : map->limit);
+    MDBX_ASAN_UNPOISON_MEMORY_REGION(map->base, (map->current < map->limit) ? map->current : map->limit);
 
     VALGRIND_MAKE_MEM_DEFINED(ptr, map->current);
     MDBX_ASAN_UNPOISON_MEMORY_REGION(ptr, map->current);
@@ -2732,7 +2535,6 @@ retry_mapview:;
   map->limit = limit;
   map->current = size;
 
-#if MDBX_ENABLE_MADVISE
 #ifdef MADV_DONTFORK
   if (unlikely(madvise(map->base, map->limit, MADV_DONTFORK) != 0)) {
     assert(errno != 0);
@@ -2742,16 +2544,13 @@ retry_mapview:;
 #ifdef MADV_NOHUGEPAGE
   (void)madvise(map->base, map->limit, MADV_NOHUGEPAGE);
 #endif /* MADV_NOHUGEPAGE */
-#endif /* MDBX_ENABLE_MADVISE */
 
 #endif /* POSIX / Windows */
 
   /* Zap: Redundant code */
   MDBX_SUPPRESS_GOOFY_MSVC_ANALYZER(6287);
-  assert(rc != MDBX_SUCCESS ||
-         (map->base != nullptr && map->base != MAP_FAILED &&
-          map->current == size && map->limit == limit &&
-          map->filesize >= size));
+  assert(rc != MDBX_SUCCESS || (map->base != nullptr && map->base != MAP_FAILED && map->current == size &&
+                                map->limit == limit && map->filesize >= size));
   return rc;
 }
 
@@ -2759,9 +2558,10 @@ retry_mapview:;
 
 __cold MDBX_INTERNAL void osal_jitter(bool tiny) {
   for (;;) {
-#if defined(_M_IX86) || defined(_M_X64) || defined(__i386__) ||                \
-    defined(__x86_64__)
-    const unsigned salt = 277u * (unsigned)__rdtsc();
+#if defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)
+    unsigned salt = 5296013u * (unsigned)__rdtsc();
+    salt ^= salt >> 11;
+    salt *= 25810541u;
 #elif (defined(_WIN32) || defined(_WIN64)) && MDBX_WITHOUT_MSVC_CRT
     static ULONG state;
     const unsigned salt = (unsigned)RtlRandomEx(&state);
@@ -2769,13 +2569,25 @@ __cold MDBX_INTERNAL void osal_jitter(bool tiny) {
     const unsigned salt = rand();
 #endif
 
-    const unsigned coin = salt % (tiny ? 29u : 43u);
+    const int coin = salt % (tiny ? 29u : 43u);
     if (coin < 43 / 3)
       break;
 #if defined(_WIN32) || defined(_WIN64)
-    SwitchToThread();
-    if (coin > 43 * 2 / 3)
-      Sleep(1);
+    if (coin < 43 * 2 / 3)
+      SwitchToThread();
+    else {
+      static HANDLE timer;
+      if (!timer)
+        timer = CreateWaitableTimer(NULL, TRUE, NULL);
+
+      LARGE_INTEGER ft;
+      ft.QuadPart = coin * (int64_t)-10; // Convert to 100 nanosecond interval,
+                                         // negative value indicates relative time.
+      SetWaitableTimer(timer, &ft, 0, NULL, NULL, 0);
+      WaitForSingleObject(timer, INFINITE);
+      // CloseHandle(timer);
+      break;
+    }
 #else
     sched_yield();
     if (coin > 43 * 2 / 3)
@@ -2860,10 +2672,7 @@ MDBX_INTERNAL uint64_t osal_cputime(size_t *optional_page_faults) {
 #if defined(_WIN32) || defined(_WIN64)
   if (optional_page_faults) {
     PROCESS_MEMORY_COUNTERS pmc;
-    *optional_page_faults =
-        GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))
-            ? pmc.PageFaultCount
-            : 0;
+    *optional_page_faults = GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)) ? pmc.PageFaultCount : 0;
   }
   FILETIME unused, usermode;
   if (GetThreadTimes(GetCurrentThread(),
@@ -2891,8 +2700,7 @@ MDBX_INTERNAL uint64_t osal_cputime(size_t *optional_page_faults) {
   if (getrusage(RUSAGE_THREAD, &usage) == 0) {
     if (optional_page_faults)
       *optional_page_faults = usage.ru_majflt;
-    return usage.ru_utime.tv_sec * UINT64_C(1000000000) +
-           usage.ru_utime.tv_usec * 1000u;
+    return usage.ru_utime.tv_sec * UINT64_C(1000000000) + usage.ru_utime.tv_usec * 1000u;
   }
   if (optional_page_faults)
     *optional_page_faults = 0;
@@ -3002,41 +2810,33 @@ __cold static uint64_t windows_bootime(void) {
   return 0;
 }
 
-__cold static LSTATUS mdbx_RegGetValue(HKEY hKey, LPCSTR lpSubKey,
-                                       LPCSTR lpValue, PVOID pvData,
-                                       LPDWORD pcbData) {
+__cold static LSTATUS mdbx_RegGetValue(HKEY hKey, LPCSTR lpSubKey, LPCSTR lpValue, PVOID pvData, LPDWORD pcbData) {
   LSTATUS rc;
   if (!imports.RegGetValueA) {
     /* an old Windows 2000/XP */
     HKEY hSubKey;
     rc = RegOpenKeyA(hKey, lpSubKey, &hSubKey);
     if (rc == ERROR_SUCCESS) {
-      rc =
-          RegQueryValueExA(hSubKey, lpValue, nullptr, nullptr, pvData, pcbData);
+      rc = RegQueryValueExA(hSubKey, lpValue, nullptr, nullptr, pvData, pcbData);
       RegCloseKey(hSubKey);
     }
     return rc;
   }
 
-  rc = imports.RegGetValueA(hKey, lpSubKey, lpValue, RRF_RT_ANY, nullptr,
+  rc = imports.RegGetValueA(hKey, lpSubKey, lpValue, RRF_RT_ANY, nullptr, pvData, pcbData);
+  if (rc != ERROR_FILE_NOT_FOUND)
+    return rc;
+
+  rc = imports.RegGetValueA(hKey, lpSubKey, lpValue, RRF_RT_ANY | 0x00010000 /* RRF_SUBKEY_WOW6464KEY */, nullptr,
                             pvData, pcbData);
   if (rc != ERROR_FILE_NOT_FOUND)
     return rc;
-
-  rc = imports.RegGetValueA(hKey, lpSubKey, lpValue,
-                            RRF_RT_ANY | 0x00010000 /* RRF_SUBKEY_WOW6464KEY */,
-                            nullptr, pvData, pcbData);
-  if (rc != ERROR_FILE_NOT_FOUND)
-    return rc;
-  return imports.RegGetValueA(hKey, lpSubKey, lpValue,
-                              RRF_RT_ANY |
-                                  0x00020000 /* RRF_SUBKEY_WOW6432KEY */,
-                              nullptr, pvData, pcbData);
+  return imports.RegGetValueA(hKey, lpSubKey, lpValue, RRF_RT_ANY | 0x00020000 /* RRF_SUBKEY_WOW6432KEY */, nullptr,
+                              pvData, pcbData);
 }
 #endif
 
-__cold MDBX_MAYBE_UNUSED static bool
-bootid_parse_uuid(bin128_t *s, const void *p, const size_t n) {
+__cold MDBX_MAYBE_UNUSED static bool bootid_parse_uuid(bin128_t *s, const void *p, const size_t n) {
   if (n > 31) {
     unsigned bits = 0;
     for (unsigned i = 0; i < n; ++i) /* try parse an UUID in text form */ {
@@ -3077,15 +2877,32 @@ bootid_parse_uuid(bin128_t *s, const void *p, const size_t n) {
 }
 
 #if defined(__linux__) || defined(__gnu_linux__)
+
+__cold static bool is_inside_lxc(void) {
+  bool inside_lxc = false;
+  FILE *mounted = setmntent("/proc/mounts", "r");
+  if (mounted) {
+    const struct mntent *ent;
+    while (nullptr != (ent = getmntent(mounted))) {
+      if (strcmp(ent->mnt_fsname, "lxcfs") == 0 && strncmp(ent->mnt_dir, "/proc/", 6) == 0) {
+        inside_lxc = true;
+        break;
+      }
+    }
+    endmntent(mounted);
+  }
+  return inside_lxc;
+}
+
 __cold static bool proc_read_uuid(const char *path, bin128_t *target) {
   const int fd = open(path, O_RDONLY | O_NOFOLLOW);
   if (fd != -1) {
     struct statfs fs;
     char buf[42];
-    const ssize_t len =
-        (fstatfs(fd, &fs) == 0 && fs.f_type == /* procfs */ 0x9FA0)
-            ? read(fd, buf, sizeof(buf))
-            : -1;
+    const ssize_t len = (fstatfs(fd, &fs) == 0 &&
+                         (fs.f_type == /* procfs */ 0x9FA0 || (fs.f_type == /* tmpfs */ 0x1021994 && is_inside_lxc())))
+                            ? read(fd, buf, sizeof(buf))
+                            : -1;
     const int err = close(fd);
     assert(err == 0);
     (void)err;
@@ -3109,12 +2926,10 @@ __cold static bin128_t osal_bootid(void) {
   {
     char buf[42];
     size_t len = sizeof(buf);
-    if (!sysctlbyname("kern.bootsessionuuid", buf, &len, nullptr, 0) &&
-        bootid_parse_uuid(&uuid, buf, len))
+    if (!sysctlbyname("kern.bootsessionuuid", buf, &len, nullptr, 0) && bootid_parse_uuid(&uuid, buf, len))
       return uuid;
 
-#if defined(__MAC_OS_X_VERSION_MIN_REQUIRED) &&                                \
-    __MAC_OS_X_VERSION_MIN_REQUIRED > 1050
+#if defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED > 1050
     uuid_t hostuuid;
     struct timespec wait = {0, 1000000000u / 42};
     if (!gethostuuid(hostuuid, &wait))
@@ -3123,8 +2938,7 @@ __cold static bin128_t osal_bootid(void) {
 
     struct timeval boottime;
     len = sizeof(boottime);
-    if (!sysctlbyname("kern.boottime", &boottime, &len, nullptr, 0) &&
-        len == sizeof(boottime) && boottime.tv_sec)
+    if (!sysctlbyname("kern.boottime", &boottime, &len, nullptr, 0) && len == sizeof(boottime) && boottime.tv_sec)
       got_boottime = true;
   }
 #endif /* Apple/Darwin */
@@ -3148,83 +2962,70 @@ __cold static bin128_t osal_bootid(void) {
       char DigitalProductId[248];
     } buf;
 
-    static const char HKLM_MicrosoftCryptography[] =
-        "SOFTWARE\\Microsoft\\Cryptography";
+    static const char HKLM_MicrosoftCryptography[] = "SOFTWARE\\Microsoft\\Cryptography";
     DWORD len = sizeof(buf);
     /* Windows is madness and must die */
-    if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_MicrosoftCryptography,
-                         "MachineGuid", &buf.MachineGuid,
-                         &len) == ERROR_SUCCESS &&
+    if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_MicrosoftCryptography, "MachineGuid", &buf.MachineGuid, &len) ==
+            ERROR_SUCCESS &&
         len < sizeof(buf))
       got_machineid = bootid_parse_uuid(&uuid, &buf.MachineGuid, len);
 
     if (!got_machineid) {
       /* again, Windows is madness */
-      static const char HKLM_WindowsNT[] =
-          "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
-      static const char HKLM_WindowsNT_DPK[] =
-          "SOFTWARE\\Microsoft\\Windows "
-          "NT\\CurrentVersion\\DefaultProductKey";
-      static const char HKLM_WindowsNT_DPK2[] =
-          "SOFTWARE\\Microsoft\\Windows "
-          "NT\\CurrentVersion\\DefaultProductKey2";
+      static const char HKLM_WindowsNT[] = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+      static const char HKLM_WindowsNT_DPK[] = "SOFTWARE\\Microsoft\\Windows "
+                                               "NT\\CurrentVersion\\DefaultProductKey";
+      static const char HKLM_WindowsNT_DPK2[] = "SOFTWARE\\Microsoft\\Windows "
+                                                "NT\\CurrentVersion\\DefaultProductKey2";
 
       len = sizeof(buf);
-      if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_WindowsNT,
-                           "DigitalProductId", &buf.DigitalProductId,
-                           &len) == ERROR_SUCCESS &&
+      if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_WindowsNT, "DigitalProductId", &buf.DigitalProductId, &len) ==
+              ERROR_SUCCESS &&
           len > 42 && len < sizeof(buf)) {
         bootid_collect(&uuid, &buf.DigitalProductId, len);
         got_machineid = true;
       }
       len = sizeof(buf);
-      if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_WindowsNT_DPK,
-                           "DigitalProductId", &buf.DigitalProductId,
-                           &len) == ERROR_SUCCESS &&
+      if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_WindowsNT_DPK, "DigitalProductId", &buf.DigitalProductId, &len) ==
+              ERROR_SUCCESS &&
           len > 42 && len < sizeof(buf)) {
         bootid_collect(&uuid, &buf.DigitalProductId, len);
         got_machineid = true;
       }
       len = sizeof(buf);
-      if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_WindowsNT_DPK2,
-                           "DigitalProductId", &buf.DigitalProductId,
-                           &len) == ERROR_SUCCESS &&
+      if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_WindowsNT_DPK2, "DigitalProductId", &buf.DigitalProductId, &len) ==
+              ERROR_SUCCESS &&
           len > 42 && len < sizeof(buf)) {
         bootid_collect(&uuid, &buf.DigitalProductId, len);
         got_machineid = true;
       }
     }
 
-    static const char HKLM_PrefetcherParams[] =
-        "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory "
-        "Management\\PrefetchParameters";
+    static const char HKLM_PrefetcherParams[] = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory "
+                                                "Management\\PrefetchParameters";
     len = sizeof(buf);
-    if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_PrefetcherParams, "BootId",
-                         &buf.BootId, &len) == ERROR_SUCCESS &&
+    if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_PrefetcherParams, "BootId", &buf.BootId, &len) == ERROR_SUCCESS &&
         len > 1 && len < sizeof(buf)) {
       bootid_collect(&uuid, &buf.BootId, len);
       got_bootseq = true;
     }
 
     len = sizeof(buf);
-    if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_PrefetcherParams, "BaseTime",
-                         &buf.BaseTime, &len) == ERROR_SUCCESS &&
+    if (mdbx_RegGetValue(HKEY_LOCAL_MACHINE, HKLM_PrefetcherParams, "BaseTime", &buf.BaseTime, &len) == ERROR_SUCCESS &&
         len >= sizeof(buf.BaseTime) && buf.BaseTime) {
       bootid_collect(&uuid, &buf.BaseTime, len);
       got_boottime = true;
     }
 
     /* BootTime from SYSTEM_TIMEOFDAY_INFORMATION */
-    NTSTATUS status = NtQuerySystemInformation(
-        0x03 /* SystemTmeOfDayInformation */, &buf.SysTimeOfDayInfo,
-        sizeof(buf.SysTimeOfDayInfo), &len);
+    NTSTATUS status = NtQuerySystemInformation(0x03 /* SystemTmeOfDayInformation */, &buf.SysTimeOfDayInfo,
+                                               sizeof(buf.SysTimeOfDayInfo), &len);
     if (NT_SUCCESS(status) &&
         len >= offsetof(union buf, SysTimeOfDayInfoHacked.BootTimeBias) +
                    sizeof(buf.SysTimeOfDayInfoHacked.BootTimeBias) &&
         buf.SysTimeOfDayInfoHacked.BootTime.QuadPart) {
       const uint64_t UnbiasedBootTime =
-          buf.SysTimeOfDayInfoHacked.BootTime.QuadPart -
-          buf.SysTimeOfDayInfoHacked.BootTimeBias;
+          buf.SysTimeOfDayInfoHacked.BootTime.QuadPart - buf.SysTimeOfDayInfoHacked.BootTimeBias;
       if (UnbiasedBootTime) {
         bootid_collect(&uuid, &UnbiasedBootTime, sizeof(UnbiasedBootTime));
         got_boottime = true;
@@ -3280,10 +3081,27 @@ __cold static bin128_t osal_bootid(void) {
   }
 #endif /* __NetBSD__ */
 
+#if !(defined(_WIN32) || defined(_WIN64))
+  if (!got_machineid) {
+    int fd = open("/etc/machine-id", O_RDONLY);
+    if (fd == -1)
+      fd = open("/var/lib/dbus/machine-id", O_RDONLY);
+    if (fd != -1) {
+      char buf[42];
+      const ssize_t len = read(fd, buf, sizeof(buf));
+      const int err = close(fd);
+      assert(err == 0);
+      (void)err;
+      if (len > 0)
+        got_machineid = bootid_parse_uuid(&uuid, buf, len);
+    }
+  }
+#endif /* !Windows */
+
 #if _XOPEN_SOURCE_EXTENDED
   if (!got_machineid) {
-    const int hostid = gethostid();
-    if (hostid > 0) {
+    const long hostid = gethostid();
+    if (hostid != 0 && hostid != -1) {
       bootid_collect(&uuid, &hostid, sizeof(hostid));
       got_machineid = true;
     }
@@ -3370,13 +3188,11 @@ __cold static bin128_t osal_bootid(void) {
     if (0x1CCCCCC > now.dwHighDateTime)
 #else
     struct timespec mono, real;
-    if (clock_gettime(CLOCK_MONOTONIC, &mono) ||
-        clock_gettime(CLOCK_REALTIME, &real) ||
+    if (clock_gettime(CLOCK_MONOTONIC, &mono) || clock_gettime(CLOCK_REALTIME, &real) ||
         /* wrong time, RTC is mad or absent */
         1555555555l > real.tv_sec ||
         /* seems no adjustment by RTC/NTP, i.e. a fake time */
-        real.tv_sec < mono.tv_sec || 1234567890l > real.tv_sec - mono.tv_sec ||
-        (real.tv_sec - mono.tv_sec) % 900u == 0)
+        real.tv_sec < mono.tv_sec || 1234567890l > real.tv_sec - mono.tv_sec || (real.tv_sec - mono.tv_sec) % 900u == 0)
 #endif
       goto lack;
   }
@@ -3384,10 +3200,9 @@ __cold static bin128_t osal_bootid(void) {
   return uuid;
 }
 
-__cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages,
-                               intptr_t *avail_pages) {
+__cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages, intptr_t *avail_pages) {
   if (!page_size && !total_pages && !avail_pages)
-    return MDBX_EINVAL;
+    return LOG_IFERR(MDBX_EINVAL);
   if (total_pages)
     *total_pages = -1;
   if (avail_pages)
@@ -3397,7 +3212,7 @@ __cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages,
   if (page_size)
     *page_size = pagesize;
   if (unlikely(pagesize < MDBX_MIN_PAGESIZE || !is_powerof2(pagesize)))
-    return MDBX_INCOMPATIBLE;
+    return LOG_IFERR(MDBX_INCOMPATIBLE);
 
   MDBX_MAYBE_UNUSED const int log2page = log2n_powerof2(pagesize);
   assert(pagesize == (INT64_C(1) << log2page));
@@ -3408,7 +3223,7 @@ __cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages,
   memset(&info, 0, sizeof(info));
   info.dwLength = sizeof(info);
   if (!GlobalMemoryStatusEx(&info))
-    return (int)GetLastError();
+    return LOG_IFERR((int)GetLastError());
 #endif
 
   if (total_pages) {
@@ -3417,14 +3232,13 @@ __cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages,
 #elif defined(_SC_PHYS_PAGES)
     const intptr_t total_ram_pages = sysconf(_SC_PHYS_PAGES);
     if (total_ram_pages == -1)
-      return errno;
+      return LOG_IFERR(errno);
 #elif defined(_SC_AIX_REALMEM)
     const intptr_t total_ram_Kb = sysconf(_SC_AIX_REALMEM);
     if (total_ram_Kb == -1)
-      return errno;
+      return LOG_IFERR(errno);
     const intptr_t total_ram_pages = (total_ram_Kb << 10) >> log2page;
-#elif defined(HW_USERMEM) || defined(HW_PHYSMEM64) || defined(HW_MEMSIZE) ||   \
-    defined(HW_PHYSMEM)
+#elif defined(HW_USERMEM) || defined(HW_PHYSMEM64) || defined(HW_MEMSIZE) || defined(HW_PHYSMEM)
     size_t ram, len = sizeof(ram);
     static const int mib[] = {CTL_HW,
 #if defined(HW_USERMEM)
@@ -3443,16 +3257,16 @@ __cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages,
 #endif
                 mib,
             ARRAY_LENGTH(mib), &ram, &len, nullptr, 0) != 0)
-      return errno;
+      return LOG_IFERR(errno);
     if (len != sizeof(ram))
-      return MDBX_ENOSYS;
+      return LOG_IFERR(MDBX_ENOSYS);
     const intptr_t total_ram_pages = (intptr_t)(ram >> log2page);
 #else
 #error "FIXME: Get User-accessible or physical RAM"
 #endif
     *total_pages = total_ram_pages;
     if (total_ram_pages < 1)
-      return MDBX_ENOSYS;
+      return LOG_IFERR(MDBX_ENOSYS);
   }
 
   if (avail_pages) {
@@ -3461,16 +3275,15 @@ __cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages,
 #elif defined(_SC_AVPHYS_PAGES)
     const intptr_t avail_ram_pages = sysconf(_SC_AVPHYS_PAGES);
     if (avail_ram_pages == -1)
-      return errno;
+      return LOG_IFERR(errno);
 #elif defined(__MACH__)
     mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
     vm_statistics_data_t vmstat;
     mach_port_t mport = mach_host_self();
-    kern_return_t kerr = host_statistics(mach_host_self(), HOST_VM_INFO,
-                                         (host_info_t)&vmstat, &count);
+    kern_return_t kerr = host_statistics(mach_host_self(), HOST_VM_INFO, (host_info_t)&vmstat, &count);
     mach_port_deallocate(mach_task_self(), mport);
     if (unlikely(kerr != KERN_SUCCESS))
-      return MDBX_ENOSYS;
+      return LOG_IFERR(MDBX_ENOSYS);
     const intptr_t avail_ram_pages = vmstat.free_count;
 #elif defined(VM_TOTAL) || defined(VM_METER)
     struct vmtotal info;
@@ -3488,16 +3301,16 @@ __cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages,
 #endif
                 mib,
             ARRAY_LENGTH(mib), &info, &len, nullptr, 0) != 0)
-      return errno;
+      return LOG_IFERR(errno);
     if (len != sizeof(info))
-      return MDBX_ENOSYS;
+      return LOG_IFERR(MDBX_ENOSYS);
     const intptr_t avail_ram_pages = info.t_free;
 #else
 #error "FIXME: Get Available RAM"
 #endif
     *avail_pages = avail_ram_pages;
     if (avail_ram_pages < 1)
-      return MDBX_ENOSYS;
+      return LOG_IFERR(MDBX_ENOSYS);
   }
 
   return MDBX_SUCCESS;
@@ -3509,9 +3322,10 @@ __cold int mdbx_get_sysraminfo(intptr_t *page_size, intptr_t *total_pages,
 #include <sys/uuid.h>
 #endif /* FreeBSD */
 
-#if __GLIBC_PREREQ(2, 25) || defined(__FreeBSD__) || defined(__NetBSD__) ||    \
-    defined(__BSD__) || defined(__bsdi__) || defined(__DragonFly__) ||         \
-    defined(__APPLE__) || __has_include(<sys/random.h>)
+#ifdef __IPHONE_OS_VERSION_MIN_REQUIRED
+#include <CommonCrypto/CommonRandom.h>
+#elif __GLIBC_PREREQ(2, 25) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__BSD__) || defined(__bsdi__) || \
+    defined(__DragonFly__) || defined(__APPLE__) || __has_include(<sys/random.h>)
 #include <sys/random.h>
 #endif /* sys/random.h */
 
@@ -3542,23 +3356,19 @@ MDBX_INTERNAL bin128_t osal_guid(const MDBX_env *env) {
 #endif /* FreeBSD */
 
 #if defined(_WIN32) || defined(_WIN64)
-  if (imports.CoCreateGuid && imports.CoCreateGuid(&uuid) == 0 &&
-      check_uuid(uuid))
+  if (imports.CoCreateGuid && imports.CoCreateGuid(&uuid) == 0 && check_uuid(uuid))
     return uuid;
 
   HCRYPTPROV hCryptProv = 0;
-  if (CryptAcquireContextW(&hCryptProv, nullptr, nullptr, PROV_RSA_FULL,
-                           CRYPT_VERIFYCONTEXT | CRYPT_SILENT)) {
-    const BOOL ok =
-        CryptGenRandom(hCryptProv, sizeof(uuid), (unsigned char *)&uuid);
+  if (CryptAcquireContextW(&hCryptProv, nullptr, nullptr, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT | CRYPT_SILENT)) {
+    const BOOL ok = CryptGenRandom(hCryptProv, sizeof(uuid), (unsigned char *)&uuid);
     CryptReleaseContext(hCryptProv, 0);
     if (ok && check_uuid(uuid))
       return uuid;
   }
 #elif defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && defined(__IPHONE_8_0)
 #if __IPHONE_OS_VERSION_MIN_REQUIRED >= __IPHONE_8_0
-  if (CCRandomGenerateBytes(&uuid, sizeof(uuid)) == kCCSuccess &&
-      check_uuid(uuid))
+  if (CCRandomGenerateBytes(&uuid, sizeof(uuid)) == kCCSuccess && check_uuid(uuid))
     return uuid;
 #endif /* iOS >= 8.x */
 #else
@@ -3571,14 +3381,13 @@ MDBX_INTERNAL bin128_t osal_guid(const MDBX_env *env) {
     if (len == sizeof(uuid) && check_uuid(uuid))
       return uuid;
   }
-#if (__GLIBC_PREREQ(2, 25) || defined(__FreeBSD__) || defined(__NetBSD__) ||   \
-     defined(__BSD__) || defined(__bsdi__) || defined(__DragonFly__)) &&       \
+#if (__GLIBC_PREREQ(2, 25) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__BSD__) || defined(__bsdi__) ||  \
+     defined(__DragonFly__)) &&                                                                                        \
     !defined(__APPLE__) && !defined(__ANDROID_API__)
   if (getrandom(&uuid, sizeof(uuid), 0) == sizeof(uuid) && check_uuid(uuid))
     return uuid;
-#elif defined(__OpenBSD__) || (defined(__sun) && defined(__SVR4)) ||           \
-    (defined(__MAC_OS_X_VERSION_MIN_REQUIRED) &&                               \
-     __MAC_OS_X_VERSION_MIN_REQUIRED >= 101200)
+#elif defined(__OpenBSD__) || (defined(__sun) && defined(__SVR4)) ||                                                   \
+    (defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 101200)
   if (getentropy(&uuid, sizeof(uuid)) == 0 && check_uuid(uuid))
     return uuid;
 #endif /* getrandom() / getentropy() */
@@ -3617,13 +3426,11 @@ void osal_ctor(void) {
 #else
   globals.sys_pagesize = sysconf(_SC_PAGE_SIZE);
   globals.sys_allocation_granularity = (MDBX_WORDBITS > 32) ? 65536 : 4096;
-  globals.sys_allocation_granularity =
-      (globals.sys_allocation_granularity > globals.sys_pagesize)
-          ? globals.sys_allocation_granularity
-          : globals.sys_pagesize;
+  globals.sys_allocation_granularity = (globals.sys_allocation_granularity > globals.sys_pagesize)
+                                           ? globals.sys_allocation_granularity
+                                           : globals.sys_pagesize;
 #endif
-  assert(globals.sys_pagesize > 0 &&
-         (globals.sys_pagesize & (globals.sys_pagesize - 1)) == 0);
+  assert(globals.sys_pagesize > 0 && (globals.sys_pagesize & (globals.sys_pagesize - 1)) == 0);
   assert(globals.sys_allocation_granularity >= globals.sys_pagesize &&
          globals.sys_allocation_granularity % globals.sys_pagesize == 0);
   globals.sys_pagesize_ln2 = log2n_powerof2(globals.sys_pagesize);
@@ -3643,12 +3450,10 @@ void osal_ctor(void) {
 
   uint32_t proba = UINT32_MAX;
   while (true) {
-    unsigned time_conversion_checkup =
-        osal_monotime_to_16dot16(osal_16dot16_to_monotime(proba));
+    unsigned time_conversion_checkup = osal_monotime_to_16dot16(osal_16dot16_to_monotime(proba));
     unsigned one_more = (proba < UINT32_MAX) ? proba + 1 : proba;
     unsigned one_less = (proba > 0) ? proba - 1 : proba;
-    ENSURE(nullptr, time_conversion_checkup >= one_less &&
-                        time_conversion_checkup <= one_more);
+    ENSURE(nullptr, time_conversion_checkup >= one_less && time_conversion_checkup <= one_more);
     if (proba == 0)
       break;
     proba >>= 1;

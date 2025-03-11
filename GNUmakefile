@@ -1,4 +1,4 @@
-# This makefile is for GNU Make 3.80 or above, and nowadays provided
+# This makefile is for GNU Make 3.81 or above, and nowadays provided
 # just for compatibility and preservation of traditions.
 #
 # Please use CMake in case of any difficulties or
@@ -16,6 +16,7 @@ ifneq ($(make_lt_3_81),0)
 $(error Please use GNU Make 3.81 or above)
 endif
 make_ge_4_1   := $(shell expr "$(MAKE_VERx3)" ">=" "  4  1")
+make_ge_4_4   := $(shell expr "$(MAKE_VERx3)" ">=" "  4  4")
 SRC_PROBE_C   := $(shell [ -f mdbx.c ] && echo mdbx.c || echo src/osal.c)
 SRC_PROBE_CXX := $(shell [ -f mdbx.c++ ] && echo mdbx.c++ || echo src/mdbx.c++)
 UNAME         := $(shell uname -s 2>/dev/null || echo Unknown)
@@ -51,11 +52,16 @@ CC      ?= gcc
 CXX     ?= g++
 CFLAGS_EXTRA ?=
 LD      ?= ld
+CMAKE	?= cmake
+CMAKE_OPT ?=
+# target directory for `make dist`
+DIST_DIR ?= dist
 
 # build options
 MDBX_BUILD_OPTIONS   ?=-DNDEBUG=1
-MDBX_BUILD_TIMESTAMP ?=$(shell date +%Y-%m-%dT%H:%M:%S%z)
-MDBX_BUILD_CXX       ?= YES
+MDBX_BUILD_TIMESTAMP ?=$(if $(SOURCE_DATE_EPOCH),$(SOURCE_DATE_EPOCH),$(shell date +%Y-%m-%dT%H:%M:%S%z))
+MDBX_BUILD_CXX       ?=YES
+MDBX_BUILD_METADATA  ?=
 
 # probe and compose common compiler flags with variable expansion trick (seems this work two times per session for GNU Make 3.81)
 CFLAGS       ?= $(strip $(eval CFLAGS := -std=gnu11 -O2 -g -Wall -Werror -Wextra -Wpedantic -ffunction-sections -fPIC -fvisibility=hidden -pthread -Wno-error=attributes $$(shell for opt in -fno-semantic-interposition -Wno-unused-command-line-argument -Wno-tautological-compare; do [ -z "$$$$($(CC) '-DMDBX_BUILD_FLAGS="probe"' $$$${opt} -c $(SRC_PROBE_C) -o /dev/null >/dev/null 2>&1 || echo failed)" ] && echo "$$$${opt} "; done)$(CFLAGS_EXTRA))$(CFLAGS))
@@ -76,6 +82,13 @@ else
 LIBS         ?= $(eval LIBS := $$(shell $$(uname2libs)))$(LIBS)
 LDFLAGS      ?= $(eval LDFLAGS := $$(shell $$(uname2ldflags)))$(LDFLAGS)
 LIB_STDCXXFS ?= $(eval LIB_STDCXXFS := $$(shell echo '$$(cxx_filesystem_probe)' | cat mdbx.h++ - | sed $$$$'1s/\xef\xbb\xbf//' | $(CXX) -x c++ $(CXXFLAGS) -Wno-error - -Wl,--allow-multiple-definition -lstdc++fs $(LIBS) $(LDFLAGS) $(EXE_LDFLAGS) -o /dev/null 2>probe4lstdfs.err >/dev/null && echo '-Wl,--allow-multiple-definition -lstdc++fs'))$(LIB_STDCXXFS)
+endif
+
+ifneq ($(make_ge_4_4),1)
+.NOTPARALLEL:
+WAIT         =
+else
+WAIT         = .WAIT
 endif
 
 ################################################################################
@@ -127,7 +140,7 @@ MANPAGES   := mdbx_stat.1 mdbx_copy.1 mdbx_dump.1 mdbx_load.1 mdbx_chk.1 mdbx_dr
 TIP        := // TIP:
 
 .PHONY: all help options lib libs tools clean install uninstall check_buildflags_tag tools-static
-.PHONY: install-strip install-no-strip strip libmdbx mdbx show-options lib-static lib-shared
+.PHONY: install-strip install-no-strip strip libmdbx mdbx show-options lib-static lib-shared cmake-build ninja
 
 boolean = $(if $(findstring $(strip $($1)),YES Yes yes y ON On on 1 true True TRUE),1,$(if $(findstring $(strip $($1)),NO No no n OFF Off off 0 false False FALSE),,$(error Wrong value `$($1)` of $1 for YES/NO option)))
 select_by = $(if $(call boolean,$(1)),$(2),$(3))
@@ -161,6 +174,7 @@ help:
 	@echo "  make clean               "
 	@echo "  make install             "
 	@echo "  make uninstall           "
+	@echo "  make cmake-build | ninja - build by CMake & Ninja"
 	@echo ""
 	@echo "  make strip               - strip debug symbols from binaries"
 	@echo "  make install-no-strip    - install explicitly without strip"
@@ -200,6 +214,7 @@ show-options:
 	@echo "  MDBX_BUILD_OPTIONS   = $(MDBX_BUILD_OPTIONS)"
 	@echo "  MDBX_BUILD_CXX       = $(MDBX_BUILD_CXX)"
 	@echo "  MDBX_BUILD_TIMESTAMP = $(MDBX_BUILD_TIMESTAMP)"
+	@echo "  MDBX_BUILD_METADATA  = $(MDBX_BUILD_METADATA)"
 	@echo '$(TIP) Use `make options` to listing available build options.'
 	@echo $(call select_by,MDBX_BUILD_CXX,"  CXX      =`which $(CXX)` | `$(CXX) --version | head -1`","  CC       =`which $(CC)` | `$(CC) --version | head -1`")
 	@echo $(call select_by,MDBX_BUILD_CXX,"  CXXFLAGS =$(CXXFLAGS)","  CFLAGS   =$(CFLAGS)")
@@ -227,6 +242,7 @@ options:
 	@echo ""
 	@echo "  MDBX_BUILD_OPTIONS   = $(MDBX_BUILD_OPTIONS)"
 	@echo "  MDBX_BUILD_TIMESTAMP = $(MDBX_BUILD_TIMESTAMP)"
+	@echo "  MDBX_BUILD_METADATA  = $(MDBX_BUILD_METADATA)"
 	@echo ""
 	@echo "## Assortment items for MDBX_BUILD_OPTIONS:"
 	@echo "##   Note that the defaults should already be correct for most platforms;"
@@ -255,19 +271,19 @@ strip: all
 clean:
 	@echo '  REMOVE ...'
 	$(QUIET)rm -rf $(MDBX_TOOLS) mdbx_test @* *.[ao] *.[ls]o *.$(SO_SUFFIX) *.dSYM *~ tmp.db/* \
-		*.gcov *.log *.err src/*.o test/*.o mdbx_example dist \
-		config.h src/config.h src/version.c *.tar* buildflags.tag \
-		mdbx_*.static mdbx_*.static-lto
+		*.gcov *.log *.err src/*.o test/*.o mdbx_example dist @dist-check \
+		config.h src/config.h src/version.c *.tar* @buildflags.tag @dist-checked.tag \
+		mdbx_*.static mdbx_*.static-lto CMakeFiles
 
 MDBX_BUILD_FLAGS =$(strip MDBX_BUILD_CXX=$(MDBX_BUILD_CXX) $(MDBX_BUILD_OPTIONS) $(call select_by,MDBX_BUILD_CXX,$(CXXFLAGS) $(LDFLAGS) $(LIB_STDCXXFS) $(LIBS),$(CFLAGS) $(LDFLAGS) $(LIBS)))
 check_buildflags_tag:
-	$(QUIET)if [ "$(MDBX_BUILD_FLAGS)" != "$$(cat buildflags.tag 2>&1)" ]; then \
+	$(QUIET)if [ "$(MDBX_BUILD_FLAGS)" != "$$(cat @buildflags.tag 2>&1)" ]; then \
 		echo -n "  CLEAN for build with specified flags..." && \
 		$(MAKE) IOARENA=false CXXSTD= -s clean >/dev/null && echo " Ok" && \
-		echo '$(MDBX_BUILD_FLAGS)' > buildflags.tag; \
+		echo '$(MDBX_BUILD_FLAGS)' > @buildflags.tag; \
 	fi
 
-buildflags.tag: check_buildflags_tag
+@buildflags.tag: check_buildflags_tag
 
 lib-static libmdbx.a: mdbx-static.o $(call select_by,MDBX_BUILD_CXX,mdbx++-static.o)
 	@echo '  AR $@'
@@ -277,6 +293,11 @@ lib-shared libmdbx.$(SO_SUFFIX): mdbx-dylib.o $(call select_by,MDBX_BUILD_CXX,md
 	@echo '  LD $@'
 	$(QUIET)$(call select_by,MDBX_BUILD_CXX,$(CXX) $(CXXFLAGS),$(CC) $(CFLAGS)) $^ -pthread -shared $(LDFLAGS) $(call select_by,MDBX_BUILD_CXX,$(LIB_STDCXXFS)) $(LIBS) -o $@
 
+ninja: cmake-build
+cmake-build:
+	@echo "-G Ninja . && cmake --build ."
+	$(QUIET)mkdir @cmake-ninja-build && $(CMAKE) $(CMAKE_OPT) -G Ninja -S . -B @cmake-ninja-build && $(CMAKE) --build @cmake-ninja-build
+
 #> dist-cutoff-begin
 ifeq ($(wildcard mdbx.c),mdbx.c)
 #< dist-cutoff-end
@@ -285,13 +306,14 @@ ifeq ($(wildcard mdbx.c),mdbx.c)
 # Amalgamated source code, i.e. distributed after `make dist`
 MAN_SRCDIR := man1/
 
-config.h: buildflags.tag mdbx.c $(lastword $(MAKEFILE_LIST)) LICENSE NOTICE
+config.h: @buildflags.tag $(WAIT) mdbx.c $(lastword $(MAKEFILE_LIST)) LICENSE NOTICE
 	@echo '  MAKE $@'
 	$(QUIET)(echo '#define MDBX_BUILD_TIMESTAMP "$(MDBX_BUILD_TIMESTAMP)"' \
-	&& echo "#define MDBX_BUILD_FLAGS \"$$(cat buildflags.tag)\"" \
+	&& echo "#define MDBX_BUILD_FLAGS \"$$(cat @buildflags.tag)\"" \
 	&& echo '#define MDBX_BUILD_COMPILER "$(shell (LC_ALL=C $(CC) --version || echo 'Please use GCC or CLANG compatible compiler') | head -1)"' \
 	&& echo '#define MDBX_BUILD_TARGET "$(shell set -o pipefail; (LC_ALL=C $(CC) -v 2>&1 | grep -i '^Target:' | cut -d ' ' -f 2- || (LC_ALL=C $(CC) --version | grep -qi e2k && echo E2K) || echo 'Please use GCC or CLANG compatible compiler') | head -1)"' \
 	&& echo '#define MDBX_BUILD_CXX $(call select_by,MDBX_BUILD_CXX,1,0)' \
+	&& echo '#define MDBX_BUILD_METADATA "$(MDBX_BUILD_METADATA)"' \
 	) >$@
 
 mdbx-dylib.o: config.h mdbx.c mdbx.h $(lastword $(MAKEFILE_LIST)) LICENSE NOTICE
@@ -353,8 +375,8 @@ define uname2titer
   esac
 endef
 
-DIST_EXTRA := LICENSE NOTICE README.md CMakeLists.txt GNUmakefile Makefile ChangeLog.md VERSION.txt config.h.in ntdll.def \
-	$(addprefix man1/, $(MANPAGES)) cmake/compiler.cmake cmake/profile.cmake cmake/utils.cmake
+DIST_EXTRA := LICENSE NOTICE README.md CMakeLists.txt GNUmakefile Makefile ChangeLog.md VERSION.json config.h.in ntdll.def \
+	$(addprefix man1/, $(MANPAGES)) cmake/compiler.cmake cmake/profile.cmake cmake/utils.cmake .clang-format-ignore
 DIST_SRC   := mdbx.h mdbx.h++ mdbx.c mdbx.c++ $(addsuffix .c, $(MDBX_TOOLS))
 
 TEST_DB    ?= $(shell [ -d /dev/shm ] && echo /dev/shm || echo /tmp)/mdbx-test.db
@@ -378,11 +400,14 @@ reformat:
 
 MAN_SRCDIR := src/man1/
 ALLOY_DEPS := $(shell git ls-files src/ | grep -e /tools -e /man -v)
-git_DIR := $(shell if [ -d .git ]; then echo .git; elif [ -s .git -a -f .git ]; then grep '^gitdir: ' .git | cut -d ':' -f 2; else echo git_directory_is_absent; fi)
-MDBX_GIT_VERSION = $(shell set -o pipefail; git describe --tags '--match=v[0-9]*' 2>&- | sed -n 's|^v*\([0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\)\(.*\)|\1|p' || echo 'Please fetch tags and/or use non-obsolete git version')
-MDBX_GIT_REVISION = $(shell set -o pipefail; git rev-list `git describe --tags --abbrev=0`..HEAD --count 2>&- || echo 'Please fetch tags and/or use non-obsolete git version')
-MDBX_GIT_TIMESTAMP = $(shell git show --no-patch --format=%cI HEAD 2>&- || echo 'Please install latest get version')
-MDBX_GIT_DESCRIBE = $(shell git describe --tags --long --dirty=-dirty '--match=v[0-9]*' 2>&- || echo 'Please fetch tags and/or install non-obsolete git version')
+MDBX_GIT_DIR := $(shell if [ -d .git ]; then echo .git; elif [ -s .git -a -f .git ]; then grep '^gitdir: ' .git | cut -d ':' -f 2; else echo git_directory_is_absent; fi)
+MDBX_GIT_LASTVTAG := $(shell git describe --tags --dirty=-DIRTY --abbrev=0 '--match=v[0-9]*' 2>&- || echo 'Please fetch tags and/or install non-obsolete git version')
+MDBX_GIT_3DOT := $(shell set -o pipefail; echo "$(MDBX_GIT_LASTVTAG)" | sed -n 's|^v*\([0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\)\(.*\)|\1|p' || echo 'Please fetch tags and/or use non-obsolete git version')
+MDBX_GIT_TWEAK := $(shell set -o pipefail; git rev-list $(shell git describe --tags --abbrev=0 '--match=v[0-9]*')..HEAD --count 2>&- || echo 'Please fetch tags and/or use non-obsolete git version')
+MDBX_GIT_TIMESTAMP := $(shell git show --no-patch --format=%cI HEAD 2>&- || echo 'Please install latest get version')
+MDBX_GIT_DESCRIBE := $(shell git describe --tags --long --dirty '--match=v[0-9]*' 2>&- || echo 'Please fetch tags and/or install non-obsolete git version')
+MDBX_GIT_PRERELEASE := $(shell echo "$(MDBX_GIT_LASTVTAG)" | sed -n 's|^v*\([0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\)\(.*\)-\([-.0-1a-zA-Z]\+\)|\3|p')
+MDBX_VERSION_PURE = $(MDBX_GIT_3DOT)$(if $(filter-out 0,$(MDBX_GIT_TWEAK)),.$(MDBX_GIT_TWEAK),)$(if $(MDBX_GIT_PRERELEASE),-$(MDBX_GIT_PRERELEASE),)
 MDBX_VERSION_IDENT = $(shell set -o pipefail; echo -n '$(MDBX_GIT_DESCRIBE)' | tr -c -s '[a-zA-Z0-9.]' _)
 MDBX_VERSION_NODOT = $(subst .,_,$(MDBX_VERSION_IDENT))
 MDBX_BUILD_SOURCERY = $(shell set -o pipefail; $(MAKE) IOARENA=false CXXSTD= -s src/version.c >/dev/null && (openssl dgst -r -sha256 src/version.c || sha256sum src/version.c || shasum -a 256 src/version.c) 2>/dev/null | cut -d ' ' -f 1 || (echo 'Please install openssl or sha256sum or shasum' >&2 && echo sha256sum_is_no_available))_$(MDBX_VERSION_NODOT)
@@ -392,7 +417,8 @@ MDBX_DIST_DIR = libmdbx-$(MDBX_VERSION_NODOT)
 MDBX_SMOKE_EXTRA ?=
 
 check: DESTDIR = $(shell pwd)/@check-install
-check: test dist install
+check: CMAKE_OPT = -Werror=dev
+check: smoke-assertion ninja dist install test
 
 smoke-assertion: MDBX_BUILD_OPTIONS:=$(strip $(MDBX_BUILD_OPTIONS) -DMDBX_FORCE_ASSERTIONS=1 -UNDEBUG -DMDBX_DEBUG=0)
 smoke-assertion: smoke
@@ -425,23 +451,23 @@ smoke-fault: build-test
 	; ./mdbx_chk -vvnw $(TEST_DB) && ([ ! -e $(TEST_DB)-copy ] || ./mdbx_chk -vvn $(TEST_DB)-copy)
 
 test: build-test
-	@echo '  RUNNING `test/long_stochastic.sh --loops 2`...'
-	$(QUIET)test/long_stochastic.sh --dont-check-ram-size --loops 2 --db-upto-mb 256 --skip-make --taillog >$(TEST_LOG) || (cat $(TEST_LOG) && false)
+	@echo '  RUNNING `test/stochastic.sh --loops 2`...'
+	$(QUIET)test/stochastic.sh --dont-check-ram-size --loops 2 --db-upto-mb 256 --skip-make --taillog >$(TEST_LOG) || (cat $(TEST_LOG) && false)
 
 long-test: test-long
 test-long: build-test
-	@echo '  RUNNING `test/long_stochastic.sh --loops 42`...'
-	$(QUIET)test/long_stochastic.sh --loops 42 --db-upto-mb 1024 --extra --skip-make --taillog
+	@echo '  RUNNING `test/stochastic.sh --loops 42`...'
+	$(QUIET)test/stochastic.sh --loops 42 --db-upto-mb 1024 --extra --skip-make --taillog
 
 test-singleprocess: build-test
-	@echo '  RUNNING `test/long_stochastic.sh --single --loops 2`...'
-	$(QUIET)test/long_stochastic.sh --dont-check-ram-size --single --loops 2 --db-upto-mb 256 --skip-make --taillog >$(TEST_LOG) || (cat $(TEST_LOG) && false)
+	@echo '  RUNNING `test/stochastic.sh --single --loops 2`...'
+	$(QUIET)test/stochastic.sh --dont-check-ram-size --single --loops 2 --db-upto-mb 256 --skip-make --taillog >$(TEST_LOG) || (cat $(TEST_LOG) && false)
 
 test-valgrind: test-memcheck
 test-memcheck: CFLAGS_EXTRA=-Ofast -DENABLE_MEMCHECK
 test-memcheck: build-test
-	@echo '  RUNNING `test/long_stochastic.sh --with-valgrind --loops 2`...'
-	$(QUIET)test/long_stochastic.sh --with-valgrind --loops 2 --db-upto-mb 256 --skip-make >$(TEST_LOG) || (cat $(TEST_LOG) && false)
+	@echo '  RUNNING `test/stochastic.sh --with-valgrind --loops 2`...'
+	$(QUIET)test/stochastic.sh --with-valgrind --loops 2 --db-upto-mb 256 --skip-make >$(TEST_LOG) || (cat $(TEST_LOG) && false)
 
 memcheck: smoke-memcheck
 smoke-memcheck: VALGRIND=valgrind --trace-children=yes --log-file=valgrind-%p.log --leak-check=full --track-origins=yes --read-var-info=yes --error-exitcode=42 --suppressions=test/valgrind_suppress.txt
@@ -508,7 +534,7 @@ mdbx_test: $(TEST_OBJ) libmdbx.$(SO_SUFFIX)
 	@echo '  LD $@'
 	$(QUIET)$(CXX) $(CXXFLAGS) $(TEST_OBJ) -Wl,-rpath . -L . -l mdbx $(EXE_LDFLAGS) $(LIBS) -o $@
 
-$(git_DIR)/HEAD $(git_DIR)/index $(git_DIR)/refs/tags:
+$(MDBX_GIT_DIR)/HEAD $(MDBX_GIT_DIR)/index $(MDBX_GIT_DIR)/refs/tags:
 	@echo '*** ' >&2
 	@echo '*** Please don''t use tarballs nor zips which are automatically provided by Github !' >&2
 	@echo '*** These archives do not contain version information and thus are unfit to build libmdbx.' >&2
@@ -518,27 +544,30 @@ $(git_DIR)/HEAD $(git_DIR)/index $(git_DIR)/refs/tags:
 	@echo '*** ' >&2
 	@false
 
-src/version.c: src/version.c.in $(lastword $(MAKEFILE_LIST)) $(git_DIR)/HEAD $(git_DIR)/index $(git_DIR)/refs/tags LICENSE NOTICE
+src/version.c: src/version.c.in $(lastword $(MAKEFILE_LIST)) $(MDBX_GIT_DIR)/HEAD $(MDBX_GIT_DIR)/index $(MDBX_GIT_DIR)/refs/tags LICENSE NOTICE
 	@echo '  MAKE $@'
 	$(QUIET)sed \
 		-e "s|@MDBX_GIT_TIMESTAMP@|$(MDBX_GIT_TIMESTAMP)|" \
 		-e "s|@MDBX_GIT_TREE@|$(shell git show --no-patch --format=%T HEAD || echo 'Please install latest get version')|" \
 		-e "s|@MDBX_GIT_COMMIT@|$(shell git show --no-patch --format=%H HEAD || echo 'Please install latest get version')|" \
 		-e "s|@MDBX_GIT_DESCRIBE@|$(MDBX_GIT_DESCRIBE)|" \
-		-e "s|\$${MDBX_VERSION_MAJOR}|$(shell echo '$(MDBX_GIT_VERSION)' | cut -d . -f 1)|" \
-		-e "s|\$${MDBX_VERSION_MINOR}|$(shell echo '$(MDBX_GIT_VERSION)' | cut -d . -f 2)|" \
-		-e "s|\$${MDBX_VERSION_RELEASE}|$(shell echo '$(MDBX_GIT_VERSION)' | cut -d . -f 3)|" \
-		-e "s|\$${MDBX_VERSION_REVISION}|$(MDBX_GIT_REVISION)|" \
+		-e "s|\$${MDBX_VERSION_MAJOR}|$(shell echo '$(MDBX_GIT_3DOT)' | cut -d . -f 1)|" \
+		-e "s|\$${MDBX_VERSION_MINOR}|$(shell echo '$(MDBX_GIT_3DOT)' | cut -d . -f 2)|" \
+		-e "s|\$${MDBX_VERSION_PATCH}|$(shell echo '$(MDBX_GIT_3DOT)' | cut -d . -f 3)|" \
+		-e "s|\$${MDBX_VERSION_TWEAK}|$(MDBX_GIT_TWEAK)|" \
+		-e "s|@MDBX_VERSION_PRERELEASE@|$(MDBX_GIT_PRERELEASE)|" \
+		-e "s|@MDBX_VERSION_PURE@|$(MDBX_VERSION_PURE)|" \
 	src/version.c.in >$@
 
-src/config.h: buildflags.tag src/version.c $(lastword $(MAKEFILE_LIST)) LICENSE NOTICE
+src/config.h: @buildflags.tag $(WAIT) src/version.c $(lastword $(MAKEFILE_LIST)) LICENSE NOTICE
 	@echo '  MAKE $@'
 	$(QUIET)(echo '#define MDBX_BUILD_TIMESTAMP "$(MDBX_BUILD_TIMESTAMP)"' \
-	&& echo "#define MDBX_BUILD_FLAGS \"$$(cat buildflags.tag)\"" \
+	&& echo "#define MDBX_BUILD_FLAGS \"$$(cat @buildflags.tag)\"" \
 	&& echo '#define MDBX_BUILD_COMPILER "$(shell (LC_ALL=C $(CC) --version || echo 'Please use GCC or CLANG compatible compiler') | head -1)"' \
 	&& echo '#define MDBX_BUILD_TARGET "$(shell set -o pipefail; (LC_ALL=C $(CC) -v 2>&1 | grep -i '^Target:' | cut -d ' ' -f 2- || (LC_ALL=C $(CC) --version | grep -qi e2k && echo E2K) || echo 'Please use GCC or CLANG compatible compiler') | head -1)"' \
 	&& echo '#define MDBX_BUILD_SOURCERY $(MDBX_BUILD_SOURCERY)' \
 	&& echo '#define MDBX_BUILD_CXX $(call select_by,MDBX_BUILD_CXX,1,0)' \
+	&& echo '#define MDBX_BUILD_METADATA "$(MDBX_BUILD_METADATA)"' \
 	) >$@
 
 mdbx-dylib.o: src/config.h src/version.c src/alloy.c $(ALLOY_DEPS) $(lastword $(MAKEFILE_LIST)) LICENSE NOTICE
@@ -556,10 +585,12 @@ docs/Doxyfile: docs/Doxyfile.in src/version.c $(lastword $(MAKEFILE_LIST))
 		-e "s|@MDBX_GIT_TREE@|$(shell git show --no-patch --format=%T HEAD || echo 'Please install latest get version')|" \
 		-e "s|@MDBX_GIT_COMMIT@|$(shell git show --no-patch --format=%H HEAD || echo 'Please install latest get version')|" \
 		-e "s|@MDBX_GIT_DESCRIBE@|$(MDBX_GIT_DESCRIBE)|" \
-		-e "s|\$${MDBX_VERSION_MAJOR}|$(shell echo '$(MDBX_GIT_VERSION)' | cut -d . -f 1)|" \
-		-e "s|\$${MDBX_VERSION_MINOR}|$(shell echo '$(MDBX_GIT_VERSION)' | cut -d . -f 2)|" \
-		-e "s|\$${MDBX_VERSION_RELEASE}|$(shell echo '$(MDBX_GIT_VERSION)' | cut -d . -f 3)|" \
-		-e "s|\$${MDBX_VERSION_REVISION}|$(MDBX_GIT_REVISION)|" \
+		-e "s|\$${MDBX_VERSION_MAJOR}|$(shell echo '$(MDBX_GIT_3DOT)' | cut -d . -f 1)|" \
+		-e "s|\$${MDBX_VERSION_MINOR}|$(shell echo '$(MDBX_GIT_3DOT)' | cut -d . -f 2)|" \
+		-e "s|\$${MDBX_VERSION_PATCH}|$(shell echo '$(MDBX_GIT_3DOT)' | cut -d . -f 3)|" \
+		-e "s|\$${MDBX_VERSION_TWEAK}|$(MDBX_GIT_TWEAK)|" \
+		-e "s|@MDBX_VERSION_PRERELEASE@|$(MDBX_GIT_PRERELEASE)|" \
+		-e "s|@MDBX_VERSION_PURE@|$(MDBX_VERSION_PURE)|" \
 	docs/Doxyfile.in >$@
 
 define md-extract-section
@@ -600,18 +631,18 @@ mdbx++-static.o: src/config.h src/mdbx.c++ mdbx.h mdbx.h++ $(lastword $(MAKEFILE
 	@echo '  CC $@'
 	$(QUIET)$(CXX) $(CXXFLAGS) $(MDBX_BUILD_OPTIONS) '-DMDBX_CONFIG_H="config.h"' -ULIBMDBX_EXPORTS -c src/mdbx.c++ -o $@
 
-dist: tags dist-checked.tag libmdbx-sources-$(MDBX_VERSION_IDENT).tar.gz $(lastword $(MAKEFILE_LIST))
+dist: tags $(WAIT) @dist-checked.tag libmdbx-sources-$(MDBX_VERSION_IDENT).tar.gz $(lastword $(MAKEFILE_LIST))
 	@echo '  AMALGAMATION is done'
 
 tags:
 	@echo '  FETCH git tags...'
 	$(QUIET)git fetch --tags --force
 
-release-assets: libmdbx-amalgamated-$(MDBX_GIT_VERSION).zpaq \
-	libmdbx-amalgamated-$(MDBX_GIT_VERSION).tar.xz \
-	libmdbx-amalgamated-$(MDBX_GIT_VERSION).tar.bz2 \
-	libmdbx-amalgamated-$(MDBX_GIT_VERSION).tar.gz \
-	libmdbx-amalgamated-$(subst .,_,$(MDBX_GIT_VERSION)).zip
+release-assets: libmdbx-amalgamated-$(MDBX_GIT_3DOT).zpaq \
+	libmdbx-amalgamated-$(MDBX_GIT_3DOT).tar.xz \
+	libmdbx-amalgamated-$(MDBX_GIT_3DOT).tar.bz2 \
+	libmdbx-amalgamated-$(MDBX_GIT_3DOT).tar.gz \
+	libmdbx-amalgamated-$(subst .,_,$(MDBX_GIT_3DOT)).zip
 	$(QUIET)([ \
 		"$$(set -o pipefail; git describe | sed -n '/^v[0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}$$/p' || echo fail-left)" \
 	== \
@@ -619,34 +650,34 @@ release-assets: libmdbx-amalgamated-$(MDBX_GIT_VERSION).zpaq \
 		|| (echo 'ERROR: Is not a valid release because not in the clean state with a suitable annotated tag!!!' >&2 && false)) \
 	&& echo '  RELEASE ASSETS are done'
 
-dist-checked.tag: $(addprefix dist/, $(DIST_SRC) $(DIST_EXTRA))
+@dist-checked.tag: $(addprefix $(DIST_DIR)/, $(DIST_SRC) $(DIST_EXTRA))
 	@echo -n '  VERIFY amalgamated sources...'
-	$(QUIET)rm -rf $@ dist/@tmp-essentials.inc dist/@tmp-internals.inc \
+	$(QUIET)rm -rf $@ $(DIST_DIR)/@tmp-essentials.inc $(DIST_DIR)/@tmp-internals.inc \
 	&& if grep -R "define xMDBX_ALLOY" dist | grep -q MDBX_BUILD_SOURCERY; then echo "sed output is WRONG!" >&2; exit 2; fi \
-	&& rm -rf dist-check && cp -r -p dist dist-check && ($(MAKE) IOARENA=false CXXSTD=$(CXXSTD) -C dist-check >dist-check.log 2>dist-check.err || (cat dist-check.err && exit 1)) \
-	&& touch $@ || (echo " FAILED! See dist-check.log and dist-check.err" >&2; exit 2) && echo " Ok"
+	&& rm -rf @dist-check && cp -r -p $(DIST_DIR) @dist-check && ($(MAKE) -j IOARENA=false CXXSTD=$(CXXSTD) -C @dist-check all ninja >@dist-check.log 2>@dist-check.err || (cat @dist-check.err && exit 1)) \
+	&& touch $@ || (echo " FAILED! See @dist-check.log and @dist-check.err" >&2; exit 2) && echo " Ok"
 
-%.tar.gz: dist-checked.tag
+%.tar.gz: @dist-checked.tag
 	@echo '  CREATE $@'
 	$(QUIET)$(TAR) -c $(shell LC_ALL=C $(TAR) --help | grep -q -- '--owner' && echo '--owner=0 --group=0') -f - -C dist $(DIST_SRC) $(DIST_EXTRA) | gzip -c -9 >$@
 
-%.tar.xz: dist-checked.tag
+%.tar.xz: @dist-checked.tag
 	@echo '  CREATE $@'
 	$(QUIET)$(TAR) -c $(shell LC_ALL=C $(TAR) --help | grep -q -- '--owner' && echo '--owner=0 --group=0') -f - -C dist $(DIST_SRC) $(DIST_EXTRA) | xz -9 -z >$@
 
-%.tar.bz2: dist-checked.tag
+%.tar.bz2: @dist-checked.tag
 	@echo '  CREATE $@'
 	$(QUIET)$(TAR) -c $(shell LC_ALL=C $(TAR) --help | grep -q -- '--owner' && echo '--owner=0 --group=0') -f - -C dist $(DIST_SRC) $(DIST_EXTRA) | bzip2 -9 -z >$@
 
-%.zip: dist-checked.tag
+%.zip: @dist-checked.tag
 	@echo '  CREATE $@'
-	$(QUIET)rm -rf $@ && (cd dist && $(ZIP) -9 ../$@ $(DIST_SRC) $(DIST_EXTRA)) &>zip.log
+	$(QUIET)rm -rf $@ && (cd dist && $(ZIP) -9 ../$@ $(DIST_SRC) $(DIST_EXTRA)) &>@zip.log
 
-%.zpaq: dist-checked.tag
+%.zpaq: @dist-checked.tag
 	@echo '  CREATE $@'
-	$(QUIET)rm -rf $@ && (cd dist && zpaq a ../$@ $(DIST_SRC) $(DIST_EXTRA) -m59) &>zpaq.log
+	$(QUIET)rm -rf $@ && (cd dist && zpaq a ../$@ $(DIST_SRC) $(DIST_EXTRA) -m59) &>@zpaq.log
 
-dist/@tmp-essentials.inc: src/version.c $(ALLOY_DEPS) $(lastword $(MAKEFILE_LIST))
+$(DIST_DIR)/@tmp-essentials.inc: src/version.c $(ALLOY_DEPS) $(lastword $(MAKEFILE_LIST))
 	@echo '  ALLOYING...'
 	$(QUIET)mkdir -p dist \
 	&& (grep -v '#include ' src/alloy.c && echo '#define MDBX_BUILD_SOURCERY $(MDBX_BUILD_SOURCERY)' \
@@ -667,8 +698,8 @@ dist/@tmp-essentials.inc: src/version.c $(ALLOY_DEPS) $(lastword $(MAKEFILE_LIST
 		-e '/ clang-format o/d' -e '/ \*INDENT-O/d' \
 		| grep -v '^/// ') >$@
 
-dist/@tmp-internals.inc: dist/@tmp-essentials.inc src/version.c $(ALLOY_DEPS) $(lastword $(MAKEFILE_LIST))
-	$(QUIET)(cat dist/@tmp-essentials.inc \
+$(DIST_DIR)/@tmp-internals.inc: $(DIST_DIR)/@tmp-essentials.inc src/version.c $(ALLOY_DEPS) $(lastword $(MAKEFILE_LIST))
+	$(QUIET)(cat $(DIST_DIR)/@tmp-essentials.inc \
 	&& sed \
 		-e '/#include "essentials.h"/d' \
 		-e '/#include "atomics-ops.h"/r src/atomics-ops.h' \
@@ -696,60 +727,64 @@ dist/@tmp-internals.inc: dist/@tmp-essentials.inc src/version.c $(ALLOY_DEPS) $(
 		-e '/ clang-format o/d' -e '/ \*INDENT-O/d' \
 		| grep -v '^/// ') >$@
 
-dist/mdbx.c: dist/@tmp-internals.inc $(lastword $(MAKEFILE_LIST))
+$(DIST_DIR)/mdbx.c: $(DIST_DIR)/@tmp-internals.inc $(lastword $(MAKEFILE_LIST))
 	@echo '  MAKE $@'
-	$(QUIET)(cat dist/@tmp-internals.inc $(shell git ls-files src/*.c | grep -v alloy) src/version.c | sed \
+	$(QUIET)(cat $(DIST_DIR)/@tmp-internals.inc $(shell git ls-files src/*.c | grep -v alloy) src/version.c | sed \
 		-e '/#include "debug_begin.h"/r src/debug_begin.h' \
 		-e '/#include "debug_end.h"/r src/debug_end.h' \
 	) | sed -e '/#include "/d;/#pragma once/d' -e 's|@INCLUDE|#include|' \
-		-e '/ clang-format o/d;/ \*INDENT-O/d' >$@
+		-e '/ clang-format o/d;/ \*INDENT-O/d' -e '3i /* clang-format off */' | cat -s >$@
 
-dist/mdbx.c++: dist/@tmp-essentials.inc src/mdbx.c++ $(lastword $(MAKEFILE_LIST))
+$(DIST_DIR)/mdbx.c++: $(DIST_DIR)/@tmp-essentials.inc src/mdbx.c++ $(lastword $(MAKEFILE_LIST))
 	@echo '  MAKE $@'
-	$(QUIET)cat dist/@tmp-essentials.inc src/mdbx.c++ | sed \
+	$(QUIET)cat $(DIST_DIR)/@tmp-essentials.inc src/mdbx.c++ | sed \
 		-e '/#define xMDBX_ALLOY/d' \
 		-e '/#include "/d;/#pragma once/d' \
 		-e 's|@INCLUDE|#include|;s|"mdbx.h"|"mdbx.h++"|' \
-		-e '/ clang-format o/d;/ \*INDENT-O/d' >$@
+		-e '/ clang-format o/d;/ \*INDENT-O/d' -e '3i /* clang-format off */' | cat -s >$@
 
 define dist-tool-rule
-dist/mdbx_$(1).c: src/tools/$(1).c src/tools/wingetopt.h src/tools/wingetopt.c \
-		dist/@tmp-internals.inc $(lastword $(MAKEFILE_LIST))
+$(DIST_DIR)/mdbx_$(1).c: src/tools/$(1).c src/tools/wingetopt.h src/tools/wingetopt.c \
+		$(DIST_DIR)/@tmp-internals.inc $(lastword $(MAKEFILE_LIST))
 	@echo '  MAKE $$@'
 	$(QUIET)mkdir -p dist && sed \
-		-e '/#include "essentials.h"/r dist/@tmp-essentials.inc' \
+		-e '/#include "essentials.h"/r $(DIST_DIR)/@tmp-essentials.inc' \
 		-e '/#include "wingetopt.h"/r src/tools/wingetopt.c' \
 		-e '/ clang-format o/d' -e '/ \*INDENT-O/d' \
 		src/tools/$(1).c \
 	| sed -e '/#include "/d;/#pragma once/d;/#define xMDBX_ALLOY/d' -e 's|@INCLUDE|#include|' \
-		-e '/ clang-format o/d;/ \*INDENT-O/d' >$$@
+		-e '/ clang-format o/d;/ \*INDENT-O/d' -e '9i /* clang-format off */' | cat -s >$$@
 
 endef
 $(foreach file,$(TOOLS),$(eval $(call dist-tool-rule,$(file))))
 
 define dist-extra-rule
-dist/$(1): $(1) src/version.c $(lastword $(MAKEFILE_LIST))
+$(DIST_DIR)/$(1): $(1) src/version.c $(lastword $(MAKEFILE_LIST))
 	@echo '  REFINE $$@'
-	$(QUIET)mkdir -p $$(dir $$@) && sed -e '/^#> dist-cutoff-begin/,/^#< dist-cutoff-end/d' $$< >$$@
+	$(QUIET)mkdir -p $$(dir $$@) && sed -e '/^#> dist-cutoff-begin/,/^#< dist-cutoff-end/d' $$< | cat -s >$$@
 
 endef
-$(foreach file,mdbx.h mdbx.h++ $(filter-out man1/% VERSION.txt %.in ntdll.def,$(DIST_EXTRA)),$(eval $(call dist-extra-rule,$(file))))
+$(foreach file,mdbx.h mdbx.h++ $(filter-out man1/% VERSION.json .clang-format-ignore %.in ntdll.def,$(DIST_EXTRA)),$(eval $(call dist-extra-rule,$(file))))
 
-dist/VERSION.txt: src/version.c
+$(DIST_DIR)/VERSION.json: src/version.c
 	@echo '  MAKE $@'
-	$(QUIET)mkdir -p dist/ && echo "$(MDBX_GIT_VERSION).$(MDBX_GIT_REVISION)" >$@
+	$(QUIET)mkdir -p $(DIST_DIR)/ && echo "{ \"git_describe\": \"$(MDBX_GIT_DESCRIBE)\", \"git_timestamp\": \"$(MDBX_GIT_TIMESTAMP)\", \"git_tree\": \"$(shell git show --no-patch --format=%T HEAD 2>&1)\", \"git_commit\": \"$(shell git show --no-patch --format=%H HEAD 2>&1)\", \"semver\": \"$(MDBX_VERSION_PURE)\" }" >$@
 
-dist/ntdll.def: src/ntdll.def
-	@echo '  COPY $@'
-	$(QUIET)mkdir -p dist/cmake/ && cp $< $@
+$(DIST_DIR)/.clang-format-ignore: $(lastword $(MAKEFILE_LIST))
+	@echo '  MAKE $@'
+	$(QUIET)echo "$(filter-out %.h %h++,$(DIST_SRC))" | tr ' ' \\n > $@
 
-dist/config.h.in: src/config.h.in
+$(DIST_DIR)/ntdll.def: src/ntdll.def
 	@echo '  COPY $@'
-	$(QUIET)mkdir -p dist/cmake/ && cp $< $@
+	$(QUIET)mkdir -p $(DIST_DIR)/ && cp $< $@
 
-dist/man1/mdbx_%.1: src/man1/mdbx_%.1
+$(DIST_DIR)/config.h.in: src/config.h.in
 	@echo '  COPY $@'
-	$(QUIET)mkdir -p dist/man1/ && cp $< $@
+	$(QUIET)mkdir -p $(DIST_DIR)/ && cp $< $@
+
+$(DIST_DIR)/man1/mdbx_%.1: src/man1/mdbx_%.1
+	@echo '  COPY $@'
+	$(QUIET)mkdir -p $(DIST_DIR)/man1/ && cp $< $@
 
 endif
 

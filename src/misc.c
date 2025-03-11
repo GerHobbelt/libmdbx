@@ -10,41 +10,40 @@ __cold int mdbx_is_readahead_reasonable(size_t volume, intptr_t redundancy) {
   intptr_t pagesize, total_ram_pages;
   int err = mdbx_get_sysraminfo(&pagesize, &total_ram_pages, nullptr);
   if (unlikely(err != MDBX_SUCCESS))
-    return err;
+    return LOG_IFERR(err);
 
   const int log2page = log2n_powerof2(pagesize);
   const intptr_t volume_pages = (volume + pagesize - 1) >> log2page;
-  const intptr_t redundancy_pages =
-      (redundancy < 0) ? -(intptr_t)((-redundancy + pagesize - 1) >> log2page)
-                       : (intptr_t)(redundancy + pagesize - 1) >> log2page;
-  if (volume_pages >= total_ram_pages ||
-      volume_pages + redundancy_pages >= total_ram_pages)
+  const intptr_t redundancy_pages = (redundancy < 0) ? -(intptr_t)((-redundancy + pagesize - 1) >> log2page)
+                                                     : (intptr_t)(redundancy + pagesize - 1) >> log2page;
+  if (volume_pages >= total_ram_pages || volume_pages + redundancy_pages >= total_ram_pages)
     return MDBX_RESULT_FALSE;
 
   intptr_t avail_ram_pages;
   err = mdbx_get_sysraminfo(nullptr, nullptr, &avail_ram_pages);
   if (unlikely(err != MDBX_SUCCESS))
-    return err;
+    return LOG_IFERR(err);
 
-  return (volume_pages + redundancy_pages >= avail_ram_pages)
-             ? MDBX_RESULT_FALSE
-             : MDBX_RESULT_TRUE;
+  return (volume_pages + redundancy_pages >= avail_ram_pages) ? MDBX_RESULT_FALSE : MDBX_RESULT_TRUE;
 }
 
-int mdbx_dbi_sequence(MDBX_txn *txn, MDBX_dbi dbi, uint64_t *result,
-                      uint64_t increment) {
+int mdbx_dbi_sequence(MDBX_txn *txn, MDBX_dbi dbi, uint64_t *result, uint64_t increment) {
   int rc = check_txn(txn, MDBX_TXN_BLOCKED);
-  if (unlikely(rc != MDBX_SUCCESS))
-    return rc;
+  if (unlikely(rc != MDBX_SUCCESS)) {
+  bailout:
+    if (likely(result))
+      *result = ~UINT64_C(0);
+    return LOG_IFERR(rc);
+  }
 
   rc = dbi_check(txn, dbi);
   if (unlikely(rc != MDBX_SUCCESS))
-    return rc;
+    goto bailout;
 
   if (unlikely(txn->dbi_state[dbi] & DBI_STALE)) {
     rc = tbl_fetch(txn, dbi);
     if (unlikely(rc != MDBX_SUCCESS))
-      return rc;
+      goto bailout;
   }
 
   tree_t *dbs = &txn->dbs[dbi];
@@ -95,10 +94,10 @@ int mdbx_dbi_sequence(MDBX_txn *txn, MDBX_dbi dbi, uint64_t *result,
         cursor_couple_t cx;
         rc = cursor_init(&cx.outer, txn, MAIN_DBI);
         if (unlikely(rc != MDBX_SUCCESS))
-          return rc;
+          return LOG_IFERR(rc);
         rc = tree_search(&cx.outer, nullptr, Z_MODIFY | Z_ROOTONLY);
         if (unlikely(rc != MDBX_SUCCESS))
-          return rc;
+          return LOG_IFERR(rc);
       }
     }
     dbs->sequence = new;
@@ -107,30 +106,23 @@ int mdbx_dbi_sequence(MDBX_txn *txn, MDBX_dbi dbi, uint64_t *result,
   return MDBX_SUCCESS;
 }
 
-int mdbx_cmp(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *a,
-             const MDBX_val *b) {
+int mdbx_cmp(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *a, const MDBX_val *b) {
   eASSERT(nullptr, txn->signature == txn_signature);
   tASSERT(txn, (dbi_state(txn, dbi) & DBI_VALID) && !dbi_changed(txn, dbi));
-  tASSERT(txn,
-          dbi < txn->env->n_dbi && (txn->env->dbs_flags[dbi] & DB_VALID) != 0);
+  tASSERT(txn, dbi < txn->env->n_dbi && (txn->env->dbs_flags[dbi] & DB_VALID) != 0);
   return txn->env->kvs[dbi].clc.k.cmp(a, b);
 }
 
-int mdbx_dcmp(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *a,
-              const MDBX_val *b) {
+int mdbx_dcmp(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *a, const MDBX_val *b) {
   eASSERT(nullptr, txn->signature == txn_signature);
   tASSERT(txn, (dbi_state(txn, dbi) & DBI_VALID) && !dbi_changed(txn, dbi));
   tASSERT(txn, dbi < txn->env->n_dbi && (txn->env->dbs_flags[dbi] & DB_VALID));
   return txn->env->kvs[dbi].clc.v.cmp(a, b);
 }
 
-__cold MDBX_cmp_func *mdbx_get_keycmp(MDBX_db_flags_t flags) {
-  return builtin_keycmp(flags);
-}
+__cold MDBX_cmp_func *mdbx_get_keycmp(MDBX_db_flags_t flags) { return builtin_keycmp(flags); }
 
-__cold MDBX_cmp_func *mdbx_get_datacmp(MDBX_db_flags_t flags) {
-  return builtin_datacmp(flags);
-}
+__cold MDBX_cmp_func *mdbx_get_datacmp(MDBX_db_flags_t flags) { return builtin_datacmp(flags); }
 
 /*----------------------------------------------------------------------------*/
 
@@ -223,10 +215,8 @@ __cold const char *mdbx_strerror_r(int errnum, char *buf, size_t buflen) {
   const char *msg = mdbx_liberr2str(errnum);
   if (!msg && buflen > 0 && buflen < INT_MAX) {
 #if defined(_WIN32) || defined(_WIN64)
-    DWORD size = FormatMessageA(
-        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
-        errnum, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, (DWORD)buflen,
-        nullptr);
+    DWORD size = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, errnum,
+                                MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, (DWORD)buflen, nullptr);
     while (size && buf[size - 1] <= ' ')
       --size;
     buf[size] = 0;
@@ -280,10 +270,8 @@ __cold const char *mdbx_strerror(int errnum) {
 const char *mdbx_strerror_r_ANSI2OEM(int errnum, char *buf, size_t buflen) {
   const char *msg = mdbx_liberr2str(errnum);
   if (!msg && buflen > 0 && buflen < INT_MAX) {
-    DWORD size = FormatMessageA(
-        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
-        errnum, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, (DWORD)buflen,
-        nullptr);
+    DWORD size = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, errnum,
+                                MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buf, (DWORD)buflen, nullptr);
     while (size && buf[size - 1] <= ' ')
       --size;
     buf[size] = 0;

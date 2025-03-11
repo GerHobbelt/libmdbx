@@ -122,8 +122,7 @@ extern void __gmon_start__(void) __attribute__((__weak__));
 #endif /* ENABLE_GPROF */
 
 MDBX_EXCLUDE_FOR_GPROF
-__cold static __attribute__((__constructor__)) void
-mdbx_global_constructor(void) {
+__cold static __attribute__((__constructor__)) void mdbx_global_constructor(void) {
 #ifdef ENABLE_GPROF
   if (!&__gmon_start__)
     monstartup((uintptr_t)&_init, (uintptr_t)&_fini);
@@ -154,9 +153,8 @@ mdbx_global_constructor(void) {
      * So, the REQUIREMENTS for this code:
      *  1. MUST detect WSL1 without false-negatives.
      *  2. DESIRABLE detect WSL2 but without the risk of violating the first. */
-    globals.running_on_WSL1 = probe_for_WSL(buffer.version) == 1 ||
-                              probe_for_WSL(buffer.sysname) == 1 ||
-                              probe_for_WSL(buffer.release) == 1;
+    globals.running_on_WSL1 =
+        probe_for_WSL(buffer.version) == 1 || probe_for_WSL(buffer.sysname) == 1 || probe_for_WSL(buffer.release) == 1;
   }
 #endif /* Linux */
 
@@ -164,8 +162,7 @@ mdbx_global_constructor(void) {
 }
 
 MDBX_EXCLUDE_FOR_GPROF
-__cold static __attribute__((__destructor__)) void
-mdbx_global_destructor(void) {
+__cold static __attribute__((__destructor__)) void mdbx_global_destructor(void) {
   mdbx_fini();
 #ifdef ENABLE_GPROF
   if (!&__gmon_start__)
@@ -180,13 +177,11 @@ mdbx_global_destructor(void) {
 struct libmdbx_globals globals;
 
 __cold static void mdbx_init(void) {
-  globals.runtime_flags = ((MDBX_DEBUG) > 0) * MDBX_DBG_ASSERT +
-                          ((MDBX_DEBUG) > 1) * MDBX_DBG_AUDIT;
+  globals.runtime_flags = ((MDBX_DEBUG) > 0) * MDBX_DBG_ASSERT + ((MDBX_DEBUG) > 1) * MDBX_DBG_AUDIT;
   globals.loglevel = MDBX_LOG_FATAL;
   ENSURE(nullptr, osal_fastmutex_init(&globals.debug_lock) == 0);
   osal_ctor();
-  assert(globals.sys_pagesize > 0 &&
-         (globals.sys_pagesize & (globals.sys_pagesize - 1)) == 0);
+  assert(globals.sys_pagesize > 0 && (globals.sys_pagesize & (globals.sys_pagesize - 1)) == 0);
   rthc_ctor();
 #if MDBX_DEBUG
   ENSURE(nullptr, troika_verify_fsm());
@@ -351,8 +346,7 @@ __dll_export
     " MDBX_TRUST_RTC=" MDBX_TRUST_RTC_CONFIG
     " MDBX_AVOID_MSYNC=" MDBX_STRINGIFY(MDBX_AVOID_MSYNC)
     " MDBX_ENABLE_REFUND=" MDBX_STRINGIFY(MDBX_ENABLE_REFUND)
-    " MDBX_ENABLE_MADVISE=" MDBX_STRINGIFY(MDBX_ENABLE_MADVISE)
-    " MDBX_ENABLE_MINCORE=" MDBX_STRINGIFY(MDBX_ENABLE_MINCORE)
+    " MDBX_USE_MINCORE=" MDBX_STRINGIFY(MDBX_USE_MINCORE)
     " MDBX_ENABLE_PGOP_STAT=" MDBX_STRINGIFY(MDBX_ENABLE_PGOP_STAT)
     " MDBX_ENABLE_PROFGC=" MDBX_STRINGIFY(MDBX_ENABLE_PROFGC)
 #if MDBX_DISABLE_VALIDATION
@@ -373,7 +367,7 @@ __dll_export
     " _GNU_SOURCE=NO"
 #endif /* _GNU_SOURCE */
 #ifdef __APPLE__
-    " MDBX_OSX_SPEED_INSTEADOF_DURABILITY=" MDBX_STRINGIFY(MDBX_OSX_SPEED_INSTEADOF_DURABILITY)
+    " MDBX_APPLE_SPEED_INSTEADOF_DURABILITY=" MDBX_STRINGIFY(MDBX_APPLE_SPEED_INSTEADOF_DURABILITY)
 #endif /* MacOS */
 #if defined(_WIN32) || defined(_WIN64)
     " MDBX_WITHOUT_MSVC_CRT=" MDBX_STRINGIFY(MDBX_WITHOUT_MSVC_CRT)
@@ -441,6 +435,7 @@ __dll_export
 #warning "Build flags undefined. Please use correct build script"
 #endif // _MSC_VER
 #endif
+  , MDBX_BUILD_METADATA
 };
 
 #ifdef __SANITIZE_ADDRESS__

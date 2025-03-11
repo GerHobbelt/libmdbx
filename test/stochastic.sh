@@ -3,6 +3,12 @@
 # Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru>
 # SPDX-License-Identifier: Apache-2.0
 
+if [ "${BASH_VERSION}" \< "4.3" ]; then
+  echo "Bash-shell 4.3 or later is REQUIRED." >&2
+  echo "Present Bash-shell version is '${BASH_VERSION}' (BASH_VERSION)" >&2
+  exit
+fi
+
 LIST=basic
 FROM=1
 UPTO=9999999
@@ -10,7 +16,7 @@ MONITOR=
 LOOPS=
 SKIP_MAKE=no
 GEOMETRY_JITTER=yes
-BANNER="$(which banner 2>/dev/null | echo echo)"
+BANNER="$(which banner 2>/dev/null || echo echo)"
 UNAME="$(uname -s 2>/dev/null || echo Unknown)"
 DB_UPTO_MB=17408
 PAGESIZE=min
@@ -18,6 +24,10 @@ DONT_CHECK_RAM=no
 EXTRA=no
 TAILLOG=0
 DELAY=0
+REPORT_DEPTH=no
+REPEAT=11
+ROUNDS=1
+SMALL=no
 
 while [ -n "$1" ]
 do
@@ -33,15 +43,20 @@ do
     echo "--skip-make            Don't (re)build libmdbx and test's executable"
     echo "--from NN              Start iterating from the NN ops per test case"
     echo "--upto NN              Don't run tests with more than NN ops per test case"
+    echo "--repeat NN            Repeat each testcase NN times within test run"
+    echo "--rounds NN            Cycle each n-ops/wbatch case NN times"
     echo "--loops NN             Stop after the NN loops"
     echo "--dir PATH             Specifies directory for test DB and other files (it will be cleared)"
     echo "--db-upto-mb NN        Limits upper size of test DB to the NN megabytes"
+    echo "--db-upto-gb NN        --''--''--''--''--''--''--''--''--  NN gigabytes"
     echo "--no-geometry-jitter   Disable jitter for geometry upper-size"
     echo "--pagesize NN          Use specified page size (256 is minimal and used by default)"
     echo "--dont-check-ram-size  Don't check available RAM"
     echo "--extra                Iterate extra modes/flags"
     echo "--taillog              Dump tail of test log on failure"
     echo "--delay NN             Delay NN seconds before run test"
+    echo "--report-depth         Report tree depth (tee+grep log)"
+    echo "--small                Small transactions/batch/nops pattern"
     echo "--help                 Print this usage help and exit"
     exit -2
   ;;
@@ -94,6 +109,22 @@ do
     fi
     shift
   ;;
+  --repeat|--reps|--rep)
+    REPEAT=$(($2))
+    if [ -z "$REPEAT" -o "$REPEAT" -lt 1 -o "$REPEAT" -gt 99 ]; then
+      echo "Invalid value '$REPEAT' for --repeat option"
+      exit -2
+    fi
+    shift
+  ;;
+  --rounds)
+    ROUNDS=$(($2))
+    if [ -z "$ROUNDS" -o "$ROUNDS" -lt 1 -o "$ROUNDS" -gt 99 ]; then
+      echo "Invalid value '$ROUNDS' for --rounds option"
+      exit -2
+    fi
+    shift
+  ;;
   --loops)
     LOOPS=$(($2))
     if [ -z "$LOOPS" -o "$LOOPS" -lt 1 -o "$LOOPS" -gt 99 ]; then
@@ -114,6 +145,14 @@ do
     DB_UPTO_MB=$(($2))
     if [ -z "$DB_UPTO_MB" -o "$DB_UPTO_MB" -lt 1 -o "$DB_UPTO_MB" -gt 4194304 ]; then
       echo "Invalid value '$DB_UPTO_MB' for --db-upto-mb option"
+      exit -2
+    fi
+    shift
+  ;;
+  --db-upto-gb)
+    DB_UPTO_MB=$(($2 * 1024))
+    if [ -z "$DB_UPTO_MB" -o "$DB_UPTO_MB" -lt 1 -o "$DB_UPTO_MB" -gt 4194304 ]; then
+      echo "Invalid value '$2' for --db-upto-gb option"
       exit -2
     fi
     shift
@@ -164,6 +203,12 @@ do
     DELAY=$(($2))
     shift
   ;;
+  --report-depth)
+    REPORT_DEPTH=yes
+  ;;
+  --small)
+    SMALL=yes
+  ;;
   *)
     echo "Unknown option '$1'"
     exit -2
@@ -174,12 +219,6 @@ done
 
 set -euo pipefail
 if [ -z "$MONITOR" ]; then
-  if which time >/dev/null 2>/dev/null; then
-    MONITOR=$(which time)
-    if $MONITOR -o /dev/stdout true >/dev/null 2>/dev/null; then
-      MONITOR="$MONITOR -o /dev/stdout"
-    fi
-  fi
   export MALLOC_CHECK_=7 MALLOC_PERTURB_=42
 fi
 
@@ -264,6 +303,7 @@ case ${UNAME} in
   ;;
 esac
 
+ulimit -c unlimited || echo "failed set unlimited core-dump size" >&2
 rm -f ${TESTDB_DIR}/*
 
 ###############################################################################
@@ -355,9 +395,15 @@ fi
 ###############################################################################
 # 5. run stochastic iterations
 
+if which setsid >/dev/null 2>/dev/null; then
+  SETSID=$(which setsid)
+else
+  SETSID=""
+fi
+
 if which lz4 >/dev/null; then
   function logger {
-    lz4 > ${TESTDB_DIR}/long.log.lz4
+    ${SETSID} lz4 -z -c > ${TESTDB_DIR}/long.log.lz4 || echo "FAILED 'lz4 -z -c > ${TESTDB_DIR}/long.log.lz4'" >&2
   }
   function taillog {
     if [ -s ${TESTDB_DIR}/long.log.lz4 ]; then
@@ -369,7 +415,7 @@ if which lz4 >/dev/null; then
   }
 elif which gzip >/dev/null; then
   function logger {
-    gzip > ${TESTDB_DIR}/long.log.gz
+    ${SETSID} gzip -c -k > ${TESTDB_DIR}/long.log.gz || echo "FAILED 'gzip -c -k > ${TESTDB_DIR}/long.log.gz'" >&2
   }
   function taillog {
     if [ -s ${TESTDB_DIR}/long.log.gz ]; then
@@ -381,7 +427,7 @@ elif which gzip >/dev/null; then
   }
 else
   function logger {
-    cat > ${TESTDB_DIR}/long.log
+    cat > ${TESTDB_DIR}/long.log || echo "FAILED 'cat > ${TESTDB_DIR}/long.log'" >&2
   }
   function taillog {
     if [ -s ${TESTDB_DIR}/long.log ]; then
@@ -411,34 +457,178 @@ function bits2options {
   join , ${list[@]}
 }
 
+LFD=0
+trap "echo 'SIGPIPE(ignored)'" SIGPIPE
+
 function failed {
+  set +euo pipefail
   echo "FAILED" >&2
+  if [ ${LFD} -ne 0 ]; then
+    sleep 0.05
+    echo "@@@ END-OF-LOG/FAILED" >&${LFD}
+    sleep 0.05
+    exec {LFD}>&-
+    LFD=0
+  fi
   if [ ${TAILLOG} -gt 0 ]; then
     taillog
   fi
   exit 1
 }
 
-function check_deep {
-  if [ "$case" = "basic" -o "$case" = "--hill" ]; then
-    tee >(logger) | grep -e reach -e achieve
-  else
-    logger
+function on_exit {
+  set +euo pipefail
+  if [ ${LFD} -ne 0 ]; then
+    sleep 0.05
+    echo "@@@ END-OF-LOG/EXIT" >&${LFD}
+    sleep 0.05
+    exec {LFD}>&-
+    LFD=0
   fi
+  echo "--- EXIT" >&2
 }
+trap on_exit EXIT
 
 function probe {
   echo "----------------------------------------------- $(date)"
-  echo "${caption}"
+  echo "PROBE №${caption}"
   rm -f ${TESTDB_DIR}/* || failed
   for case in $LIST
   do
-    echo "Run ./mdbx_test ${speculum} --random-writemap=no --ignore-dbfull --repeat=11 --pathname=${TESTDB_DIR}/long.db --cleanup-after=no --geometry-jitter=${GEOMETRY_JITTER} $@ $case"
-    ${MONITOR} ./mdbx_test ${speculum} --random-writemap=no --ignore-dbfull --repeat=11 --pathname=${TESTDB_DIR}/long.db --cleanup-after=no --geometry-jitter=${GEOMETRY_JITTER} "$@" $case | check_deep \
-      && ${MONITOR} ./mdbx_chk ${TESTDB_DIR}/long.db | tee ${TESTDB_DIR}/long-chk.log \
-      && ([ ! -e ${TESTDB_DIR}/long.db-copy ] || ${MONITOR} ./mdbx_chk ${TESTDB_DIR}/long.db-copy | tee ${TESTDB_DIR}/long-chk-copy.log) \
+    echo "${speculum} --random-writemap=no --ignore-dbfull --repeat=${REPEAT} --pathname=${TESTDB_DIR}/long.db --cleanup-after=no --geometry-jitter=${GEOMETRY_JITTER} $@ $case"
+    if [[ ${REPORT_DEPTH} = "yes" && ($case = "basic" || $case = "--hill") ]]; then
+      if [ -z "${TEE4PIPE:-}" ]; then
+        TEE4PIPE=$(tee --help | grep -q ' -p' && echo "tee -i -p" || echo "tee -i")
+      fi
+      exec {LFD}> >(${TEE4PIPE} >(logger) | grep -e reach -e achieve)
+    else
+      exec {LFD}> >(logger)
+    fi
+    ${MONITOR} ./mdbx_test ${speculum} --random-writemap=no --ignore-dbfull --repeat=${REPEAT} --pathname=${TESTDB_DIR}/long.db --cleanup-after=no --geometry-jitter=${GEOMETRY_JITTER} "$@" $case >&${LFD} \
+      && ${MONITOR} ./mdbx_chk -q ${TESTDB_DIR}/long.db | tee ${TESTDB_DIR}/long-chk.log \
+      && ([ ! -e ${TESTDB_DIR}/long.db-copy ] || ${MONITOR} ./mdbx_chk -q ${TESTDB_DIR}/long.db-copy | tee ${TESTDB_DIR}/long-chk-copy.log) \
       || failed
-   done
+    if [ ${LFD} -ne 0 ]; then
+      echo "@@@ END-OF-LOG/ITERATION" >&${LFD}
+      exec {LFD}>&-
+      LFD=0
+    fi
+  done
+}
+
+function pass {
+  for ((round=1; round <= ROUNDS; ++round)); do
+    echo "======================================================================="
+    if [[ $ROUNDS > 1 ]]; then
+      ${BANNER} "$nops / $wbatch / round $round of $ROUNDS"
+    else
+      ${BANNER} "$nops / $wbatch"
+    fi
+    subcase=0
+    for ((bits=2**${#options[@]}; --bits >= 0; )); do
+      seed=$(($(date +%s) + RANDOM))
+
+      split=30
+      caption="$((++count)) int-key,with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) int-key,int-data, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.integer --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) int-key,fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+
+      split=24
+      caption="$((++count)) int-key,with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) int-key,int-data, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.integer --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) int-key,fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+
+      split=16
+      caption="$((++count)) int-key,w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) int-key,with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) int-key,int-data, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.integer --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) int-key,fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+
+      if [ "$EXTRA" != "no" ]; then
+        split=10
+        caption="$((++count)) int-key,w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
+          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+        caption="$((++count)) int-key,with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+        caption="$((++count)) int-key,int-data, split=${split}, case $((++subcase)) of ${cases}" probe \
+          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.integer --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+        caption="$((++count)) w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
+          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+        caption="$((++count)) with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+        caption="$((++count)) int-key,fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
+          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
+          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+        caption="$((++count)) fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
+          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
+          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      fi
+
+      split=4
+      caption="$((++count)) int-key,w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) int-key,int-data, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.integer --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) int-key,fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+      caption="$((++count)) fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
+        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
+        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
+    done # options
+    cases="${subcase}"
+  done
 }
 
 #------------------------------------------------------------------------------
@@ -450,126 +640,31 @@ fi
 count=0
 loop=0
 cases='?'
-for nops in 10 33 100 333 1000 3333 10000 33333 100000 333333 1000000 3333333 10000000 33333333 100000000 333333333 1000000000; do
-  if [ $nops -lt $FROM ]; then continue; fi
-  if [ $nops -gt $UPTO ]; then echo "The '--upto $UPTO' limit reached"; break; fi
-  if [ -n "$LOOPS" ] && [ $loop -ge "$LOOPS" ]; then echo "The '--loops $LOOPS' limit reached"; break; fi
-  echo "======================================================================="
-  wbatch=$((nops / 7 + 1))
-  speculum=$([ $nops -le 1000 ] && echo '--speculum' || true)
-  while true; do
+if [[ $SMALL != "yes" ]]; then
+  for nops in 10 33 100 333 1000 3333 10000 33333 100000 333333 1000000 3333333 10000000 33333333 100000000 333333333 1000000000; do
+    if [ $nops -lt $FROM ]; then continue; fi
+    if [ $nops -gt $UPTO ]; then echo "The '--upto $UPTO' limit reached"; break; fi
+    if [ -n "$LOOPS" ] && [ $loop -ge "$LOOPS" ]; then echo "The '--loops $LOOPS' limit reached"; break; fi
     echo "======================================================================="
-    ${BANNER} "$nops / $wbatch"
-    subcase=0
-    for ((bits=2**${#options[@]}; --bits >= 0; )); do
-      seed=$(($(date +%s) + RANDOM))
-
-      split=30
-      caption="Probe #$((++count)) int-key,with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) int-key,int-data, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.integer --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) int-key,fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-
-      split=24
-      caption="Probe #$((++count)) int-key,with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) int-key,int-data, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.integer --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) int-key,fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-
-
-      split=16
-      caption="Probe #$((++count)) int-key,w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) int-key,with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) int-key,int-data, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.integer --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) int-key,fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-
-      if [ "$EXTRA" != "no" ]; then
-        split=10
-        caption="Probe #$((++count)) int-key,w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
-          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-        caption="Probe #$((++count)) int-key,with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-        caption="Probe #$((++count)) int-key,int-data, split=${split}, case $((++subcase)) of ${cases}" probe \
-          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.integer --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-        caption="Probe #$((++count)) w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
-          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-        caption="Probe #$((++count)) with-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-        caption="Probe #$((++count)) int-key,fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
-          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
-          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-        caption="Probe #$((++count)) fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
-          --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
-          --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      fi
-
-      split=4
-      caption="Probe #$((++count)) int-key,w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) int-key,int-data, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.integer --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=max \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) w/o-dups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=-data.dups --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen.min=min --datalen.max=1111 \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) int-key,fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+key.integer,+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-      caption="Probe #$((++count)) fixdups, split=${split}, case $((++subcase)) of ${cases}" probe \
-        --prng-seed=${seed} --pagesize=$PAGESIZE --size-upper-upto=${db_size_mb}M --table=+data.fixed --keygen.split=${split} --keylen.min=min --keylen.max=max --datalen=rnd \
-        --nops=$nops --batch.write=$wbatch --mode=$(bits2options $bits)${syncmodes[count%4]}
-    done # options
+    wbatch=$((nops / 7 + 1))
+    speculum=$([ $nops -le 1000 ] && echo '--speculum' || true)
+    while true; do
+      pass
+      loop=$((loop + 1))
+      if [ -n "$LOOPS" ] && [ $loop -ge "$LOOPS" ]; then break; fi
+      wbatch=$(((wbatch > 7) ? wbatch / 7 : 1))
+      if [ $wbatch -eq 1 -o $((nops / wbatch)) -gt 1000 ]; then break; fi
+    done # batch (write-ops per txn)
+  done # n-ops
+else
+  for ((wbatch=FROM; wbatch<=UPTO; ++wbatch)); do
+    if [ -n "$LOOPS" ] && [ $loop -ge "$LOOPS" ]; then echo "The '--loops $LOOPS' limit reached"; break; fi
+    echo "======================================================================="
+    speculum=$([ $wbatch -le 1000 ] && echo '--speculum' || true)
+    nops=$((wbatch / 7 + 1))
+    pass
     loop=$((loop + 1))
-    if [ -n "$LOOPS" ] && [ $loop -ge "$LOOPS" ]; then break; fi
-    cases="${subcase}"
-    wbatch=$(((wbatch > 7) ? wbatch / 7 : 1))
-    if [ $wbatch -eq 1 -o $((nops / wbatch)) -gt 1000 ]; then break; fi
-  done # batch (write-ops per txn)
-done # n-ops
+  done # wbatch
+fi
 
 echo "=== ALL DONE ====================== $(date)"
