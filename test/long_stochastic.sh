@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+# Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru>
+# SPDX-License-Identifier: Apache-2.0
+
 LIST=basic
 FROM=1
 UPTO=9999999
@@ -14,6 +17,7 @@ PAGESIZE=min
 DONT_CHECK_RAM=no
 EXTRA=no
 TAILLOG=0
+DELAY=0
 
 while [ -n "$1" ]
 do
@@ -37,6 +41,7 @@ do
     echo "--dont-check-ram-size  Don't check available RAM"
     echo "--extra                Iterate extra modes/flags"
     echo "--taillog              Dump tail of test log on failure"
+    echo "--delay NN             Delay NN seconds before run test"
     echo "--help                 Print this usage help and exit"
     exit -2
   ;;
@@ -154,6 +159,10 @@ do
   ;;
   --extra)
     EXTRA=yes
+  ;;
+  --delay)
+    DELAY=$(($2))
+    shift
   ;;
   *)
     echo "Unknown option '$1'"
@@ -385,9 +394,9 @@ else
 fi
 
 if [ "$EXTRA" != "no" ]; then
-  options=(writemap lifo notls perturb nomeminit nordahead)
+  options=(perturb nomeminit nordahead writemap lifo nostickythreads)
 else
-  options=(writemap lifo notls)
+  options=(writemap lifo nostickythreads)
 fi
 syncmodes=("" ,+nosync-safe ,+nosync-utterly ,+nometasync)
 function join { local IFS="$1"; shift; echo "$*"; }
@@ -433,6 +442,10 @@ function probe {
 }
 
 #------------------------------------------------------------------------------
+
+if [ "$DELAY" != "0" ]; then
+  sleep $DELAY
+fi
 
 count=0
 loop=0

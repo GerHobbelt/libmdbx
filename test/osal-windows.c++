@@ -1,16 +1,5 @@
-/*
- * Copyright 2017-2024 Leonid Yuriev <leo@yuriev.ru>
- * and other libmdbx authors: please see AUTHORS file.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted only as authorized by the OpenLDAP
- * Public License.
- *
- * A copy of this license is available in the file LICENSE in the
- * top-level directory of the distribution or, alternatively, at
- * <http://www.OpenLDAP.org/license.html>.
- */
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \copyright SPDX-License-Identifier: Apache-2.0
 
 #include "test.h++"
 
@@ -112,8 +101,6 @@ int osal_waitfor(unsigned id) {
   return waitstatus2errcode(rc);
 }
 
-mdbx_pid_t osal_getpid(void) { return GetCurrentProcessId(); }
-
 int osal_delay(unsigned seconds) {
   Sleep(seconds * 1000u);
   return 0;
@@ -187,6 +174,10 @@ bool actor_config::osal_deserialize(const char *str, const char *end,
 
 typedef std::pair<HANDLE, actor_status> child;
 static std::unordered_map<mdbx_pid_t, child> children;
+
+bool osal_multiactor_mode(void) {
+  return hProgressActiveEvent || hProgressPassiveEvent;
+}
 
 bool osal_progress_push(bool active) {
   if (!children.empty()) {
@@ -300,7 +291,7 @@ int osal_actor_start(const actor_config &config, mdbx_pid_t &pid) {
     failure_perror("QueryFullProcessImageName()", GetLastError());
 
   if (exename[1] != ':') {
-    exename_size = GetModuleFileName(NULL, exename, sizeof(exename));
+    exename_size = GetModuleFileNameA(NULL, exename, sizeof(exename));
     if (exename_size >= sizeof(exename))
       return ERROR_BAD_LENGTH;
   }

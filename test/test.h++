@@ -1,16 +1,5 @@
-/*
- * Copyright 2017-2024 Leonid Yuriev <leo@yuriev.ru>
- * and other libmdbx authors: please see AUTHORS file.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted only as authorized by the OpenLDAP
- * Public License.
- *
- * A copy of this license is available in the file LICENSE in the
- * top-level directory of the distribution or, alternatively, at
- * <http://www.OpenLDAP.org/license.html>.
- */
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \copyright SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
@@ -205,18 +194,22 @@ protected:
 #if SPECULUM_CURSORS
   scoped_cursor_guard speculum_cursors[5 + 1];
   void speculum_prepare_cursors(const Item &item);
-  void speculum_check_cursor(const char *where, const char *stage,
+  bool speculum_check_cursor(const char *where, const char *stage,
                              const testcase::SET::const_iterator &it,
                              int cursor_err, const MDBX_val &cursor_key,
-                             const MDBX_val &cursor_data) const;
-  void speculum_check_cursor(const char *where, const char *stage,
+                             const MDBX_val &cursor_data,
+                             MDBX_cursor *cursor) const;
+  bool speculum_check_cursor(const char *where, const char *stage,
                              const testcase::SET::const_iterator &it,
                              MDBX_cursor *cursor,
                              const MDBX_cursor_op op) const;
+  void speculum_render(const testcase::SET::const_iterator &it,
+                       const MDBX_cursor *ref) const;
 #endif /* SPECULUM_CURSORS */
-  void speculum_check_iterator(const char *where, const char *stage,
+  bool speculum_check_iterator(const char *where, const char *stage,
                                const testcase::SET::const_iterator &it,
-                               const MDBX_val &k, const MDBX_val &v) const;
+                               const MDBX_val &k, const MDBX_val &v,
+                               MDBX_cursor *cursor) const;
 
   void verbose(const char *where, const char *stage,
                const testcase::SET::const_iterator &it) const;
@@ -261,6 +254,8 @@ protected:
   void cursor_renew();
   void txn_inject_writefault(void);
   void txn_inject_writefault(MDBX_txn *txn);
+  bool txn_probe_parking();
+
   void fetch_canary();
   void update_canary(uint64_t increment);
   bool checkdata(const char *step, MDBX_dbi handle, MDBX_val key2check,
@@ -282,7 +277,7 @@ protected:
   void signal();
   bool should_continue(bool check_timeout_only = false) const;
 
-  void failure(const char *fmt, ...) const;
+  bool MDBX_PRINTF_ARGS(2, 3) failure(const char *fmt, ...) const;
   void generate_pair(const keygen::serial_t serial, keygen::buffer &out_key,
                      keygen::buffer &out_value, keygen::serial_t data_age) {
     keyvalue_maker.pair(serial, out_key, out_value, data_age, false);

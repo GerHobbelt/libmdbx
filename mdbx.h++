@@ -1,8 +1,8 @@
-﻿/// \file mdbx.h++
-/// \brief The libmdbx C++ API header file.
+﻿/// \copyright SPDX-License-Identifier: Apache-2.0
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2020-2024
 ///
-/// \author Copyright (c) 2020-2024, Leonid Yuriev <leo@yuriev.ru>.
-/// \copyright SPDX-License-Identifier: Apache-2.0
+/// \file mdbx.h++
+/// \brief The libmdbx C++ API header file.
 ///
 /// Tested with:
 ///  - Elbrus LCC >= 1.23 (http://www.mcst.ru/lcc);
@@ -354,7 +354,7 @@ static MDBX_CXX20_CONSTEXPR void *memcpy(void *dest, const void *src,
 static MDBX_CXX20_CONSTEXPR int memcmp(const void *a, const void *b,
                                        size_t bytes) noexcept;
 
-/// \brief Legacy default allocator
+/// \brief Legacy allocator
 /// but it is recommended to use \ref polymorphic_allocator.
 using legacy_allocator = ::std::string::allocator_type;
 
@@ -582,6 +582,8 @@ MDBX_DECLARE_EXCEPTION(transaction_full);
 MDBX_DECLARE_EXCEPTION(transaction_overlapping);
 MDBX_DECLARE_EXCEPTION(duplicated_lck_file);
 MDBX_DECLARE_EXCEPTION(dangling_map_id);
+MDBX_DECLARE_EXCEPTION(transaction_ousted);
+MDBX_DECLARE_EXCEPTION(mvcc_retarded);
 #undef MDBX_DECLARE_EXCEPTION
 
 [[noreturn]] LIBMDBX_API void throw_too_small_target_buffer();
@@ -1734,24 +1736,13 @@ private:
         return capacity_bytes < sizeof(bin);
       }
 
-      enum : byte {
-        /* Little Endian:
-         *   last byte is the most significant byte of u_.allocated.cap,
-         *   so use higher bit of capacity as the inplace-flag */
-        le_lastbyte_mask = 0x80,
-        /* Big Endian:
-         *   last byte is the least significant byte of u_.allocated.cap,
-         *   so use lower bit of capacity as the inplace-flag. */
-        be_lastbyte_mask = 0x01
+      enum : byte { lastbyte_inplace_signature = byte(~0u) };
+      enum : size_t {
+        inplace_signature_limit =
+            size_t(lastbyte_inplace_signature)
+            << (sizeof(size_t /* allocated::capacity_bytes_ */) - 1) * CHAR_BIT
       };
 
-      static constexpr byte inplace_lastbyte_mask() noexcept {
-        static_assert(
-            endian::native == endian::little || endian::native == endian::big,
-            "Only the little-endian or big-endian bytes order are supported");
-        return (endian::native == endian::little) ? le_lastbyte_mask
-                                                  : be_lastbyte_mask;
-      }
       constexpr byte lastbyte() const noexcept {
         return inplace_[sizeof(bin) - 1];
       }
@@ -1760,7 +1751,14 @@ private:
       }
 
       constexpr bool is_inplace() const noexcept {
-        return (lastbyte() & inplace_lastbyte_mask()) != 0;
+        static_assert(size_t(inplace_signature_limit) > size_t(max_capacity),
+                      "WTF?");
+        static_assert(
+            std::numeric_limits<size_t>::max() -
+                    (std::numeric_limits<size_t>::max() >> CHAR_BIT) ==
+                inplace_signature_limit,
+            "WTF?");
+        return lastbyte() == lastbyte_inplace_signature;
       }
       constexpr bool is_allocated() const noexcept { return !is_inplace(); }
 
@@ -1773,8 +1771,8 @@ private:
         }
         if (::std::is_trivial<allocator_pointer>::value)
           /* workaround for "uninitialized" warning from some compilers */
-          ::std::memset(&allocated_.ptr_, 0, sizeof(allocated_.ptr_));
-        lastbyte() = inplace_lastbyte_mask();
+          memset(&allocated_.ptr_, 0, sizeof(allocated_.ptr_));
+        lastbyte() = lastbyte_inplace_signature;
         MDBX_CONSTEXPR_ASSERT(is_inplace() && address() == inplace_ &&
                               is_suitable_for_inplace(capacity()));
         return address();
@@ -1783,11 +1781,7 @@ private:
       template <bool construct_ptr>
       MDBX_CXX17_CONSTEXPR byte *
       make_allocated(allocator_pointer ptr, size_t capacity_bytes) noexcept {
-        MDBX_CONSTEXPR_ASSERT(
-            (capacity_bytes & be_lastbyte_mask) == 0 &&
-            ((capacity_bytes >>
-              (sizeof(allocated_.capacity_bytes_) - 1) * CHAR_BIT) &
-             le_lastbyte_mask) == 0);
+        MDBX_CONSTEXPR_ASSERT(inplace_signature_limit > capacity_bytes);
         if (construct_ptr)
           /* properly construct allocator::pointer */
           new (&allocated_) allocated(ptr, capacity_bytes);
@@ -1907,7 +1901,6 @@ private:
       const size_t old_capacity = bin_.capacity();
       const size_t new_capacity =
           bin::advise_capacity(old_capacity, wanna_capacity);
-      assert(new_capacity >= wanna_capacity);
       if (MDBX_LIKELY(new_capacity == old_capacity))
         MDBX_CXX20_LIKELY {
           assert(bin_.is_inplace() ==
@@ -2073,7 +2066,13 @@ private:
       return *this;
     }
 
-    MDBX_CXX20_CONSTEXPR void clear() { reshape<true>(0, 0, nullptr, 0); }
+    MDBX_CXX20_CONSTEXPR void *clear() {
+      return reshape<true>(0, 0, nullptr, 0);
+    }
+    MDBX_CXX20_CONSTEXPR void *clear_and_reserve(size_t whole_capacity,
+                                                 size_t headroom) {
+      return reshape<false>(whole_capacity, headroom, nullptr, 0);
+    }
     MDBX_CXX20_CONSTEXPR void resize(size_t capacity, size_t headroom,
                                      slice &content) {
       content.iov_base =
@@ -2332,14 +2331,16 @@ public:
 
   buffer(const char *c_str, bool make_reference,
          const allocator_type &allocator = allocator_type())
-      : buffer(::mdbx::slice(c_str), make_reference, allocator) {}
+      : buffer(::mdbx::slice(c_str), make_reference, allocator){}
 
 #if defined(DOXYGEN) ||                                                        \
     (defined(__cpp_lib_string_view) && __cpp_lib_string_view >= 201606L)
-  template <class CHAR, class T>
-  buffer(const ::std::basic_string_view<CHAR, T> &view, bool make_reference,
-         const allocator_type &allocator = allocator_type())
-      : buffer(::mdbx::slice(view), make_reference, allocator) {}
+        template <class CHAR, class T>
+        buffer(const ::std::basic_string_view<CHAR, T> &view,
+               bool make_reference,
+               const allocator_type &allocator = allocator_type())
+      : buffer(::mdbx::slice(view), make_reference, allocator) {
+  }
 #endif /* __cpp_lib_string_view >= 201606L */
 
   MDBX_CXX20_CONSTEXPR
@@ -2365,15 +2366,16 @@ public:
 
   MDBX_CXX20_CONSTEXPR
   buffer(const char *c_str, const allocator_type &allocator = allocator_type())
-      : buffer(::mdbx::slice(c_str), allocator) {}
+      : buffer(::mdbx::slice(c_str), allocator){}
 
 #if defined(DOXYGEN) ||                                                        \
     (defined(__cpp_lib_string_view) && __cpp_lib_string_view >= 201606L)
-  template <class CHAR, class T>
-  MDBX_CXX20_CONSTEXPR
-  buffer(const ::std::basic_string_view<CHAR, T> &view,
-         const allocator_type &allocator = allocator_type())
-      : buffer(::mdbx::slice(view), allocator) {}
+        template <class CHAR, class T>
+        MDBX_CXX20_CONSTEXPR
+        buffer(const ::std::basic_string_view<CHAR, T> &view,
+               const allocator_type &allocator = allocator_type())
+      : buffer(::mdbx::slice(view), allocator) {
+  }
 #endif /* __cpp_lib_string_view >= 201606L */
 
   buffer(size_t head_room, size_t tail_room,
@@ -2803,9 +2805,11 @@ public:
   }
 
   /// \brief Clears the contents and storage.
-  void clear() noexcept {
-    slice_.clear();
-    silo_.clear();
+  void clear() noexcept { slice_.assign(silo_.clear(), size_t(0)); }
+
+  /// \brief Clears the contents and reserve storage.
+  void clear_and_reserve(size_t whole_capacity, size_t headroom = 0) noexcept {
+    slice_.assign(silo_.clear_and_reserve(whole_capacity, headroom), size_t(0));
   }
 
   /// \brief Reduces memory usage by freeing unused storage space.
@@ -2893,7 +2897,7 @@ public:
   buffer &append(const void *src, size_t bytes) {
     if (MDBX_UNLIKELY(tailroom() < check_length(bytes)))
       MDBX_CXX20_UNLIKELY reserve_tailroom(bytes);
-    memcpy(slice_.byte_ptr() + size(), src, bytes);
+    memcpy(end_byte_ptr(), src, bytes);
     slice_.iov_len += bytes;
     return *this;
   }
@@ -2957,6 +2961,79 @@ public:
   buffer &append_decoded_base64(const struct slice &data,
                                 bool ignore_spaces = false) {
     return append_producer(from_base64(data, ignore_spaces));
+  }
+
+  buffer &append_u8(uint_fast8_t u8) {
+    if (MDBX_UNLIKELY(tailroom() < 1))
+      MDBX_CXX20_UNLIKELY reserve_tailroom(1);
+    *slice_.end_byte_ptr() = uint8_t(u8);
+    slice_.iov_len += 1;
+    return *this;
+  }
+
+  buffer &append_byte(uint_fast8_t byte) { return append_u8(byte); }
+
+  buffer &append_u16(uint_fast16_t u16) {
+    if (MDBX_UNLIKELY(tailroom() < 2))
+      MDBX_CXX20_UNLIKELY reserve_tailroom(2);
+    const auto ptr = slice_.end_byte_ptr();
+    ptr[0] = uint8_t(u16);
+    ptr[1] = uint8_t(u16 >> 8);
+    slice_.iov_len += 2;
+    return *this;
+  }
+
+  buffer &append_u24(uint_fast32_t u24) {
+    if (MDBX_UNLIKELY(tailroom() < 3))
+      MDBX_CXX20_UNLIKELY reserve_tailroom(3);
+    const auto ptr = slice_.end_byte_ptr();
+    ptr[0] = uint8_t(u24);
+    ptr[1] = uint8_t(u24 >> 8);
+    ptr[2] = uint8_t(u24 >> 16);
+    slice_.iov_len += 3;
+    return *this;
+  }
+
+  buffer &append_u32(uint_fast32_t u32) {
+    if (MDBX_UNLIKELY(tailroom() < 4))
+      MDBX_CXX20_UNLIKELY reserve_tailroom(4);
+    const auto ptr = slice_.end_byte_ptr();
+    ptr[0] = uint8_t(u32);
+    ptr[1] = uint8_t(u32 >> 8);
+    ptr[2] = uint8_t(u32 >> 16);
+    ptr[3] = uint8_t(u32 >> 24);
+    slice_.iov_len += 4;
+    return *this;
+  }
+
+  buffer &append_u48(uint_fast64_t u48) {
+    if (MDBX_UNLIKELY(tailroom() < 6))
+      MDBX_CXX20_UNLIKELY reserve_tailroom(6);
+    const auto ptr = slice_.end_byte_ptr();
+    ptr[0] = uint8_t(u48);
+    ptr[1] = uint8_t(u48 >> 8);
+    ptr[2] = uint8_t(u48 >> 16);
+    ptr[3] = uint8_t(u48 >> 24);
+    ptr[4] = uint8_t(u48 >> 32);
+    ptr[5] = uint8_t(u48 >> 40);
+    slice_.iov_len += 6;
+    return *this;
+  }
+
+  buffer &append_u64(uint_fast64_t u64) {
+    if (MDBX_UNLIKELY(tailroom() < 8))
+      MDBX_CXX20_UNLIKELY reserve_tailroom(8);
+    const auto ptr = slice_.end_byte_ptr();
+    ptr[0] = uint8_t(u64);
+    ptr[1] = uint8_t(u64 >> 8);
+    ptr[2] = uint8_t(u64 >> 16);
+    ptr[3] = uint8_t(u64 >> 24);
+    ptr[4] = uint8_t(u64 >> 32);
+    ptr[5] = uint8_t(u64 >> 40);
+    ptr[6] = uint8_t(u64 >> 48);
+    ptr[7] = uint8_t(u64 >> 56);
+    slice_.iov_len += 8;
+    return *this;
   }
 
   //----------------------------------------------------------------------------
@@ -3460,8 +3537,8 @@ enum put_mode {
 /// instances, but does not destroys the represented underlying object from the
 /// own class destructor.
 ///
-/// An environment supports multiple key-value sub-databases (aka key-value
-/// spaces or tables), all residing in the same shared-memory map.
+/// An environment supports multiple key-value tables (aka key-value
+/// maps, spaces or sub-databases), all residing in the same shared-memory map.
 class LIBMDBX_API_TYPE env {
   friend class txn;
 
@@ -3599,8 +3676,10 @@ public:
 
   /// \brief Operate options.
   struct LIBMDBX_API_TYPE operate_options {
-    /// \copydoc MDBX_NOTLS
-    bool orphan_read_transactions{false};
+    /// \copydoc MDBX_NOSTICKYTHREADS
+    bool no_sticky_threads{false};
+    /// \brief Разрешает вложенные транзакции ценой отключения
+    /// \ref MDBX_WRITEMAP и увеличением накладных расходов.
     bool nested_write_transactions{false};
     /// \copydoc MDBX_EXCLUSIVE
     bool exclusive{false};
@@ -3608,6 +3687,8 @@ public:
     bool disable_readahead{false};
     /// \copydoc MDBX_NOMEMINIT
     bool disable_clear_memory{false};
+    /// \copydoc MDBX_VALIDATION
+    bool enable_validation{false};
     MDBX_CXX11_CONSTEXPR operate_options() noexcept {}
     MDBX_CXX11_CONSTEXPR
     operate_options(const operate_options &) noexcept = default;
@@ -3745,22 +3826,25 @@ public:
     static inline size_t pairsize4page_max(const env &, value_mode);
 
     /// \brief Returns maximal data size in bytes to fit in a leaf-page or
-    /// single overflow/large-page for specified size and database flags.
+    /// single large/overflow-page for specified size and database flags.
     static inline size_t valsize4page_max(intptr_t pagesize,
                                           MDBX_db_flags_t flags);
     /// \brief Returns maximal data size in bytes to fit in a leaf-page or
-    /// single overflow/large-page for specified page size and values mode.
+    /// single large/overflow-page for specified page size and values mode.
     static inline size_t valsize4page_max(intptr_t pagesize, value_mode);
     /// \brief Returns maximal data size in bytes to fit in a leaf-page or
-    /// single overflow/large-page for given environment and database flags.
+    /// single large/overflow-page for given environment and database flags.
     static inline size_t valsize4page_max(const env &, MDBX_db_flags_t flags);
     /// \brief Returns maximal data size in bytes to fit in a leaf-page or
-    /// single overflow/large-page for specified page size and values mode.
+    /// single large/overflow-page for specified page size and values mode.
     static inline size_t valsize4page_max(const env &, value_mode);
 
     /// \brief Returns the maximal write transaction size (i.e. limit for
     /// summary volume of dirty pages) in bytes for specified page size.
     static inline size_t transaction_size_max(intptr_t pagesize);
+
+    /// \brief Returns the maximum opened map handles, aka DBI-handles.
+    static inline size_t max_map_handles(void);
   };
 
   /// \brief Returns the minimal database size in bytes for the environment.
@@ -4017,7 +4101,7 @@ public:
   /// environment is busy by other thread or none of the thresholds are reached.
   bool poll_sync_to_disk() { return sync_to_disk(false, true); }
 
-  /// \brief Close a key-value map (aka sub-database) handle. Normally
+  /// \brief Close a key-value map (aka table) handle. Normally
   /// unnecessary.
   ///
   /// Closing a database handle is not necessary, but lets \ref txn::open_map()
@@ -4274,11 +4358,18 @@ public:
 
   //----------------------------------------------------------------------------
 
-  /// \brief Reset a read-only transaction.
+  /// \brief Reset read-only transaction.
   inline void reset_reading();
 
-  /// \brief Renew a read-only transaction.
+  /// \brief Renew read-only transaction.
   inline void renew_reading();
+
+  /// \brief Park read-only transaction.
+  inline void park_reading(bool autounpark = true);
+
+  /// \brief Resume parked read-only transaction.
+  /// \returns True if transaction was restarted while `restart_if_ousted=true`.
+  inline bool unpark_reading(bool restart_if_ousted = true);
 
   /// \brief Start nested write transaction.
   txn_managed start_nested();
@@ -4305,6 +4396,18 @@ public:
       const ::std::string &name,
       const ::mdbx::key_mode key_mode = ::mdbx::key_mode::usual,
       const ::mdbx::value_mode value_mode = ::mdbx::value_mode::single) const;
+  /// \brief Open existing key-value map.
+  inline map_handle open_map(
+      const ::mdbx::slice &name,
+      const ::mdbx::key_mode key_mode = ::mdbx::key_mode::usual,
+      const ::mdbx::value_mode value_mode = ::mdbx::value_mode::single) const;
+
+  /// \brief Open existing key-value map.
+  inline map_handle open_map_accede(const char *name) const;
+  /// \brief Open existing key-value map.
+  inline map_handle open_map_accede(const ::std::string &name) const;
+  /// \brief Open existing key-value map.
+  inline map_handle open_map_accede(const ::mdbx::slice &name) const;
 
   /// \brief Create new or open existing key-value map.
   inline map_handle
@@ -4314,6 +4417,11 @@ public:
   /// \brief Create new or open existing key-value map.
   inline map_handle
   create_map(const ::std::string &name,
+             const ::mdbx::key_mode key_mode = ::mdbx::key_mode::usual,
+             const ::mdbx::value_mode value_mode = ::mdbx::value_mode::single);
+  /// \brief Create new or open existing key-value map.
+  inline map_handle
+  create_map(const ::mdbx::slice &name,
              const ::mdbx::key_mode key_mode = ::mdbx::key_mode::usual,
              const ::mdbx::value_mode value_mode = ::mdbx::value_mode::single);
 
@@ -4327,6 +4435,10 @@ public:
   /// \return `True` if the key-value map existed and was deleted, either
   /// `false` if the key-value map did not exist and there is nothing to delete.
   inline bool drop_map(const ::std::string &name, bool throw_if_absent = false);
+  /// \brief Drop key-value map.
+  /// \return `True` if the key-value map existed and was deleted, either
+  /// `false` if the key-value map did not exist and there is nothing to delete.
+  bool drop_map(const ::mdbx::slice &name, bool throw_if_absent = false);
 
   /// \brief Clear key-value map.
   inline void clear_map(map_handle map);
@@ -4337,14 +4449,82 @@ public:
   /// `false` if the key-value map did not exist and there is nothing to clear.
   inline bool clear_map(const ::std::string &name,
                         bool throw_if_absent = false);
+  /// \return `True` if the key-value map existed and was cleared, either
+  /// `false` if the key-value map did not exist and there is nothing to clear.
+  bool clear_map(const ::mdbx::slice &name, bool throw_if_absent = false);
+
+  /// \brief Переименовывает таблицу ключ-значение.
+  inline void rename_map(map_handle map, const char *new_name);
+  /// \brief Переименовывает таблицу ключ-значение.
+  inline void rename_map(map_handle map, const ::std::string &new_name);
+  /// \brief Переименовывает таблицу ключ-значение.
+  inline void rename_map(map_handle map, const ::mdbx::slice &new_name);
+  /// \brief Переименовывает таблицу ключ-значение.
+  /// \return `True` если таблица существует и была переименована, либо
+  /// `false` в случае отсутствия исходной таблицы.
+  bool rename_map(const char *old_name, const char *new_name,
+                  bool throw_if_absent = false);
+  /// \brief Переименовывает таблицу ключ-значение.
+  /// \return `True` если таблица существует и была переименована, либо
+  /// `false` в случае отсутствия исходной таблицы.
+  bool rename_map(const ::std::string &old_name, const ::std::string &new_name,
+                  bool throw_if_absent = false);
+  /// \brief Переименовывает таблицу ключ-значение.
+  /// \return `True` если таблица существует и была переименована, либо
+  /// `false` в случае отсутствия исходной таблицы.
+  bool rename_map(const ::mdbx::slice &old_name, const ::mdbx::slice &new_name,
+                  bool throw_if_absent = false);
+
+#if defined(DOXYGEN) ||                                                        \
+    (defined(__cpp_lib_string_view) && __cpp_lib_string_view >= 201606L)
+
+  /// \brief Open existing key-value map.
+  inline map_handle open_map(
+      const ::std::string_view &name,
+      const ::mdbx::key_mode key_mode = ::mdbx::key_mode::usual,
+      const ::mdbx::value_mode value_mode = ::mdbx::value_mode::single) const {
+    return open_map(::mdbx::slice(name), key_mode, value_mode);
+  }
+  /// \brief Open existing key-value map.
+  inline map_handle open_map_accede(const ::std::string_view &name) const;
+  /// \brief Create new or open existing key-value map.
+  inline map_handle
+  create_map(const ::std::string_view &name,
+             const ::mdbx::key_mode key_mode = ::mdbx::key_mode::usual,
+             const ::mdbx::value_mode value_mode = ::mdbx::value_mode::single) {
+    return create_map(::mdbx::slice(name), key_mode, value_mode);
+  }
+  /// \brief Drop key-value map.
+  /// \return `True` if the key-value map existed and was deleted, either
+  /// `false` if the key-value map did not exist and there is nothing to delete.
+  bool drop_map(const ::std::string_view &name, bool throw_if_absent = false) {
+    return drop_map(::mdbx::slice(name), throw_if_absent);
+  }
+  /// \return `True` if the key-value map existed and was cleared, either
+  /// `false` if the key-value map did not exist and there is nothing to clear.
+  bool clear_map(const ::std::string_view &name, bool throw_if_absent = false) {
+    return clear_map(::mdbx::slice(name), throw_if_absent);
+  }
+  /// \brief Переименовывает таблицу ключ-значение.
+  inline void rename_map(map_handle map, const ::std::string_view &new_name);
+  /// \brief Переименовывает таблицу ключ-значение.
+  /// \return `True` если таблица существует и была переименована, либо
+  /// `false` в случае отсутствия исходной таблицы.
+  bool rename_map(const ::std::string_view &old_name,
+                  const ::std::string_view &new_name,
+                  bool throw_if_absent = false) {
+    return rename_map(::mdbx::slice(old_name), ::mdbx::slice(new_name),
+                      throw_if_absent);
+  }
+#endif /* __cpp_lib_string_view >= 201606L */
 
   using map_stat = ::MDBX_stat;
-  /// \brief Returns statistics for a sub-database.
+  /// \brief Returns statistics for a table.
   inline map_stat get_map_stat(map_handle map) const;
   /// \brief Returns depth (bitmask) information of nested dupsort (multi-value)
   /// B+trees for given database.
   inline uint32_t get_tree_deepmask(map_handle map) const;
-  /// \brief Returns information about key-value map (aka sub-database) handle.
+  /// \brief Returns information about key-value map (aka table) handle.
   inline map_handle::info get_handle_info(map_handle map) const;
 
   using canary = ::MDBX_canary;
@@ -4356,39 +4536,39 @@ public:
   inline canary get_canary() const;
 
   /// Reads sequence generator associated with a key-value map (aka
-  /// sub-database).
+  /// table).
   inline uint64_t sequence(map_handle map) const;
   /// \brief Reads and increment sequence generator associated with a key-value
-  /// map (aka sub-database).
+  /// map (aka table).
   inline uint64_t sequence(map_handle map, uint64_t increment);
 
   /// \brief Compare two keys according to a particular key-value map (aka
-  /// sub-database).
+  /// table).
   inline int compare_keys(map_handle map, const slice &a,
                           const slice &b) const noexcept;
   /// \brief Compare two values according to a particular key-value map (aka
-  /// sub-database).
+  /// table).
   inline int compare_values(map_handle map, const slice &a,
                             const slice &b) const noexcept;
   /// \brief Compare keys of two pairs according to a particular key-value map
-  /// (aka sub-database).
+  /// (aka table).
   inline int compare_keys(map_handle map, const pair &a,
                           const pair &b) const noexcept;
   /// \brief Compare values of two pairs according to a particular key-value map
-  /// (aka sub-database).
+  /// (aka table).
   inline int compare_values(map_handle map, const pair &a,
                             const pair &b) const noexcept;
 
-  /// \brief Get value by key from a key-value map (aka sub-database).
+  /// \brief Get value by key from a key-value map (aka table).
   inline slice get(map_handle map, const slice &key) const;
   /// \brief Get first of multi-value and values count by key from a key-value
-  /// multimap (aka sub-database).
+  /// multimap (aka table).
   inline slice get(map_handle map, slice key, size_t &values_count) const;
-  /// \brief Get value by key from a key-value map (aka sub-database).
+  /// \brief Get value by key from a key-value map (aka table).
   inline slice get(map_handle map, const slice &key,
                    const slice &value_at_absence) const;
   /// \brief Get first of multi-value and values count by key from a key-value
-  /// multimap (aka sub-database).
+  /// multimap (aka table).
   inline slice get(map_handle map, slice key, size_t &values_count,
                    const slice &value_at_absence) const;
   /// \brief Get value for equal or great key from a database.
@@ -4421,6 +4601,19 @@ public:
                               size_t value_length);
   inline value_result try_update_reserve(map_handle map, const slice &key,
                                          size_t value_length);
+
+  void put(map_handle map, const pair &kv, put_mode mode) {
+    return put(map, kv.key, kv.value, mode);
+  }
+  void insert(map_handle map, const pair &kv) {
+    return insert(map, kv.key, kv.value);
+  }
+  value_result try_insert(map_handle map, const pair &kv) {
+    return try_insert(map, kv.key, kv.value);
+  }
+  void upsert(map_handle map, const pair &kv) {
+    return upsert(map, kv.key, kv.value);
+  }
 
   /// \brief Removes all values for given key.
   inline bool erase(map_handle map, const slice &key);
@@ -4470,6 +4663,10 @@ public:
   /// to pages of nested b+tree of multimap's values.
   inline void append(map_handle map, const slice &key, const slice &value,
                      bool multivalue_order_preserved = true);
+  inline void append(map_handle map, const pair &kv,
+                     bool multivalue_order_preserved = true) {
+    return append(map, kv.key, kv.value, multivalue_order_preserved);
+  }
 
   size_t put_multiple(map_handle map, const slice &key,
                       const size_t value_length, const void *values_array,
@@ -4966,6 +5163,7 @@ public:
 
   inline MDBX_error_t put(const slice &key, slice *value,
                           MDBX_put_flags_t flags) noexcept;
+  inline void put(const slice &key, slice value, put_mode mode);
   inline void insert(const slice &key, slice value);
   inline value_result try_insert(const slice &key, slice value);
   inline slice insert_reserve(const slice &key, size_t value_length);
@@ -4978,6 +5176,15 @@ public:
   inline bool try_update(const slice &key, const slice &value);
   inline slice update_reserve(const slice &key, size_t value_length);
   inline value_result try_update_reserve(const slice &key, size_t value_length);
+
+  void put(const pair &kv, put_mode mode) {
+    return put(kv.key, kv.value, mode);
+  }
+  void insert(const pair &kv) { return insert(kv.key, kv.value); }
+  value_result try_insert(const pair &kv) {
+    return try_insert(kv.key, kv.value);
+  }
+  void upsert(const pair &kv) { return upsert(kv.key, kv.value); }
 
   /// \brief Removes single key-value pair or all multi-values at the current
   /// cursor position.
@@ -5120,8 +5327,8 @@ static MDBX_CXX20_CONSTEXPR int memcmp(const void *a, const void *b,
     __cpp_lib_is_constant_evaluated >= 201811L
   if (::std::is_constant_evaluated()) {
     for (size_t i = 0; i < bytes; ++i) {
-      const int diff =
-          static_cast<const byte *>(a)[i] - static_cast<const byte *>(b)[i];
+      const int diff = int(static_cast<const byte *>(a)[i]) -
+                       int(static_cast<const byte *>(b)[i]);
       if (diff)
         return diff;
     }
@@ -5930,6 +6137,8 @@ inline size_t env::limits::transaction_size_max(intptr_t pagesize) {
   return static_cast<size_t>(result);
 }
 
+inline size_t env::limits::max_map_handles(void) { return MDBX_MAX_DBI; }
+
 inline env::operate_parameters env::get_operation_parameters() const {
   const auto flags = get_flags();
   return operate_parameters(max_maps(), max_readers(),
@@ -6249,6 +6458,14 @@ inline void txn::renew_reading() {
   error::success_or_throw(::mdbx_txn_renew(handle_));
 }
 
+inline void txn::park_reading(bool autounpark) {
+  error::success_or_throw(::mdbx_txn_park(handle_, autounpark));
+}
+
+inline bool txn::unpark_reading(bool restart_if_ousted) {
+  return error::boolean_or_throw(::mdbx_txn_unpark(handle_, restart_if_ousted));
+}
+
 inline txn::info txn::get_info(bool scan_reader_lock_table) const {
   txn::info r;
   error::success_or_throw(::mdbx_txn_info(handle_, &r, scan_reader_lock_table));
@@ -6269,6 +6486,17 @@ inline size_t txn::release_all_cursors(bool unbind) const {
 }
 
 inline ::mdbx::map_handle
+txn::open_map(const ::mdbx::slice &name, const ::mdbx::key_mode key_mode,
+              const ::mdbx::value_mode value_mode) const {
+  ::mdbx::map_handle map;
+  error::success_or_throw(::mdbx_dbi_open2(
+      handle_, name, MDBX_db_flags_t(key_mode) | MDBX_db_flags_t(value_mode),
+      &map.dbi));
+  assert(map.dbi != 0);
+  return map;
+}
+
+inline ::mdbx::map_handle
 txn::open_map(const char *name, const ::mdbx::key_mode key_mode,
               const ::mdbx::value_mode value_mode) const {
   ::mdbx::map_handle map;
@@ -6280,9 +6508,32 @@ txn::open_map(const char *name, const ::mdbx::key_mode key_mode,
 }
 
 inline ::mdbx::map_handle
-txn::open_map(const ::std::string &name, const ::mdbx::key_mode key_mode,
-              const ::mdbx::value_mode value_mode) const {
-  return open_map(name.c_str(), key_mode, value_mode);
+txn::open_map_accede(const ::mdbx::slice &name) const {
+  ::mdbx::map_handle map;
+  error::success_or_throw(
+      ::mdbx_dbi_open2(handle_, name, MDBX_DB_ACCEDE, &map.dbi));
+  assert(map.dbi != 0);
+  return map;
+}
+
+inline ::mdbx::map_handle txn::open_map_accede(const char *name) const {
+  ::mdbx::map_handle map;
+  error::success_or_throw(
+      ::mdbx_dbi_open(handle_, name, MDBX_DB_ACCEDE, &map.dbi));
+  assert(map.dbi != 0);
+  return map;
+}
+
+inline ::mdbx::map_handle txn::create_map(const ::mdbx::slice &name,
+                                          const ::mdbx::key_mode key_mode,
+                                          const ::mdbx::value_mode value_mode) {
+  ::mdbx::map_handle map;
+  error::success_or_throw(::mdbx_dbi_open2(
+      handle_, name,
+      MDBX_CREATE | MDBX_db_flags_t(key_mode) | MDBX_db_flags_t(value_mode),
+      &map.dbi));
+  assert(map.dbi != 0);
+  return map;
 }
 
 inline ::mdbx::map_handle txn::create_map(const char *name,
@@ -6297,26 +6548,49 @@ inline ::mdbx::map_handle txn::create_map(const char *name,
   return map;
 }
 
-inline ::mdbx::map_handle txn::create_map(const ::std::string &name,
-                                          const ::mdbx::key_mode key_mode,
-                                          const ::mdbx::value_mode value_mode) {
-  return create_map(name.c_str(), key_mode, value_mode);
-}
-
 inline void txn::drop_map(map_handle map) {
   error::success_or_throw(::mdbx_drop(handle_, map.dbi, true));
-}
-
-inline bool txn::drop_map(const ::std::string &name, bool throw_if_absent) {
-  return drop_map(name.c_str(), throw_if_absent);
 }
 
 inline void txn::clear_map(map_handle map) {
   error::success_or_throw(::mdbx_drop(handle_, map.dbi, false));
 }
 
+inline void txn::rename_map(map_handle map, const char *new_name) {
+  error::success_or_throw(::mdbx_dbi_rename(handle_, map, new_name));
+}
+
+inline void txn::rename_map(map_handle map, const ::mdbx::slice &new_name) {
+  error::success_or_throw(::mdbx_dbi_rename2(handle_, map, new_name));
+}
+
+inline ::mdbx::map_handle
+txn::open_map(const ::std::string &name, const ::mdbx::key_mode key_mode,
+              const ::mdbx::value_mode value_mode) const {
+  return open_map(::mdbx::slice(name), key_mode, value_mode);
+}
+
+inline ::mdbx::map_handle
+txn::open_map_accede(const ::std::string &name) const {
+  return open_map_accede(::mdbx::slice(name));
+}
+
+inline ::mdbx::map_handle txn::create_map(const ::std::string &name,
+                                          const ::mdbx::key_mode key_mode,
+                                          const ::mdbx::value_mode value_mode) {
+  return create_map(::mdbx::slice(name), key_mode, value_mode);
+}
+
+inline bool txn::drop_map(const ::std::string &name, bool throw_if_absent) {
+  return drop_map(::mdbx::slice(name), throw_if_absent);
+}
+
 inline bool txn::clear_map(const ::std::string &name, bool throw_if_absent) {
-  return clear_map(name.c_str(), throw_if_absent);
+  return clear_map(::mdbx::slice(name), throw_if_absent);
+}
+
+inline void txn::rename_map(map_handle map, const ::std::string &new_name) {
+  return rename_map(map, ::mdbx::slice(new_name));
 }
 
 inline txn::map_stat txn::get_map_stat(map_handle map) const {
@@ -6910,6 +7184,10 @@ inline map_handle cursor::map() const {
 inline MDBX_error_t cursor::put(const slice &key, slice *value,
                                 MDBX_put_flags_t flags) noexcept {
   return MDBX_error_t(::mdbx_cursor_put(handle_, &key, value, flags));
+}
+
+inline void cursor::put(const slice &key, slice value, put_mode mode) {
+  error::success_or_throw(put(key, &value, MDBX_put_flags_t(mode)));
 }
 
 inline void cursor::insert(const slice &key, slice value) {

@@ -1,16 +1,5 @@
-/*
- * Copyright 2017-2024 Leonid Yuriev <leo@yuriev.ru>
- * and other libmdbx authors: please see AUTHORS file.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted only as authorized by the OpenLDAP
- * Public License.
- *
- * A copy of this license is available in the file LICENSE in the
- * top-level directory of the distribution or, alternatively, at
- * <http://www.OpenLDAP.org/license.html>.
- */
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \copyright SPDX-License-Identifier: Apache-2.0
 
 #include "test.h++"
 
@@ -106,7 +95,7 @@ MDBX_NORETURN void usage(void) {
       "    writemap       == MDBX_WRITEMAP\n"
       "    nosync-utterly == MDBX_UTTERLY_NOSYNC\n"
       "    perturb        == MDBX_PAGEPERTURB\n"
-      "    notls          == MDBX_NOTLS\n"
+      "    nostickythreads== MDBX_NOSTICKYTHREADS\n"
       "    nordahead      == MDBX_NORDAHEAD\n"
       "    nomeminit      == MDBX_NOMEMINIT\n"
       "  --random-writemap[=YES|no]    Toggle MDBX_WRITEMAP randomly\n"
@@ -126,10 +115,14 @@ MDBX_NORETURN void usage(void) {
 void actor_params::set_defaults(const std::string &tmpdir) {
   pathname_log = "";
   loglevel =
-#if defined(NDEBUG) || defined(_WIN32) || defined(_WIN64)
+#if MDBX_DEBUG < 1
+      logging::verbose;
+#elif MDBX_DEBUG > 1
+      logging::trace;
+#elif defined(_WIN32) || defined(_WIN64) || defined(__APPLE__)
       logging::verbose;
 #else
-      logging::trace;
+      logging::debug;
 #endif
 
   pathname_db = tmpdir + "mdbx-test.db";
@@ -401,7 +394,7 @@ int main(int argc, char *const argv[]) {
       continue;
     }
     if (config::parse_option(argc, argv, narg, "repeat", params.nrepeat,
-                             config::no_scale))
+                             config::entropy))
       continue;
     if (config::parse_option(argc, argv, narg, "threads", params.nthreads,
                              config::no_scale, 1, 64))
@@ -450,7 +443,7 @@ int main(int argc, char *const argv[]) {
                              params.keygen.mesh, 0, 64))
       continue;
     if (config::parse_option(argc, argv, narg, "prng-seed", params.prng_seed,
-                             config::no_scale)) {
+                             config::entropy)) {
       prng_seed(params.prng_seed);
       continue;
     }

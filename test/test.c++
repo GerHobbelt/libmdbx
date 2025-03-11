@@ -1,16 +1,5 @@
-/*
- * Copyright 2017-2024 Leonid Yuriev <leo@yuriev.ru>
- * and other libmdbx authors: please see AUTHORS file.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted only as authorized by the OpenLDAP
- * Public License.
- *
- * A copy of this license is available in the file LICENSE in the
- * top-level directory of the distribution or, alternatively, at
- * <http://www.OpenLDAP.org/license.html>.
- */
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \copyright SPDX-License-Identifier: Apache-2.0
 
 #include "test.h++"
 
@@ -223,6 +212,9 @@ void testcase::txn_begin(bool readonly, MDBX_txn_flags_t flags) {
     log_trace("== counter %u, env_warmup(flags %u), rc %d", counter,
               warmup_flags, err);
   }
+
+  if (readonly && flipcoin())
+    txn_probe_parking();
 }
 
 int testcase::breakable_commit() {
@@ -278,6 +270,9 @@ void testcase::txn_end(bool abort) {
   log_trace(">> txn_end(%s)", abort ? "abort" : "commit");
   assert(txn_guard);
 
+  if (flipcoin())
+    txn_probe_parking();
+
   MDBX_txn *txn = txn_guard.release();
   if (abort) {
     int err = mdbx_txn_abort(txn);
@@ -332,6 +327,13 @@ int testcase::breakable_restart() {
   int rc = MDBX_SUCCESS;
   if (txn_guard)
     rc = breakable_commit();
+  if (flipcoin()) {
+    txn_begin(true);
+    txn_probe_parking();
+    int err = mdbx_txn_abort(txn_guard.release());
+    if (unlikely(err != MDBX_SUCCESS))
+      failure_perror("mdbx_txn_abort()", err);
+  }
   txn_begin(false, MDBX_TXN_READWRITE);
   if (cursor_guard)
     cursor_renew();
@@ -632,21 +634,184 @@ bool testcase::checkdata(const char *step, MDBX_dbi handle, MDBX_val key2check,
 
 //-----------------------------------------------------------------------------
 
-bool test_execute(const actor_config &config_const) {
-  const mdbx_pid_t pid = osal_getpid();
-  actor_config config = config_const;
+#ifdef _MSC_VER
 
-  if (global::singlemode) {
-    logging::setup(format("single_%s", testcase2str(config.testcase)));
-  } else {
-    logging::setup((logging::loglevel)config.params.loglevel,
-                   format("child_%u.%u", config.actor_id, config.space_id));
-    log_trace(">> wait4barrier");
-    osal_wait4barrier();
-    log_trace("<< wait4barrier");
+#include "dbghelp.h"
+#pragma comment(lib, "Dbghelp.lib")
+
+static void dump_stack(CONTEXT *ctx, FILE *out) {
+  const int MaxNameLen = 256;
+
+  BOOL result;
+  HANDLE process;
+  HANDLE thread;
+  HMODULE hModule;
+  STACKFRAME64 stack;
+  ULONG frame;
+  DWORD64 displacement;
+  DWORD disp;
+
+  char buffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR)];
+  char module[MaxNameLen];
+  PSYMBOL_INFO pSymbol = (PSYMBOL_INFO)buffer;
+
+  // On x64, StackWalk64 modifies the context record, that could
+  // cause crashes, so we create a copy to prevent it
+  CONTEXT ctxCopy;
+  memcpy(&ctxCopy, ctx, sizeof(CONTEXT));
+  memset(&stack, 0, sizeof(STACKFRAME64));
+
+  process = GetCurrentProcess();
+  thread = GetCurrentThread();
+  displacement = 0;
+#if defined(_M_IX86)
+  stack.AddrPC.Offset = (*ctx).Eip;
+  stack.AddrPC.Mode = AddrModeFlat;
+  stack.AddrStack.Offset = (*ctx).Esp;
+  stack.AddrStack.Mode = AddrModeFlat;
+  stack.AddrFrame.Offset = (*ctx).Ebp;
+  stack.AddrFrame.Mode = AddrModeFlat;
+#endif /* _M_IX86 */
+
+  SymInitialize(process, NULL, TRUE);
+
+  for (frame = 0;; frame++) {
+    // get next call from stack
+    result = StackWalk64(
+#if defined(_M_AMD64)
+        IMAGE_FILE_MACHINE_AMD64
+#elif defined(_M_ARM64)
+        IMAGE_FILE_MACHINE_ARM64
+#elif defined(_M_ARM)
+        IMAGE_FILE_MACHINE_ARM
+#elif defined(_M_IX86)
+        IMAGE_FILE_MACHINE_I386
+#else
+#error "FIXME"
+#endif
+        ,
+        process, thread, &stack, &ctxCopy, NULL, SymFunctionTableAccess64,
+        SymGetModuleBase64, NULL);
+
+    if (!result)
+      break;
+
+    // get symbol name for address
+    pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    pSymbol->MaxNameLen = MAX_SYM_NAME;
+    SymFromAddr(process, (ULONG64)stack.AddrPC.Offset, &displacement, pSymbol);
+
+    IMAGEHLP_LINE64 line;
+    line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+
+    // try to get line
+    if (SymGetLineFromAddr64(process, stack.AddrPC.Offset, &disp, &line)) {
+      fprintf(out, "\tat %s in %s: line: %lu: address: 0x%0" PRIx64 "\n",
+              pSymbol->Name, line.FileName, line.LineNumber, pSymbol->Address);
+    } else {
+      // failed to get line
+      fprintf(out, "\tat %s, address 0x%0" PRIx64 ".\n", pSymbol->Name,
+              pSymbol->Address);
+      hModule = NULL;
+      lstrcpyA(module, "");
+      GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                        (LPCTSTR)(stack.AddrPC.Offset), &hModule);
+
+      // at least print module name
+      if (hModule != NULL)
+        GetModuleFileNameA(hModule, module, MaxNameLen);
+
+      fprintf(out, "in %s\n", module);
+    }
   }
+  fflush(stderr);
+}
 
+static LONG seh_filter(struct _EXCEPTION_POINTERS *ExInfo, FILE *out) {
+  const char *caption = "";
+  switch (ExInfo->ExceptionRecord->ExceptionCode) {
+  case EXCEPTION_BREAKPOINT:
+    caption = "BREAKPOINT";
+    break;
+  case EXCEPTION_SINGLE_STEP:
+    caption = "SINGLE STEPT";
+    break;
+  case STATUS_CONTROL_C_EXIT:
+    caption = "CONTROL-C";
+    break;
+  case /* STATUS_INTERRUPTED */ 0xC0000515L:
+    caption = "INTERRUPTED";
+    break;
+  case EXCEPTION_ACCESS_VIOLATION:
+    caption = "ACCESS VIOLATION";
+    break;
+  case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+    caption = "ARRAY BOUNDS EXCEEDED";
+    break;
+  case EXCEPTION_DATATYPE_MISALIGNMENT:
+    caption = "MISALIGNMENT";
+    break;
+  case EXCEPTION_STACK_OVERFLOW:
+    caption = "STACK OVERFLOW";
+    break;
+  case EXCEPTION_INVALID_DISPOSITION:
+    caption = "INVALID DISPOSITION";
+    break;
+  case EXCEPTION_ILLEGAL_INSTRUCTION:
+    caption = "ILLEGAL INSTRUCTION";
+    break;
+  case EXCEPTION_NONCONTINUABLE_EXCEPTION:
+    caption = "NONCONTINUABLE EXCEPTION";
+    break;
+  case /* STATUS_STACK_BUFFER_OVERRUN, STATUS_BUFFER_OVERFLOW_PREVENTED */
+      0xC0000409L:
+    caption = "BUFFER OVERRUN";
+    break;
+  case /* STATUS_ASSERTION_FAILURE */ 0xC0000420L:
+    caption = "ASSERTION FAILURE";
+    break;
+  case /* STATUS_HEAP_CORRUPTION */ 0xC0000374L:
+    caption = "HEAP CORRUPTION";
+    break;
+  case /* STATUS_CONTROL_STACK_VIOLATION */ 0xC00001B2L:
+    caption = "CONTROL STACK VIOLATION";
+    break;
+  case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+    caption = "FLT DIVIDE BY ZERO";
+    break;
+  default:
+    caption = "(unknown)";
+    break;
+  }
+  PVOID CodeAdress = ExInfo->ExceptionRecord->ExceptionAddress;
+  fprintf(out, "****************************************************\n");
+  fprintf(out, "*** A Program Fault occurred:\n");
+  fprintf(out, "*** Error code %08X: %s\n",
+          ExInfo->ExceptionRecord->ExceptionCode, caption);
+  fprintf(out, "****************************************************\n");
+  fprintf(out, "***   Address: %08zX\n", (intptr_t)CodeAdress);
+  fprintf(out, "***     Flags: %08X\n",
+          ExInfo->ExceptionRecord->ExceptionFlags);
+  dump_stack(ExInfo->ContextRecord, out);
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif /* _MSC_VER */
+
+static bool execute_thunk(const actor_config *const_config,
+                          const mdbx_pid_t pid) {
+  actor_config config = *const_config;
   try {
+    if (global::singlemode) {
+      logging::setup(format("single_%s", testcase2str(config.testcase)));
+    } else {
+      logging::setup((logging::loglevel)config.params.loglevel,
+                     format("child_%u.%u", config.actor_id, config.space_id));
+      log_trace(">> wait4barrier");
+      osal_wait4barrier();
+      log_trace("<< wait4barrier");
+    }
+
     std::unique_ptr<testcase> test(registry::create_actor(config, pid));
     size_t iter = 0;
     do {
@@ -682,6 +847,19 @@ bool test_execute(const actor_config &config_const) {
     failure("***** Exception: %s *****", pipets.what());
     return false;
   }
+}
+
+bool test_execute(const actor_config &config) {
+#ifdef _MSC_VER
+  __try {
+#endif
+    return execute_thunk(&config, osal_getpid());
+#ifdef _MSC_VER
+  } __except (seh_filter(GetExceptionInformation(), stderr)) {
+    fprintf(stderr, "Exception \n");
+    return false;
+  }
+#endif
 }
 
 //-----------------------------------------------------------------------------
@@ -737,27 +915,32 @@ void testcase::verbose(const char *where, const char *stage, const MDBX_val &k,
                 mdbx_dump_val(&v, dump_value, sizeof(dump_value)));
 }
 
-void testcase::speculum_check_iterator(const char *where, const char *stage,
+bool testcase::speculum_check_iterator(const char *where, const char *stage,
                                        const testcase::SET::const_iterator &it,
-                                       const MDBX_val &k,
-                                       const MDBX_val &v) const {
+                                       const MDBX_val &k, const MDBX_val &v,
+                                       MDBX_cursor *cursor) const {
   char dump_key[32], dump_value[32];
   MDBX_val it_key = dataview2iov(it->first);
   MDBX_val it_data = dataview2iov(it->second);
   // log_verbose("speculum-%s: %s expect {%s, %s}", where, stage,
   //             mdbx_dump_val(&it_key, dump_key, sizeof(dump_key)),
   //             mdbx_dump_val(&it_data, dump_value, sizeof(dump_value)));
-  if (!is_samedata(it_key, k))
-    failure("speculum-%s: %s key mismatch %s (must) != %s", where, stage,
-            mdbx_dump_val(&it_key, dump_key, sizeof(dump_key)),
-            mdbx_dump_val(&k, dump_value, sizeof(dump_value)));
-  if (!is_samedata(it_data, v))
-    failure("speculum-%s: %s data mismatch %s (must) != %s", where, stage,
-            mdbx_dump_val(&it_data, dump_key, sizeof(dump_key)),
-            mdbx_dump_val(&v, dump_value, sizeof(dump_value)));
+  if (!is_samedata(it_key, k)) {
+    speculum_render(it, cursor);
+    return failure("speculum-%s: %s key mismatch %s (must) != %s", where, stage,
+                   mdbx_dump_val(&it_key, dump_key, sizeof(dump_key)),
+                   mdbx_dump_val(&k, dump_value, sizeof(dump_value)));
+  }
+  if (!is_samedata(it_data, v)) {
+    speculum_render(it, cursor);
+    return failure("speculum-%s: %s data mismatch %s (must) != %s", where,
+                   stage, mdbx_dump_val(&it_data, dump_key, sizeof(dump_key)),
+                   mdbx_dump_val(&v, dump_value, sizeof(dump_value)));
+  }
+  return true;
 }
 
-void testcase::failure(const char *fmt, ...) const {
+bool testcase::failure(const char *fmt, ...) const {
   va_list ap;
   va_start(ap, fmt);
   fflush(nullptr);
@@ -767,51 +950,156 @@ void testcase::failure(const char *fmt, ...) const {
   if (txn_guard)
     mdbx_txn_commit(const_cast<testcase *>(this)->txn_guard.release());
   exit(EXIT_FAILURE);
+  return false;
 }
 
 #if SPECULUM_CURSORS
-void testcase::speculum_check_cursor(const char *where, const char *stage,
+
+static void speculum_render_cursor(const MDBX_val &ikey, const MDBX_val &ival,
+                                   const MDBX_cursor *cursor,
+                                   const MDBX_cursor *ref) {
+  scoped_cursor_guard guard(mdbx_cursor_create(nullptr));
+  if (!guard)
+    failure("mdbx_cursor_create()");
+  /* работаем с копией курсора, чтобы не влиять на состояние оригинала. */
+  int err = mdbx_cursor_copy(cursor, guard.get());
+  if (err)
+    failure("mdbx_cursor_copy(), err %d", err);
+
+  MDBX_cursor *const clone = guard.get();
+  char status[10], *s = status;
+  if (cursor == ref) {
+    *s++ = '_';
+    *s++ = '_';
+  }
+
+  if (mdbx_cursor_eof(clone) == MDBX_RESULT_TRUE)
+    *s++ = 'e';
+  if (mdbx_cursor_on_first(clone) == MDBX_RESULT_TRUE)
+    *s++ = 'F';
+  if (mdbx_cursor_on_first_dup(clone) == MDBX_RESULT_TRUE)
+    *s++ = 'f';
+  if (mdbx_cursor_on_last(clone) == MDBX_RESULT_TRUE)
+    *s++ = 'L';
+  if (mdbx_cursor_on_last_dup(clone) == MDBX_RESULT_TRUE)
+    *s++ = 'l';
+
+  MDBX_val ckey, cval;
+  if (mdbx_cursor_get(clone, &ckey, &cval, MDBX_GET_CURRENT) != MDBX_SUCCESS)
+    *s++ = '!';
+  else {
+    const int kcmp =
+        mdbx_cmp(mdbx_cursor_txn(clone), mdbx_cursor_dbi(clone), &ikey, &ckey);
+    if (kcmp < 0)
+      *s++ = '<';
+    else if (kcmp > 0)
+      *s++ = '>';
+    else {
+      *s++ = '=';
+      const int vcmp = mdbx_dcmp(mdbx_cursor_txn(clone), mdbx_cursor_dbi(clone),
+                                 &ival, &cval);
+      if (vcmp < 0)
+        *s++ = '<';
+      else if (vcmp > 0)
+        *s++ = '>';
+      else
+        *s++ = '=';
+    }
+  }
+
+  if (clone == ref) {
+    *s++ = '_';
+    *s++ = '_';
+  }
+  *s = '\0';
+
+  printf(" | %-10.10s", status);
+}
+
+void testcase::speculum_render(const testcase::SET::const_iterator &it,
+                               const MDBX_cursor *ref) const {
+  char dump_key[32], dump_value[32];
+
+  auto top = it;
+  int offset = 0;
+  while (offset > -5 && top != speculum.begin()) {
+    --top;
+    --offset;
+  }
+  printf("##  %-20.20s %-20.20s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | "
+         "%-10.10s | %-10.10s |\n",
+         "k0_1_2_3_4_5_6_7_8_9", "v0_1_2_3_4_5_6_7_8_9", "prev-prev", "prev",
+         "seek", "lowerbound", "next", "next-next");
+  while (offset < 5 && top != speculum.end()) {
+    const MDBX_val ikey = dataview2iov(top->first);
+    const MDBX_val idata = dataview2iov(top->second);
+    printf("%+d) %20.20s %20.20s", offset,
+           mdbx_dump_val(&ikey, dump_key, sizeof(dump_key)),
+           mdbx_dump_val(&idata, dump_value, sizeof(dump_value)));
+
+    speculum_render_cursor(ikey, idata, speculum_cursors[prev_prev].get(), ref);
+    speculum_render_cursor(ikey, idata, speculum_cursors[prev].get(), ref);
+    speculum_render_cursor(ikey, idata, speculum_cursors[seek_check].get(),
+                           ref);
+    speculum_render_cursor(ikey, idata, speculum_cursors[lowerbound].get(),
+                           ref);
+    speculum_render_cursor(ikey, idata, speculum_cursors[next].get(), ref);
+    speculum_render_cursor(ikey, idata, speculum_cursors[next_next].get(), ref);
+
+    printf(" %s\n", "|");
+    ++top;
+    ++offset;
+  }
+}
+
+bool testcase::speculum_check_cursor(const char *where, const char *stage,
                                      const testcase::SET::const_iterator &it,
                                      int cursor_err, const MDBX_val &cursor_key,
-                                     const MDBX_val &cursor_data) const {
+                                     const MDBX_val &cursor_data,
+                                     MDBX_cursor *cursor) const {
   // verbose(where, stage, cursor_key, cursor_data, cursor_err);
   // verbose(where, stage, it);
   if (cursor_err != MDBX_SUCCESS && cursor_err != MDBX_NOTFOUND &&
-      cursor_err != MDBX_RESULT_TRUE && cursor_err != MDBX_ENODATA)
-    failure("speculum-%s: %s %s %d %s", where, stage, "cursor-get", cursor_err,
-            mdbx_strerror(cursor_err));
+      cursor_err != MDBX_RESULT_TRUE && cursor_err != MDBX_ENODATA) {
+    speculum_render(it, cursor);
+    return failure("speculum-%s: %s %s %d %s", where, stage, "cursor-get",
+                   cursor_err, mdbx_strerror(cursor_err));
+  }
 
   char dump_key[32], dump_value[32];
-  if (it == speculum.end() && cursor_err != MDBX_NOTFOUND)
-    failure("speculum-%s: %s extra pair {%s, %s}", where, stage,
-            mdbx_dump_val(&cursor_key, dump_key, sizeof(dump_key)),
-            mdbx_dump_val(&cursor_data, dump_value, sizeof(dump_value)));
-  else if (it != speculum.end() && cursor_err == MDBX_NOTFOUND) {
+  if (it == speculum.end() && cursor_err != MDBX_NOTFOUND &&
+      cursor_err != MDBX_ENODATA) {
+    speculum_render(it, cursor);
+    return failure("speculum-%s: %s extra pair {%s, %s}", where, stage,
+                   mdbx_dump_val(&cursor_key, dump_key, sizeof(dump_key)),
+                   mdbx_dump_val(&cursor_data, dump_value, sizeof(dump_value)));
+  } else if (it != speculum.end() &&
+             (cursor_err == MDBX_NOTFOUND || cursor_err == MDBX_ENODATA)) {
+    speculum_render(it, cursor);
     MDBX_val it_key = dataview2iov(it->first);
     MDBX_val it_data = dataview2iov(it->second);
-    failure("speculum-%s: %s lack pair {%s, %s}", where, stage,
-            mdbx_dump_val(&it_key, dump_key, sizeof(dump_key)),
-            mdbx_dump_val(&it_data, dump_value, sizeof(dump_value)));
+    return failure("speculum-%s: %s lack pair {%s, %s}", where, stage,
+                   mdbx_dump_val(&it_key, dump_key, sizeof(dump_key)),
+                   mdbx_dump_val(&it_data, dump_value, sizeof(dump_value)));
   } else if (cursor_err == MDBX_SUCCESS || cursor_err == MDBX_RESULT_TRUE)
-    speculum_check_iterator(where, stage, it, cursor_key, cursor_data);
+    return speculum_check_iterator(where, stage, it, cursor_key, cursor_data,
+                                   cursor);
+  else {
+    assert(it == speculum.end() &&
+           (cursor_err == MDBX_NOTFOUND || cursor_err == MDBX_ENODATA));
+    return true;
+  }
 }
 
-void testcase::speculum_check_cursor(const char *where, const char *stage,
+bool testcase::speculum_check_cursor(const char *where, const char *stage,
                                      const testcase::SET::const_iterator &it,
                                      MDBX_cursor *cursor,
                                      const MDBX_cursor_op op) const {
   MDBX_val cursor_key = {0, 0};
   MDBX_val cursor_data = {0, 0};
-  int err;
-  if (it != speculum.end() && std::next(it) == speculum.end() &&
-      op == MDBX_PREV && (config.params.table_flags & MDBX_DUPSORT)) {
-    /* Workaround for MDBX/LMDB flaw */
-    err = mdbx_cursor_get(cursor, &cursor_key, &cursor_data, MDBX_LAST);
-    if (err == MDBX_SUCCESS)
-      err = mdbx_cursor_get(cursor, &cursor_key, &cursor_data, MDBX_LAST_DUP);
-  } else
-    err = mdbx_cursor_get(cursor, &cursor_key, &cursor_data, op);
-  return speculum_check_cursor(where, stage, it, err, cursor_key, cursor_data);
+  int err = mdbx_cursor_get(cursor, &cursor_key, &cursor_data, op);
+  return speculum_check_cursor(where, stage, it, err, cursor_key, cursor_data,
+                               cursor);
 }
 
 void testcase::speculum_prepare_cursors(const Item &item) {
@@ -835,6 +1123,7 @@ void testcase::speculum_prepare_cursors(const Item &item) {
       guard.reset(cursor);
     }
 
+  // mdbx_cursor_reset(speculum_cursors[seek_check].get());
   const auto cursor_lowerbound = speculum_cursors[lowerbound].get();
   const MDBX_val item_key = dataview2iov(item.first),
                  item_data = dataview2iov(item.second);
@@ -853,7 +1142,7 @@ void testcase::speculum_prepare_cursors(const Item &item) {
   auto it_lowerbound = speculum.lower_bound(item);
   // verbose("prepare-cursors", "lowerbound", it_lowerbound);
   speculum_check_cursor("prepare-cursors", "lowerbound", it_lowerbound, err,
-                        lowerbound_key, lowerbound_data);
+                        lowerbound_key, lowerbound_data, cursor_lowerbound);
 
   const auto cursor_prev = speculum_cursors[prev].get();
   err = mdbx_cursor_copy(cursor_lowerbound, cursor_prev);
@@ -927,11 +1216,11 @@ int testcase::insert(const keygen::buffer &akey, const keygen::buffer &adata,
     check_seek_cursor = speculum_cursors[seek_check].get();
     seek_check_key = akey->value;
     seek_check_data = adata->value;
-    seek_check_err = mdbx_cursor_get(
-        check_seek_cursor, &seek_check_key, &seek_check_data,
-        (config.params.table_flags & MDBX_DUPSORT) ? MDBX_GET_BOTH
-                                                   : MDBX_SET_KEY);
-    if (seek_check_err != MDBX_SUCCESS && seek_check_err != MDBX_NOTFOUND)
+    seek_check_err = mdbx_cursor_get(check_seek_cursor, &seek_check_key,
+                                     &seek_check_data, MDBX_SET_LOWERBOUND);
+    // speculum_render(speculum.find(item), check_seek_cursor);
+    if (seek_check_err != MDBX_SUCCESS && seek_check_err != MDBX_NOTFOUND &&
+        seek_check_err != MDBX_RESULT_TRUE)
       failure("speculum-%s: %s pre-insert %d %s", "insert", "seek",
               seek_check_err, mdbx_strerror(seek_check_err));
 #endif /* SPECULUM_CURSORS */
@@ -959,7 +1248,7 @@ int testcase::insert(const keygen::buffer &akey, const keygen::buffer &adata,
 
 #if SPECULUM_CURSORS
     if (insertion_result.second) {
-      if (seek_check_err != MDBX_NOTFOUND) {
+      if (seek_check_err == MDBX_SUCCESS) {
         log_error(
             "speculum.pre-insert-seek: unexpected %d {%s, %s}", seek_check_err,
             mdbx_dump_val(&seek_check_key, dump_key, sizeof(dump_key)),
@@ -973,7 +1262,8 @@ int testcase::insert(const keygen::buffer &akey, const keygen::buffer &adata,
             mdbx_dump_val(&seek_check_key, dump_key, sizeof(dump_key)),
             mdbx_dump_val(&seek_check_data, dump_value, sizeof(dump_value)));
         speculum_check_iterator("insert", "pre-seek", insertion_result.first,
-                                seek_check_key, seek_check_data);
+                                seek_check_key, seek_check_data,
+                                check_seek_cursor);
         rc = false;
       }
     }
@@ -1013,6 +1303,8 @@ int testcase::insert(const keygen::buffer &akey, const keygen::buffer &adata,
         }
       }
     }
+    // speculum_render(insertion_result.first,
+    //                 speculum_cursors[seek_check].get());
 #endif /* SPECULUM_CURSORS */
   }
 
@@ -1063,6 +1355,12 @@ int testcase::remove(const keygen::buffer &akey, const keygen::buffer &adata) {
     item.second = iov2dataview(adata);
 #if SPECULUM_CURSORS
     speculum_prepare_cursors(item);
+    // MDBX_cursor *check_seek_cursor = speculum_cursors[seek_check].get();
+    // MDBX_val seek_check_key = akey->value;
+    // MDBX_val seek_check_data = adata->value;
+    // mdbx_cursor_get(check_seek_cursor, &seek_check_key, &seek_check_data,
+    //                 MDBX_SET_LOWERBOUND);
+    // speculum_render(speculum.find(item), check_seek_cursor);
 #endif /* SPECULUM_CURSORS */
   }
 
@@ -1089,6 +1387,7 @@ int testcase::remove(const keygen::buffer &akey, const keygen::buffer &adata) {
       }
 
 #if SPECULUM_CURSORS
+      // speculum_render(it_found, speculum_cursors[seek_check].get());
       if (it_found != speculum.begin()) {
         const auto cursor_prev = speculum_cursors[prev].get();
         auto it_prev = it_found;
@@ -1265,14 +1564,14 @@ bool testcase::check_batch_get() {
   bool rc = true;
   MDBX_val pairs[42];
   size_t count = 0xDeadBeef;
-  MDBX_cursor_op batch_op;
   batch_err = mdbx_cursor_get_batch(batch_cursor, &count, pairs,
-                                    ARRAY_LENGTH(pairs), batch_op = MDBX_FIRST);
+                                    ARRAY_LENGTH(pairs), MDBX_FIRST);
   size_t i, n = 0;
   while (batch_err == MDBX_SUCCESS || batch_err == MDBX_RESULT_TRUE) {
     for (i = 0; i < count; i += 2) {
       mdbx::slice k, v;
-      check_err = mdbx_cursor_get(check_cursor, &k, &v, MDBX_NEXT);
+      check_err =
+          mdbx_cursor_get(check_cursor, &k, &v, n ? MDBX_NEXT : MDBX_FIRST);
       if (check_err != MDBX_SUCCESS)
         failure_perror("batch-verify: mdbx_cursor_get(MDBX_NEXT)", check_err);
       if (k != pairs[i] || v != pairs[i + 1]) {
@@ -1286,14 +1585,13 @@ bool testcase::check_batch_get() {
                           sizeof(dump_value_batch)));
         rc = false;
       }
+      ++n;
     }
-    n += i / 2;
-    batch_op = (batch_err == MDBX_RESULT_TRUE) ? MDBX_GET_CURRENT : MDBX_NEXT;
     batch_err = mdbx_cursor_get_batch(batch_cursor, &count, pairs,
-                                      ARRAY_LENGTH(pairs), batch_op);
+                                      ARRAY_LENGTH(pairs), MDBX_NEXT);
   }
   if (batch_err != MDBX_NOTFOUND) {
-    log_error("mdbx_cursor_get_batch(), op %u, err %d", batch_op, batch_err);
+    log_error("mdbx_cursor_get_batch(), err %d", batch_err);
     rc = false;
   }
 
@@ -1316,4 +1614,84 @@ bool testcase::check_batch_get() {
   mdbx_cursor_close(check_cursor);
   mdbx_cursor_close(batch_cursor);
   return rc;
+}
+
+bool testcase::txn_probe_parking() {
+  MDBX_txn_flags_t state =
+      mdbx_txn_flags(txn_guard.get()) &
+      (MDBX_TXN_RDONLY | MDBX_TXN_PARKED | MDBX_TXN_AUTOUNPARK |
+       MDBX_TXN_OUSTED | MDBX_TXN_BLOCKED);
+  if (state != MDBX_TXN_RDONLY)
+    return true;
+
+  const bool autounpark = flipcoin();
+  int err = mdbx_txn_park(txn_guard.get(), autounpark);
+  if (err != MDBX_SUCCESS)
+    failure("mdbx_txn_park(), err %d", err);
+
+  MDBX_txn_info txn_info;
+  if (flipcoin()) {
+    err = mdbx_txn_info(txn_guard.get(), &txn_info, flipcoin());
+    if (err != MDBX_SUCCESS)
+      failure("mdbx_txn_info(1), state 0x%x, err %d",
+              state = mdbx_txn_flags(txn_guard.get()), err);
+  }
+
+  if (osal_multiactor_mode() && !mode_readonly()) {
+    while (flipcoin() &&
+           ((state = mdbx_txn_flags(txn_guard.get())) & MDBX_TXN_OUSTED) == 0)
+      osal_udelay(4242);
+  }
+
+  if (flipcoin()) {
+    err = mdbx_txn_info(txn_guard.get(), &txn_info, flipcoin());
+    if (err != MDBX_SUCCESS)
+      failure("mdbx_txn_info(2), state 0x%x, err %d",
+              state = mdbx_txn_flags(txn_guard.get()), err);
+  }
+
+  if (flipcoin()) {
+    MDBX_envinfo env_info;
+    err = mdbx_env_info_ex(db_guard.get(), txn_guard.get(), &env_info,
+                           sizeof(env_info));
+    if (!autounpark) {
+      if (err != MDBX_BAD_TXN)
+        failure("mdbx_env_info_ex(autounpark=%s), flags 0x%x, unexpected err "
+                "%d, must %d",
+                autounpark ? "true" : "false", state, err, MDBX_BAD_TXN);
+    } else if (err != MDBX_SUCCESS) {
+      if (err != MDBX_OUSTED ||
+          ((state = mdbx_txn_flags(txn_guard.get())) & MDBX_TXN_OUSTED) == 0)
+        failure("mdbx_env_info_ex(autounpark=%s), flags 0x%x, err %d",
+                autounpark ? "true" : "false", state, err);
+      else {
+        err = mdbx_txn_renew(txn_guard.get());
+        if (err != MDBX_SUCCESS)
+          failure("mdbx_txn_renew(), state 0x%x, err %d",
+                  state = mdbx_txn_flags(txn_guard.get()), err);
+      }
+    }
+  }
+
+  const bool autorestart = flipcoin();
+  err = mdbx_txn_unpark(txn_guard.get(), autorestart);
+  if (MDBX_IS_ERROR(err)) {
+    if (err != MDBX_OUSTED || autorestart)
+      failure("mdbx_txn_unpark(autounpark=%s, autorestart=%s), err %d",
+              autounpark ? "true" : "false", autorestart ? "true" : "false",
+              err);
+    else {
+      err = mdbx_txn_renew(txn_guard.get());
+      if (err != MDBX_SUCCESS)
+        failure("mdbx_txn_renew(), state 0x%x, err %d",
+                state = mdbx_txn_flags(txn_guard.get()), err);
+    }
+  }
+
+  state = mdbx_txn_flags(txn_guard.get()) &
+          (MDBX_TXN_RDONLY | MDBX_TXN_PARKED | MDBX_TXN_AUTOUNPARK |
+           MDBX_TXN_OUSTED | MDBX_TXN_BLOCKED);
+  if (state != MDBX_TXN_RDONLY)
+    failure("unexpected txn-state 0x%x", state);
+  return state == MDBX_TXN_RDONLY;
 }

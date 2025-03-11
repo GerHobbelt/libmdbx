@@ -1,16 +1,5 @@
-/*
- * Copyright 2017-2024 Leonid Yuriev <leo@yuriev.ru>
- * and other libmdbx authors: please see AUTHORS file.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted only as authorized by the OpenLDAP
- * Public License.
- *
- * A copy of this license is available in the file LICENSE in the
- * top-level directory of the distribution or, alternatively, at
- * <http://www.OpenLDAP.org/license.html>.
- */
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \copyright SPDX-License-Identifier: Apache-2.0
 
 #pragma once
 
@@ -63,7 +52,7 @@ const char *keygencase2str(const keygen_case);
 
 namespace config {
 
-enum scale_mode { no_scale, decimal, binary, duration, intkey };
+enum scale_mode { no_scale, decimal, binary, duration, intkey, entropy };
 
 bool parse_option(int argc, char *const argv[], int &narg, const char *option,
                   const char **value, const char *default_value = nullptr);

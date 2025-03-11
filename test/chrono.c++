@@ -1,16 +1,5 @@
-/*
- * Copyright 2017-2024 Leonid Yuriev <leo@yuriev.ru>
- * and other libmdbx authors: please see AUTHORS file.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted only as authorized by the OpenLDAP
- * Public License.
- *
- * A copy of this license is available in the file LICENSE in the
- * top-level directory of the distribution or, alternatively, at
- * <http://www.OpenLDAP.org/license.html>.
- */
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \copyright SPDX-License-Identifier: Apache-2.0
 
 #include "test.h++"
 
@@ -42,7 +31,16 @@ uint32_t us2fractional(uint32_t us) {
 }
 
 uint32_t fractional2us(uint32_t fractional) {
+#if !(defined(_M_ARM) || defined(_M_ARM64) || defined(_M_HYBRID_X86_ARM64))
+  /* Смеяться или плакать, но все существующие на май 2024 компиляторы Microsoft
+   * для ARM/ARM64, уже порядка 10 лет, падают на этом коде из-за внтутренней
+   * ошибке (aka ICE). */
   return uint32_t((fractional * uint64_t(USEC_PER_SEC)) >> 32);
+#else
+  static_assert(USEC_PER_SEC % 16 == 0, "WTF?");
+  /* Crutch for MSVC ARM/ARM64 compilers to avoid internal compiler error. */
+  return UInt32x32To64(fractional, USEC_PER_SEC / 16) >> 28;
+#endif
 }
 
 #ifndef MSEC_PER_SEC

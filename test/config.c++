@@ -1,16 +1,5 @@
-/*
- * Copyright 2017-2024 Leonid Yuriev <leo@yuriev.ru>
- * and other libmdbx authors: please see AUTHORS file.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted only as authorized by the OpenLDAP
- * Public License.
- *
- * A copy of this license is available in the file LICENSE in the
- * top-level directory of the distribution or, alternatively, at
- * <http://www.OpenLDAP.org/license.html>.
- */
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \copyright SPDX-License-Identifier: Apache-2.0
 
 #include "test.h++"
 
@@ -148,8 +137,16 @@ bool parse_option(int argc, char *const argv[], int &narg, const char *option,
   if (strcmp(value_cstr, "rnd") == 0 || strcmp(value_cstr, "rand") == 0 ||
       strcmp(value_cstr, "random") == 0) {
     value = minval;
-    if (maxval > minval)
-      value += (prng32() + UINT64_C(44263400549519813)) % (maxval - minval);
+    if (maxval > minval) {
+      uint64_t salt = (scale != entropy)
+                          ? prng64() ^ UINT64_C(44263400549519813)
+                          : (chrono::now_monotonic().fixedpoint ^
+                             UINT64_C(0xD85794512ED321FD)) *
+                                    UINT64_C(0x9120038359EAF3) ^
+                                chrono::now_realtime().fixedpoint *
+                                    UINT64_C(0x2FE5232BDC8E5F);
+      value += salt % (maxval - minval);
+    }
     if (scale == intkey)
       value &= ~3u;
     return true;
@@ -378,7 +375,8 @@ const struct option_verb mode_bits[] = {
     {"nosync-safe", unsigned(MDBX_SAFE_NOSYNC)},
     {"nometasync", unsigned(MDBX_NOMETASYNC)},
     {"writemap", unsigned(MDBX_WRITEMAP)},
-    {"notls", unsigned(MDBX_NOTLS)},
+    {"nostickythreads", unsigned(MDBX_NOSTICKYTHREADS)},
+    {"no-sticky-threads", unsigned(MDBX_NOSTICKYTHREADS)},
     {"nordahead", unsigned(MDBX_NORDAHEAD)},
     {"nomeminit", unsigned(MDBX_NOMEMINIT)},
     {"lifo", unsigned(MDBX_LIFORECLAIM)},

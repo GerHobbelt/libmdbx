@@ -1,16 +1,5 @@
-/*
- * Copyright 2017-2024 Leonid Yuriev <leo@yuriev.ru>
- * and other libmdbx authors: please see AUTHORS file.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted only as authorized by the OpenLDAP
- * Public License.
- *
- * A copy of this license is available in the file LICENSE in the
- * top-level directory of the distribution or, alternatively, at
- * <http://www.OpenLDAP.org/license.html>.
- */
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \copyright SPDX-License-Identifier: Apache-2.0
 
 #include "test.h++"
 
@@ -277,7 +266,7 @@ void maker::setup(const config::actor_params_pod &actor,
              value_essentials.bits - essentials::value_age_minwidth ||
          mapping.split >= mapping.width)
     mapping.split -= 1;
-  if (split != mapping.width)
+  if (split != mapping.split)
     log_notice("keygen: reduce mapping-split from %u to %u", split,
                mapping.split);
 

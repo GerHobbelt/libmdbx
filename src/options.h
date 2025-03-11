@@ -1,7 +1,10 @@
+/// \copyright SPDX-License-Identifier: Apache-2.0
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+
 /*******************************************************************************
  *******************************************************************************
- *******************************************************************************
  *
+ * BUILD TIME
  *
  *         ####   #####    #####     #     ####   #    #   ####
  *        #    #  #    #     #       #    #    #  ##   #  #
@@ -12,6 +15,10 @@
  *
  *
  */
+
+#pragma once
+
+#include "essentials.h"
 
 /** \defgroup build_option Build options
  * The libmdbx build options.
@@ -147,7 +154,7 @@
 #error MDBX_DPL_PREALLOC_FOR_RADIXSORT must be defined as 0 or 1
 #endif /* MDBX_DPL_PREALLOC_FOR_RADIXSORT */
 
-/** Controls dirty pages tracking, spilling and persisting in MDBX_WRITEMAP
+/** Controls dirty pages tracking, spilling and persisting in `MDBX_WRITEMAP`
  * mode. 0/OFF = Don't track dirty pages at all, don't spill ones, and use
  * msync() to persist data. This is by-default on Linux and other systems where
  * kernel provides properly LRU tracking and effective flushing on-demand. 1/ON
@@ -164,14 +171,16 @@
 #error MDBX_AVOID_MSYNC must be defined as 0 or 1
 #endif /* MDBX_AVOID_MSYNC */
 
-/** FIXME */
+/** Управляет механизмом поддержки разреженных наборов DBI-хендлов для снижения
+ * накладных расходов при запуске и обработке транзакций. */
 #ifndef MDBX_ENABLE_DBI_SPARSE
 #define MDBX_ENABLE_DBI_SPARSE 1
 #elif !(MDBX_ENABLE_DBI_SPARSE == 0 || MDBX_ENABLE_DBI_SPARSE == 1)
 #error MDBX_ENABLE_DBI_SPARSE must be defined as 0 or 1
 #endif /* MDBX_ENABLE_DBI_SPARSE */
 
-/** FIXME */
+/** Управляет механизмом отложенного освобождения и поддержки пути быстрого
+ * открытия DBI-хендлов без захвата блокировок. */
 #ifndef MDBX_ENABLE_DBI_LOCKFREE
 #define MDBX_ENABLE_DBI_LOCKFREE 1
 #elif !(MDBX_ENABLE_DBI_LOCKFREE == 0 || MDBX_ENABLE_DBI_LOCKFREE == 1)
@@ -190,7 +199,11 @@
 
 /** Avoid dependence from MSVC CRT and use ntdll.dll instead. */
 #ifndef MDBX_WITHOUT_MSVC_CRT
+#if !defined(MDBX_BUILD_CXX) || !MDBX_BUILD_CXX
 #define MDBX_WITHOUT_MSVC_CRT 1
+#else
+#define MDBX_WITHOUT_MSVC_CRT 0
+#endif
 #elif !(MDBX_WITHOUT_MSVC_CRT == 0 || MDBX_WITHOUT_MSVC_CRT == 1)
 #error MDBX_WITHOUT_MSVC_CRT must be defined as 0 or 1
 #endif /* MDBX_WITHOUT_MSVC_CRT */
@@ -497,6 +510,13 @@
 #endif
 #endif /* MDBX_CACHELINE_SIZE */
 
+/* Max length of iov-vector passed to writev() call, used for auxilary writes */
+#define MDBX_AUXILARY_IOV_MAX 64
+#if defined(IOV_MAX) && IOV_MAX < MDBX_AUXILARY_IOV_MAX
+#undef MDBX_AUXILARY_IOV_MAX
+#define MDBX_AUXILARY_IOV_MAX IOV_MAX
+#endif /* MDBX_AUXILARY_IOV_MAX */
+
 /** @} end of build options */
 /*******************************************************************************
  *******************************************************************************
@@ -511,6 +531,9 @@
 #else
 #define MDBX_DEBUG 1
 #endif
+#endif
+#if MDBX_DEBUG < 0 || MDBX_DEBUG > 2
+#error "The MDBX_DEBUG must be defined to 0, 1 or 2"
 #endif /* MDBX_DEBUG */
 
 #else
@@ -530,7 +553,7 @@
  *                     Also enables \ref MDBX_DBG_AUDIT if `MDBX_DEBUG >= 2`.
  *
  * \ingroup build_option */
-#define MDBX_DEBUG 0...7
+#define MDBX_DEBUG 0...2
 
 /** Disables using of GNU libc extensions. */
 #define MDBX_DISABLE_GNU_SOURCE 0 or 1

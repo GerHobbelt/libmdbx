@@ -1,16 +1,5 @@
-/*
- * Copyright 2023 Leonid Yuriev <leo@yuriev.ru>
- * and other libmdbx authors: please see AUTHORS file.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted only as authorized by the OpenLDAP
- * Public License.
- *
- * A copy of this license is available in the file LICENSE in the
- * top-level directory of the distribution or, alternatively, at
- * <http://www.OpenLDAP.org/license.html>.
- */
+/// \author Леонид Юрьев aka Leonid Yuriev <leo@yuriev.ru> \date 2015-2024
+/// \copyright SPDX-License-Identifier: Apache-2.0
 
 #include "test.h++"
 
@@ -39,7 +28,7 @@ public:
 bool testcase_smoke4fork::open_dbi() {
   if (!dbi || dbi_invalid) {
     if (dbi_stable ||
-        (mdbx_txn_flags(txn_guard.get()) & int(MDBX_TXN_RDONLY)) == 0) {
+        (mdbx_txn_flags(txn_guard.get()) & MDBX_TXN_RDONLY) == 0) {
       dbi = db_table_open(!dbi_stable);
       dbi_invalid = false;
     }
