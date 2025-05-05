@@ -9,9 +9,8 @@ __hot txnid_t txn_snapshot_oldest(const MDBX_txn *const txn) {
 
 void txn_done_cursors(MDBX_txn *txn) {
   tASSERT(txn, txn->flags & txn_may_have_cursors);
-  tASSERT(txn, txn->cursors[FREE_DBI] == nullptr);
 
-  TXN_FOREACH_DBI_FROM(txn, i, /* skip FREE_DBI */ 1) {
+  TXN_FOREACH_DBI_ALL(txn, i) {
     MDBX_cursor *cursor = txn->cursors[i];
     if (cursor) {
       txn->cursors[i] = nullptr;
@@ -34,8 +33,10 @@ int txn_shadow_cursors(const MDBX_txn *parent, const size_t dbi) {
   MDBX_cursor *next = nullptr;
   do {
     next = cursor->next;
-    if (cursor->signature != cur_signature_live)
+    if (cursor->signature != cur_signature_live) {
+      ENSURE(parent->env, cursor->signature == cur_signature_wait4eot);
       continue;
+    }
     tASSERT(parent, cursor->txn == parent && dbi == cursor_dbi(cursor));
 
     int err = cursor_shadow(cursor, txn, dbi);

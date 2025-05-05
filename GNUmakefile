@@ -639,7 +639,7 @@ doxygen: docs/Doxyfile docs/overall.md docs/intro.md docs/usage.md mdbx.h mdbx.h
 	$(QUIET)rm -rf docs/html && \
 	cat mdbx.h | tr '\n' '\r' | $(SED) -e 's/LIBMDBX_INLINE_API\s*(\s*\([^,]\+\),\s*\([^,]\+\),\s*(\s*\([^)]\+\)\s*)\s*)\s*{/inline \1 \2(\3) {/g' | tr '\r' '\n' >docs/mdbx.h && \
 	cp mdbx.h++ src/options.h ChangeLog.md docs/ && (cd docs && doxygen Doxyfile $(HUSH)) && cp COPYRIGHT LICENSE NOTICE docs/favicon.ico docs/manifest.webmanifest docs/html/ && \
-	$(SED) -i docs/html/index.html -e '/\/MathJax.js"><\/script>/r docs/ld+json'
+	$(SED) -i docs/html/index.html -e '/\/MathJax.js"><\/script>/r docs/ld+json' -e 's/<title>libmdbx: Overall<\/title>//;T;r docs/title'
 
 mdbx++-dylib.o: src/config.h src/mdbx.c++ mdbx.h mdbx.h++ $(lastword $(MAKEFILE_LIST))
 	@echo '  CC $@'
@@ -722,6 +722,7 @@ $(DIST_DIR)/@tmp-internals.inc: $(DIST_DIR)/@tmp-essentials.inc src/version.c $(
 		-e '/#include "essentials.h"/d' \
 		-e '/#include "atomics-ops.h"/r src/atomics-ops.h' \
 		-e '/#include "proto.h"/r src/proto.h' \
+		-e '/#include "rkl.h"/r src/rkl.h' \
 		-e '/#include "txl.h"/r src/txl.h' \
 		-e '/#include "unaligned.h"/r src/unaligned.h' \
 		-e '/#include "cogs.h"/r src/cogs.h' \
