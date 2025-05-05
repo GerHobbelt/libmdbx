@@ -107,6 +107,7 @@ bool case0(mdbx::env env) {
  * 4. Ждем завершения фоновых потоков.
  * 5. Закрываем оставшиеся курсоры и закрываем БД. */
 
+size_t global_seed = size_t(std::chrono::high_resolution_clock::now().time_since_epoch().count());
 thread_local size_t salt;
 
 static size_t prng() {
@@ -172,9 +173,21 @@ mdbx::map_handle case1_cycle_dbi(std::deque<mdbx::map_handle> &dbi) {
 
 void case1_read_cycle(mdbx::txn txn, std::deque<mdbx::map_handle> &dbi, std::vector<MDBX_cursor *> &pool,
                       mdbx::cursor pre, bool nested = false) {
-  for (auto c : pool)
-    mdbx::cursor(c).bind(txn, case1_cycle_dbi(dbi));
-  pre.bind(txn, case1_cycle_dbi(dbi));
+  if (nested) {
+    for (auto c : pool)
+      try {
+        mdbx::cursor(c).bind(txn, case1_cycle_dbi(dbi));
+      } catch (const std::invalid_argument &) {
+      }
+    try {
+      pre.bind(txn, case1_cycle_dbi(dbi));
+    } catch (const std::invalid_argument &) {
+    }
+  } else {
+    for (auto c : pool)
+      mdbx::cursor(c).bind(txn, case1_cycle_dbi(dbi));
+    pre.bind(txn, case1_cycle_dbi(dbi));
+  }
 
   for (auto n = prng(3 + dbi.size()); n > 0; --n) {
     auto c = txn.open_cursor(dbi[prng(dbi.size())]);
@@ -215,6 +228,16 @@ void case1_read_cycle(mdbx::txn txn, std::deque<mdbx::map_handle> &dbi, std::vec
 
   switch (prng(nested ? 7 : 3)) {
   case 0:
+    if (pre.txn()) {
+      if (nested)
+        try {
+          pre.unbind();
+        } catch (const std::invalid_argument &) {
+          return;
+        }
+      else
+        pre.unbind();
+    }
     for (auto i = pool.begin(); i != pool.end();)
       if (mdbx_cursor_txn(*i))
         i = pool.erase(i);
@@ -253,6 +276,8 @@ void case1_write_cycle(mdbx::txn_managed txn, std::deque<mdbx::map_handle> &dbi,
   if (prng(16) > 8)
     case1_write_cycle(txn.start_nested(), dbi, pool, pre, true);
 
+  case1_read_cycle(txn, dbi, pool, pre, nested);
+
   if (flipcoin())
     txn.commit();
   else
@@ -260,7 +285,12 @@ void case1_write_cycle(mdbx::txn_managed txn, std::deque<mdbx::map_handle> &dbi,
 }
 
 bool case1_thread(mdbx::env env, std::deque<mdbx::map_handle> dbi, mdbx::cursor pre) {
-  salt = size_t(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+  mdbx::error::success_or_throw(mdbx_txn_lock(env, false));
+  std::hash<std::thread::id> hasher;
+  salt = global_seed ^ hasher(std::this_thread::get_id());
+  std::cout << "thread " << std::this_thread::get_id() << ", salt " << salt << std::endl << std::flush;
+  mdbx_txn_unlock(env);
+
   std::vector<MDBX_cursor *> pool;
   for (auto loop = 0; loop < 333 / RELIEF_FACTOR; ++loop) {
     for (auto read = 0; read < 333 / RELIEF_FACTOR; ++read) {
@@ -288,11 +318,11 @@ bool case1(mdbx::env env) {
   std::deque<mdbx::map_handle> dbi;
   std::vector<mdbx::cursor_managed> cursors;
 #if defined(__cpp_lib_latch) && __cpp_lib_latch >= 201907L
-  static const auto N = 10;
+  static const auto N = std::thread::hardware_concurrency();
 #else
-  static const auto N = 3;
+  static const auto N = 3u;
 #endif
-  for (auto t = 0; t < N; ++t) {
+  for (auto t = 0u; t < N; ++t) {
     auto txn = env.start_write();
     auto table = txn.create_map(std::to_string(t), mdbx::key_mode::ordinal, mdbx::value_mode::multi_samelength);
     auto cursor = txn.open_cursor(table);
@@ -307,7 +337,7 @@ bool case1(mdbx::env env) {
 #if defined(__cpp_lib_latch) && __cpp_lib_latch >= 201907L
   std::latch s(1);
   std::vector<std::thread> threads;
-  for (auto t = 1; t < N; ++t) {
+  for (auto t = 1u; t < cursors.size(); ++t) {
     case1_cycle_dbi(dbi);
     threads.push_back(std::thread([&, t]() {
       s.wait();

@@ -326,7 +326,6 @@ static void txn_merge(MDBX_txn *const parent, MDBX_txn *const txn, const size_t 
     tASSERT(parent, dpl_check(parent));
   }
 
-  parent->flags &= ~MDBX_TXN_HAS_CHILD;
   if (parent->wr.spilled.list) {
     assert(pnl_check_allocated(parent->wr.spilled.list, (size_t)parent->geo.first_unallocated << 1));
     if (MDBX_PNL_GETSIZE(parent->wr.spilled.list))
@@ -459,9 +458,6 @@ void txn_nested_abort(MDBX_txn *nested) {
     parent->wr.retired_pages = nested->wr.retired_pages;
   }
 
-  parent->wr.dirtylru = nested->wr.dirtylru;
-  parent->nested = nullptr;
-  parent->flags &= ~MDBX_TXN_HAS_CHILD;
   tASSERT(parent, dpl_check(parent));
   tASSERT(parent, audit_ex(parent, 0, false) == 0);
   dpl_release_shadows(nested);
@@ -560,15 +556,16 @@ int txn_nested_join(MDBX_txn *txn, struct commit_timestamp *ts) {
   /* Update parent's DBs array */
   eASSERT(env, parent->n_dbi == txn->n_dbi);
   TXN_FOREACH_DBI_ALL(txn, dbi) {
-    if (txn->dbi_state[dbi] & (DBI_CREAT | DBI_FRESH | DBI_DIRTY)) {
+    if (txn->dbi_state[dbi] != (parent->dbi_state[dbi] & ~(DBI_FRESH | DBI_CREAT | DBI_DIRTY))) {
+      eASSERT(env,
+              (txn->dbi_state[dbi] & (DBI_CREAT | DBI_FRESH | DBI_DIRTY)) != 0 ||
+                  (txn->dbi_state[dbi] | DBI_STALE) == (parent->dbi_state[dbi] & ~(DBI_FRESH | DBI_CREAT | DBI_DIRTY)));
       parent->dbs[dbi] = txn->dbs[dbi];
       /* preserve parent's status */
       const uint8_t state = txn->dbi_state[dbi] | (parent->dbi_state[dbi] & (DBI_CREAT | DBI_FRESH | DBI_DIRTY));
       DEBUG("dbi %zu dbi-state %s 0x%02x -> 0x%02x", dbi, (parent->dbi_state[dbi] != state) ? "update" : "still",
             parent->dbi_state[dbi], state);
       parent->dbi_state[dbi] = state;
-    } else {
-      eASSERT(env, txn->dbi_state[dbi] == (parent->dbi_state[dbi] & ~(DBI_FRESH | DBI_CREAT | DBI_DIRTY)));
     }
   }
 
@@ -580,9 +577,10 @@ int txn_nested_join(MDBX_txn *txn, struct commit_timestamp *ts) {
     ts->sync = /* no sync */ ts->write;
   }
   txn_merge(parent, txn, parent_retired_len);
+  tASSERT(parent, parent->flags & MDBX_TXN_HAS_CHILD);
+  parent->flags -= MDBX_TXN_HAS_CHILD;
   env->txn = parent;
   parent->nested = nullptr;
-  parent->flags &= ~MDBX_TXN_HAS_CHILD;
   tASSERT(parent, dpl_check(parent));
 
 #if MDBX_ENABLE_REFUND
