@@ -1718,7 +1718,7 @@ typedef enum MDBX_cursor_op {
 
   /** \ref MDBX_DUPFIXED -only: Return up to a page of duplicate data items
    * from current cursor position. Move cursor to prepare
-   * for \ref MDBX_NEXT_MULTIPLE. */
+   * for \ref MDBX_NEXT_MULTIPLE. \see MDBX_SEEK_AND_GET_MULTIPLE */
   MDBX_GET_MULTIPLE,
 
   /** Position at last key/data item */
@@ -1734,8 +1734,8 @@ typedef enum MDBX_cursor_op {
   MDBX_NEXT_DUP,
 
   /** \ref MDBX_DUPFIXED -only: Return up to a page of duplicate data items
-   * from next cursor position. Move cursor to prepare
-   * for `MDBX_NEXT_MULTIPLE`. */
+   * from next cursor position. Move cursor to prepare for `MDBX_NEXT_MULTIPLE`.
+   * \see MDBX_SEEK_AND_GET_MULTIPLE \see MDBX_GET_MULTIPLE */
   MDBX_NEXT_MULTIPLE,
 
   /** Position at first data item of next key */
@@ -1760,7 +1760,8 @@ typedef enum MDBX_cursor_op {
   MDBX_SET_RANGE,
 
   /** \ref MDBX_DUPFIXED -only: Position at previous page and return up to
-   * a page of duplicate data items. */
+   * a page of duplicate data items.
+   * \see MDBX_SEEK_AND_GET_MULTIPLE \see MDBX_GET_MULTIPLE */
   MDBX_PREV_MULTIPLE,
 
   /** Positions cursor at first key-value pair greater than or equal to
@@ -1791,26 +1792,33 @@ typedef enum MDBX_cursor_op {
    * \ref MDBX_NOTFOUND otherwise. */
   MDBX_SET_UPPERBOUND,
 
-  /* Doubtless cursor positioning at a specified key. */
+  /** Doubtless cursor positioning at a specified key. */
   MDBX_TO_KEY_LESSER_THAN,
-  MDBX_TO_KEY_LESSER_OR_EQUAL,
-  MDBX_TO_KEY_EQUAL,
-  MDBX_TO_KEY_GREATER_OR_EQUAL,
-  MDBX_TO_KEY_GREATER_THAN,
+  MDBX_TO_KEY_LESSER_OR_EQUAL /** \copydoc MDBX_TO_KEY_LESSER_THAN */,
+  MDBX_TO_KEY_EQUAL /** \copydoc MDBX_TO_KEY_LESSER_THAN */,
+  MDBX_TO_KEY_GREATER_OR_EQUAL /** \copydoc MDBX_TO_KEY_LESSER_THAN */,
+  MDBX_TO_KEY_GREATER_THAN /** \copydoc MDBX_TO_KEY_LESSER_THAN */,
 
-  /* Doubtless cursor positioning at a specified key-value pair
+  /** Doubtless cursor positioning at a specified key-value pair
    * for dupsort/multi-value hives. */
   MDBX_TO_EXACT_KEY_VALUE_LESSER_THAN,
-  MDBX_TO_EXACT_KEY_VALUE_LESSER_OR_EQUAL,
-  MDBX_TO_EXACT_KEY_VALUE_EQUAL,
-  MDBX_TO_EXACT_KEY_VALUE_GREATER_OR_EQUAL,
-  MDBX_TO_EXACT_KEY_VALUE_GREATER_THAN,
+  MDBX_TO_EXACT_KEY_VALUE_LESSER_OR_EQUAL /** \copydoc MDBX_TO_EXACT_KEY_VALUE_LESSER_THAN */,
+  MDBX_TO_EXACT_KEY_VALUE_EQUAL /** \copydoc MDBX_TO_EXACT_KEY_VALUE_LESSER_THAN */,
+  MDBX_TO_EXACT_KEY_VALUE_GREATER_OR_EQUAL /** \copydoc MDBX_TO_EXACT_KEY_VALUE_LESSER_THAN */,
+  MDBX_TO_EXACT_KEY_VALUE_GREATER_THAN /** \copydoc MDBX_TO_EXACT_KEY_VALUE_LESSER_THAN */,
 
+  /** Doubtless cursor positioning at a specified key-value pair
+   * for dupsort/multi-value hives. */
   MDBX_TO_PAIR_LESSER_THAN,
-  MDBX_TO_PAIR_LESSER_OR_EQUAL,
-  MDBX_TO_PAIR_EQUAL,
-  MDBX_TO_PAIR_GREATER_OR_EQUAL,
-  MDBX_TO_PAIR_GREATER_THAN
+  MDBX_TO_PAIR_LESSER_OR_EQUAL /** \copydoc MDBX_TO_PAIR_LESSER_THAN */,
+  MDBX_TO_PAIR_EQUAL /** \copydoc MDBX_TO_PAIR_LESSER_THAN */,
+  MDBX_TO_PAIR_GREATER_OR_EQUAL /** \copydoc MDBX_TO_PAIR_LESSER_THAN */,
+  MDBX_TO_PAIR_GREATER_THAN /** \copydoc MDBX_TO_PAIR_LESSER_THAN */,
+
+  /** \ref MDBX_DUPFIXED -only: Seek to given key and return up to a page of
+   * duplicate data items from current cursor position. Move cursor to prepare
+   * for \ref MDBX_NEXT_MULTIPLE. \see MDBX_GET_MULTIPLE */
+  MDBX_SEEK_AND_GET_MULTIPLE
 } MDBX_cursor_op;
 
 /** \brief Errors and return codes
@@ -1964,8 +1972,7 @@ typedef enum MDBX_error {
    * recycling old MVCC snapshots. */
   MDBX_OUSTED = -30411,
 
-  /** MVCC snapshot used by read transaction is outdated and could not be
-   *  copied since corresponding meta-pages was overwritten. */
+  /** MVCC snapshot used by parked transaction was bygone. */
   MDBX_MVCC_RETARDED = -30410,
 
   /* The last of MDBX-added error codes */
@@ -5124,6 +5131,10 @@ MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API void *mdbx_cursor_get_userctx(const MDBX_
  * the same table handle as it was created with. This may be done whether the
  * previous transaction is live or dead.
  *
+ * If the transaction is nested, then the cursor should not be used in its parent transaction.
+ * Otherwise it is no way to restore state if this nested transaction will be aborted,
+ * nor impossible to define the expected behavior.
+ *
  * \note In contrast to LMDB, the MDBX required that any opened cursors can be
  * reused and must be freed explicitly, regardless ones was opened in a
  * read-only or write transaction. The REASON for this is eliminates ambiguity
@@ -5147,6 +5158,10 @@ LIBMDBX_API int mdbx_cursor_bind(MDBX_txn *txn, MDBX_cursor *cursor, MDBX_dbi db
  * Unbinded cursor is disassociated with any transactions but still holds
  * the original DBI-handle internally. Thus it could be renewed with any running
  * transaction or closed.
+ *
+ * If the transaction is nested, then the cursor should not be used in its parent transaction.
+ * Otherwise it is no way to restore state if this nested transaction will be aborted,
+ * nor impossible to define the expected behavior.
  *
  * \see mdbx_cursor_renew()
  * \see mdbx_cursor_bind()
@@ -5210,11 +5225,16 @@ LIBMDBX_API int mdbx_cursor_reset(MDBX_cursor *cursor);
  * \retval MDBX_EINVAL  An invalid parameter was specified. */
 LIBMDBX_API int mdbx_cursor_open(MDBX_txn *txn, MDBX_dbi dbi, MDBX_cursor **cursor);
 
-/** \brief Close a cursor handle.
+/** \brief Closes a cursor handle without returning error code.
  * \ingroup c_cursors
  *
  * The cursor handle will be freed and must not be used again after this call,
  * but its transaction may still be live.
+ *
+ * This function returns `void` but panic in case of error. Use \ref mdbx_cursor_close2()
+ * if you need to receive an error code instead of an app crash.
+ *
+ * \see mdbx_cursor_close2
  *
  * \note In contrast to LMDB, the MDBX required that any opened cursors can be
  * reused and must be freed explicitly, regardless ones was opened in a
@@ -5226,11 +5246,38 @@ LIBMDBX_API int mdbx_cursor_open(MDBX_txn *txn, MDBX_dbi dbi, MDBX_cursor **curs
  *                     or \ref mdbx_cursor_create(). */
 LIBMDBX_API void mdbx_cursor_close(MDBX_cursor *cursor);
 
+/** \brief Closes a cursor handle with returning error code.
+ * \ingroup c_cursors
+ *
+ * The cursor handle will be freed and must not be used again after this call,
+ * but its transaction may still be live.
+ *
+ * \see mdbx_cursor_close
+ *
+ * \note In contrast to LMDB, the MDBX required that any opened cursors can be
+ * reused and must be freed explicitly, regardless ones was opened in a
+ * read-only or write transaction. The REASON for this is eliminates ambiguity
+ * which helps to avoid errors such as: use-after-free, double-free, i.e.
+ * memory corruption and segfaults.
+ *
+ * \param [in] cursor  A cursor handle returned by \ref mdbx_cursor_open()
+ *                     or \ref mdbx_cursor_create().
+ * \returns A non-zero error value on failure and 0 on success,
+ *          some possible errors are:
+ * \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
+ *                               by current thread.
+ * \retval MDBX_EINVAL  An invalid parameter was specified. */
+LIBMDBX_API int mdbx_cursor_close2(MDBX_cursor *cursor);
+
 /** \brief Unbind or closes all cursors of a given transaction.
  * \ingroup c_cursors
  *
  * Unbinds either closes all cursors associated (opened or renewed) with
  * a given transaction in a bulk with minimal overhead.
+ *
+ * A transaction should not be nested, since in this case no way to restore
+ * state if this nested transaction will be aborted, nor impossible to define
+ * the expected behavior.
  *
  * \see mdbx_cursor_unbind()
  * \see mdbx_cursor_close()
@@ -5245,7 +5292,7 @@ LIBMDBX_API void mdbx_cursor_close(MDBX_cursor *cursor);
  *          some possible errors are:
  * \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
  *                               by current thread.
- * \retval MDBX_BAD_TXN          Given transaction is invalid or has
+ * \retval MDBX_BAD_TXN          Given transaction is invalid, nested or has
  *                               a child/nested transaction transaction. */
 LIBMDBX_API int mdbx_txn_release_all_cursors_ex(const MDBX_txn *txn, bool unbind, size_t *count);
 
@@ -5254,6 +5301,10 @@ LIBMDBX_API int mdbx_txn_release_all_cursors_ex(const MDBX_txn *txn, bool unbind
  *
  * Unbinds either closes all cursors associated (opened or renewed) with
  * a given transaction in a bulk with minimal overhead.
+ *
+ * A transaction should not be nested, since in this case no way to restore
+ * state if this nested transaction will be aborted, nor impossible to define
+ * the expected behavior.
  *
  * \see mdbx_cursor_unbind()
  * \see mdbx_cursor_close()
@@ -5266,7 +5317,7 @@ LIBMDBX_API int mdbx_txn_release_all_cursors_ex(const MDBX_txn *txn, bool unbind
  *          some possible errors are:
  * \retval MDBX_THREAD_MISMATCH  Given transaction is not owned
  *                               by current thread.
- * \retval MDBX_BAD_TXN          Given transaction is invalid or has
+ * \retval MDBX_BAD_TXN          Given transaction is invalid, nested or has
  *                               a child/nested transaction transaction. */
 LIBMDBX_INLINE_API(int, mdbx_txn_release_all_cursors, (const MDBX_txn *txn, bool unbind)) {
   return mdbx_txn_release_all_cursors_ex(txn, unbind, NULL);
