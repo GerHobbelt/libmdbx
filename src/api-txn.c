@@ -235,9 +235,11 @@ int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags, M
     flags |= parent->flags & (txn_rw_begin_flags | MDBX_TXN_SPILLS | MDBX_NOSTICKYTHREADS | MDBX_WRITEMAP);
     rc = txn_nested_create(parent, flags);
     txn = parent->nested;
-    if (unlikely(rc != MDBX_SUCCESS))
-      txn_end(txn, TXN_END_FAIL_BEGIN_NESTED);
-    else if (AUDIT_ENABLED() && ASSERT_ENABLED()) {
+    if (unlikely(rc != MDBX_SUCCESS)) {
+      int err = txn_end(txn, TXN_END_FAIL_BEGIN_NESTED);
+      return err ? err : rc;
+    }
+    if (AUDIT_ENABLED() && ASSERT_ENABLED()) {
       txn->signature = txn_signature;
       tASSERT(txn, audit_ex(txn, 0, false) == 0);
     }
@@ -249,31 +251,30 @@ int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags, M
         return LOG_IFERR(MDBX_ENOMEM);
     }
     rc = txn_renew(txn, flags);
-  }
-
-  if (unlikely(rc != MDBX_SUCCESS)) {
-    if (txn != env->basal_txn)
-      osal_free(txn);
-  } else {
-    if (flags & (MDBX_TXN_RDONLY_PREPARE - MDBX_TXN_RDONLY))
-      eASSERT(env, txn->flags == (MDBX_TXN_RDONLY | MDBX_TXN_FINISHED));
-    else if (flags & MDBX_TXN_RDONLY)
-      eASSERT(env, (txn->flags & ~(MDBX_NOSTICKYTHREADS | MDBX_TXN_RDONLY | MDBX_WRITEMAP |
-                                   /* Win32: SRWL flag */ txn_shrink_allowed)) == 0);
-    else {
-      eASSERT(env, (txn->flags & ~(MDBX_NOSTICKYTHREADS | MDBX_WRITEMAP | txn_shrink_allowed | txn_may_have_cursors |
-                                   MDBX_NOMETASYNC | MDBX_SAFE_NOSYNC | MDBX_TXN_SPILLS)) == 0);
-      assert(!txn->wr.spilled.list && !txn->wr.spilled.least_removed);
+    if (unlikely(rc != MDBX_SUCCESS)) {
+      if (txn != env->basal_txn)
+        osal_free(txn);
+      return LOG_IFERR(rc);
     }
-    txn->signature = txn_signature;
-    txn->userctx = context;
-    *ret = txn;
-    DEBUG("begin txn %" PRIaTXN "%c %p on env %p, root page %" PRIaPGNO "/%" PRIaPGNO, txn->txnid,
-          (flags & MDBX_TXN_RDONLY) ? 'r' : 'w', (void *)txn, (void *)env, txn->dbs[MAIN_DBI].root,
-          txn->dbs[FREE_DBI].root);
   }
 
-  return LOG_IFERR(rc);
+  if (flags & (MDBX_TXN_RDONLY_PREPARE - MDBX_TXN_RDONLY))
+    eASSERT(env, txn->flags == (MDBX_TXN_RDONLY | MDBX_TXN_FINISHED));
+  else if (flags & MDBX_TXN_RDONLY)
+    eASSERT(env, (txn->flags & ~(MDBX_NOSTICKYTHREADS | MDBX_TXN_RDONLY | MDBX_WRITEMAP |
+                                 /* Win32: SRWL flag */ txn_shrink_allowed)) == 0);
+  else {
+    eASSERT(env, (txn->flags & ~(MDBX_NOSTICKYTHREADS | MDBX_WRITEMAP | txn_shrink_allowed | txn_may_have_cursors |
+                                 MDBX_NOMETASYNC | MDBX_SAFE_NOSYNC | MDBX_TXN_SPILLS)) == 0);
+    assert(!txn->wr.spilled.list && !txn->wr.spilled.least_removed);
+  }
+  txn->signature = txn_signature;
+  txn->userctx = context;
+  *ret = txn;
+  DEBUG("begin txn %" PRIaTXN "%c %p on env %p, root page %" PRIaPGNO "/%" PRIaPGNO, txn->txnid,
+        (flags & MDBX_TXN_RDONLY) ? 'r' : 'w', (void *)txn, (void *)env, txn->dbs[MAIN_DBI].root,
+        txn->dbs[FREE_DBI].root);
+  return MDBX_SUCCESS;
 }
 
 static void latency_gcprof(MDBX_commit_latency *latency, const MDBX_txn *txn) {
@@ -513,23 +514,25 @@ int mdbx_txn_info(const MDBX_txn *txn, MDBX_txn_info *info, bool scan_rlt) {
     info->txn_reader_lag = INT64_MAX;
     lck_t *const lck = env->lck_mmap.lck;
     if (scan_rlt && lck) {
-      txnid_t oldest_snapshot = txn->txnid;
+      txnid_t oldest_reading = txn->txnid;
       const size_t snap_nreaders = atomic_load32(&lck->rdt_length, mo_AcquireRelease);
       if (snap_nreaders) {
-        oldest_snapshot = txn_snapshot_oldest(txn);
-        if (oldest_snapshot == txn->txnid - 1) {
-          /* check if there is at least one reader */
-          bool exists = false;
+        txn_gc_detent(txn);
+        oldest_reading = txn->env->gc.detent;
+        if (oldest_reading == txn->wr.troika.txnid[txn->wr.troika.recent]) {
+          /* Если самый старый используемый снимок является предыдущим, т. е. непосредственно предшествующим текущей
+           * транзакции, то просматриваем таблицу читателей чтобы выяснить действительно ли снимок используется
+           * читателями. */
+          oldest_reading = txn->txnid;
           for (size_t i = 0; i < snap_nreaders; ++i) {
-            if (atomic_load32(&lck->rdt[i].pid, mo_Relaxed) && txn->txnid > safe64_read(&lck->rdt[i].txnid)) {
-              exists = true;
+            if (atomic_load32(&lck->rdt[i].pid, mo_Relaxed) && txn->env->gc.detent == safe64_read(&lck->rdt[i].txnid)) {
+              oldest_reading = txn->env->gc.detent;
               break;
             }
           }
-          oldest_snapshot += !exists;
         }
       }
-      info->txn_reader_lag = txn->txnid - oldest_snapshot;
+      info->txn_reader_lag = txn->txnid - oldest_reading;
     }
   }
 

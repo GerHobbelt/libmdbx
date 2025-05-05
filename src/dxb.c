@@ -1061,16 +1061,17 @@ int dxb_sync_locked(MDBX_env *env, unsigned flags, meta_t *const pending, troika
 #endif /* MADV_DONTNEED || POSIX_MADV_DONTNEED */
 
       /* LY: check conditions to shrink datafile */
-      const pgno_t backlog_gap = 3 + pending->trees.gc.height * 3;
+      const pgno_t stockpile_gap = 3 + pending->trees.gc.height * 3;
       pgno_t shrink_step = 0;
       if (pending->geometry.shrink_pv && pending->geometry.now - pending->geometry.first_unallocated >
-                                             (shrink_step = pv2pages(pending->geometry.shrink_pv)) + backlog_gap) {
-        if (pending->geometry.now > largest_pgno && pending->geometry.now - largest_pgno > shrink_step + backlog_gap) {
+                                             (shrink_step = pv2pages(pending->geometry.shrink_pv)) + stockpile_gap) {
+        if (pending->geometry.now > largest_pgno &&
+            pending->geometry.now - largest_pgno > shrink_step + stockpile_gap) {
           const pgno_t aligner =
               pending->geometry.grow_pv ? /* grow_step */ pv2pages(pending->geometry.grow_pv) : shrink_step;
-          const pgno_t with_backlog_gap = largest_pgno + backlog_gap;
+          const pgno_t with_stockpile_gap = largest_pgno + stockpile_gap;
           const pgno_t aligned =
-              pgno_align2os_pgno(env, (size_t)with_backlog_gap + aligner - with_backlog_gap % aligner);
+              pgno_align2os_pgno(env, (size_t)with_stockpile_gap + aligner - with_stockpile_gap % aligner);
           const pgno_t bottom = (aligned > pending->geometry.lower) ? aligned : pending->geometry.lower;
           if (pending->geometry.now > bottom) {
             if (TROIKA_HAVE_STEADY(troika))
@@ -1157,7 +1158,7 @@ int dxb_sync_locked(MDBX_env *env, unsigned flags, meta_t *const pending, troika
     if (!head.is_steady && meta_is_steady(pending))
       target = (meta_t *)head.ptr_c;
     else {
-      NOTICE("skip update meta%" PRIaPGNO " for txn#%" PRIaTXN "since it is already steady",
+      NOTICE("skip update meta%" PRIaPGNO " for txn#%" PRIaTXN ", since it is already steady",
              data_page(head.ptr_c)->pgno, head.txnid);
       return MDBX_SUCCESS;
     }
@@ -1290,6 +1291,7 @@ int dxb_sync_locked(MDBX_env *env, unsigned flags, meta_t *const pending, troika
   }
 
   uint64_t timestamp = 0;
+  /* coverity[array_null] */
   while ("workaround for https://libmdbx.dqdkfa.ru/dead-github/issues/269") {
     rc = coherency_check_written(env, pending->unsafe_txnid, target,
                                  bytes2pgno(env, ptr_dist(target, env->dxb_mmap.base)), &timestamp);

@@ -32,7 +32,7 @@ void rkl_destroy(rkl_t *rkl) {
   void *ptr = rkl->list;
   rkl->list = nullptr;
   if (ptr != rkl->inplace)
-    osal_free(rkl->list);
+    osal_free(ptr);
 }
 
 static inline bool solid_empty(const rkl_t *rkl) { return !(rkl->solid_begin < rkl->solid_end); }
@@ -48,44 +48,46 @@ void rkl_destructive_move(rkl_t *src, rkl_t *dst) {
   dst->list_length = src->list_length;
   if (dst->list != dst->inplace)
     osal_free(dst->list);
-  if (src->list_length > ARRAY_LENGTH(dst->inplace)) {
-    assert(src->list != src->inplace);
+  if (src->list != src->inplace) {
     dst->list = src->list;
     dst->list_limit = src->list_limit;
   } else {
     dst->list = dst->inplace;
     dst->list_limit = ARRAY_LENGTH(src->inplace);
     memcpy(dst->inplace, src->list, sizeof(dst->inplace));
-    if (src->list != src->inplace)
-      osal_free(src->list);
   }
   rkl_init(src);
 }
 
-static int rkl_resize(rkl_t *rkl, size_t size) {
-  assert(size > rkl->list_length);
+static int rkl_resize(rkl_t *rkl, size_t wanna_size) {
+  assert(wanna_size > rkl->list_length);
   assert(rkl_check(rkl));
   STATIC_ASSERT(txl_max < INT_MAX / sizeof(txnid_t));
-  if (unlikely(size > txl_max)) {
-    ERROR("rkl too long (%zu >= %zu)", size, (size_t)txl_max);
+  if (unlikely(wanna_size > txl_max)) {
+    ERROR("rkl too long (%zu >= %zu)", wanna_size, (size_t)txl_max);
     return MDBX_TXN_FULL;
   }
-  if (unlikely(size < rkl->list_length)) {
-    ERROR("unable shrink rkl to %zu since length is %u", size, rkl->list_length);
-    return MDBX_TXN_FULL;
+  if (unlikely(wanna_size < rkl->list_length)) {
+    ERROR("unable shrink rkl to %zu since length is %u", wanna_size, rkl->list_length);
+    return MDBX_PROBLEM;
   }
-  if (unlikely(size <= ARRAY_LENGTH(rkl->inplace))) {
+
+  if (unlikely(wanna_size <= ARRAY_LENGTH(rkl->inplace))) {
     if (rkl->list != rkl->inplace) {
-      memcpy(rkl->inplace, rkl->list, sizeof(txnid_t) * rkl->list_length);
+      assert(rkl->list_limit > ARRAY_LENGTH(rkl->inplace) && rkl->list_length <= ARRAY_LENGTH(rkl->inplace));
+      memcpy(rkl->inplace, rkl->list, sizeof(rkl->inplace));
       rkl->list_limit = ARRAY_LENGTH(rkl->inplace);
       osal_free(rkl->list);
       rkl->list = rkl->inplace;
     } else {
       assert(rkl->list_limit == ARRAY_LENGTH(rkl->inplace));
     }
-  } else if (size != rkl->list_limit) {
-    size_t bytes = rkl_size2bytes(size);
-    void *const ptr = (rkl->list == rkl->inplace) ? osal_malloc(bytes) : osal_realloc(rkl->list, bytes);
+    return MDBX_SUCCESS;
+  }
+
+  if (wanna_size != rkl->list_limit) {
+    size_t bytes = rkl_size2bytes(wanna_size);
+    void *ptr = (rkl->list == rkl->inplace) ? osal_malloc(bytes) : osal_realloc(rkl->list, bytes);
     if (unlikely(!ptr))
       return MDBX_ENOMEM;
 #ifdef osal_malloc_usable_size
@@ -118,17 +120,11 @@ int rkl_copy(const rkl_t *src, rkl_t *dst) {
 
 size_t rkl_len(const rkl_t *rkl) { return rkl_empty(rkl) ? 0 : rkl->solid_end - rkl->solid_begin + rkl->list_length; }
 
-__hot bool rkl_find(const rkl_t *rkl, txnid_t id, rkl_iter_t *iter) {
+__hot bool rkl_contain(const rkl_t *rkl, txnid_t id) {
   assert(rkl_check(rkl));
-  if (!rkl_empty(rkl)) {
-    if (id >= rkl->solid_begin && id < rkl->solid_end) {
-      if (iter) {
-        *iter = rkl_iterator(rkl, false);
-        iter->pos = iter->solid_offset + id - rkl->solid_begin;
-      }
-      return true;
-    }
-
+  if (id >= rkl->solid_begin && id < rkl->solid_end)
+    return true;
+  if (rkl->list_length) {
     const txnid_t *it = rkl_bsearch(rkl->list, rkl->list_length, id);
     const txnid_t *const end = rkl->list + rkl->list_length;
     assert(it >= rkl->list && it <= end);
@@ -136,13 +132,32 @@ __hot bool rkl_find(const rkl_t *rkl, txnid_t id, rkl_iter_t *iter) {
       assert(RKL_ORDERED(it[-1], id));
     if (it != end) {
       assert(!RKL_ORDERED(it[0], id));
-      if (*it == id) {
-        if (iter) {
-          *iter = rkl_iterator(rkl, false);
-          iter->pos = it - rkl->list;
-        }
-        return true;
-      }
+      return *it == id;
+    }
+  }
+  return false;
+}
+
+__hot bool rkl_find(const rkl_t *rkl, txnid_t id, rkl_iter_t *iter) {
+  assert(rkl_check(rkl));
+  *iter = rkl_iterator(rkl, false);
+  if (id >= rkl->solid_begin) {
+    if (id < rkl->solid_end) {
+      iter->pos = iter->solid_offset + (unsigned)(id - rkl->solid_begin);
+      return true;
+    }
+    iter->pos = (unsigned)(rkl->solid_end - rkl->solid_begin);
+  }
+  if (rkl->list_length) {
+    const txnid_t *it = rkl_bsearch(rkl->list, rkl->list_length, id);
+    const txnid_t *const end = rkl->list + rkl->list_length;
+    assert(it >= rkl->list && it <= end);
+    if (it != rkl->list)
+      assert(RKL_ORDERED(it[-1], id));
+    iter->pos += (unsigned)(it - rkl->list);
+    if (it != end) {
+      assert(!RKL_ORDERED(it[0], id));
+      return *it == id;
     }
   }
   return false;
@@ -302,6 +317,7 @@ int rkl_push(rkl_t *rkl, const txnid_t id, const bool known_continuous) {
             + old_solid_len;
         /* количество элементов списка, которые нужно переместить для вставки еще-одного/следующего элемента */
         const size_t new_insert_cost = rkl->list_length - i;
+        /* coverity[logical_vs_bitwise] */
         if (unlikely(swap_cost < new_insert_cost) || MDBX_DEBUG) {
           /* Изымаемая последовательность длиннее добавляемой, поэтому:
            *  - список станет короче;
@@ -366,7 +382,6 @@ txnid_t rkl_pop(rkl_t *rkl, const bool highest_not_lowest) {
 txnid_t rkl_lowest(const rkl_t *rkl) {
   if (rkl->list_length)
     return (solid_empty(rkl) || rkl->list[0] < rkl->solid_begin) ? rkl->list[0] : rkl->solid_begin;
-
   return !solid_empty(rkl) ? rkl->solid_begin : INVALID_TXNID;
 }
 
@@ -374,8 +389,27 @@ txnid_t rkl_highest(const rkl_t *rkl) {
   if (rkl->list_length)
     return (solid_empty(rkl) || rkl->list[rkl->list_length - 1] >= rkl->solid_end) ? rkl->list[rkl->list_length - 1]
                                                                                    : rkl->solid_end - 1;
-
   return !solid_empty(rkl) ? rkl->solid_end - 1 : 0;
+}
+
+int rkl_merge(rkl_t *dst, const rkl_t *src, bool ignore_duplicates) {
+  if (src->list_length) {
+    size_t i = src->list_length;
+    do {
+      int err = rkl_push(dst, src->list[i - 1], false);
+      if (unlikely(err != MDBX_SUCCESS) && (!ignore_duplicates || err != MDBX_RESULT_TRUE))
+        return err;
+    } while (--i);
+  }
+
+  txnid_t id = src->solid_begin;
+  while (id < src->solid_end) {
+    int err = rkl_push(dst, id, false);
+    if (unlikely(err != MDBX_SUCCESS) && (!ignore_duplicates || err != MDBX_RESULT_TRUE))
+      return err;
+    ++id;
+  }
+  return MDBX_SUCCESS;
 }
 
 rkl_iter_t rkl_iterator(const rkl_t *rkl, const bool reverse) {
