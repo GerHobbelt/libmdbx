@@ -292,6 +292,21 @@ MDBX_NOTHROW_PURE_FUNCTION static inline bool check_leaf_type(const MDBX_cursor 
   return (((page_type(mp) ^ mc->checking) & (z_branch | z_leaf | z_largepage | z_dupfix)) == 0);
 }
 
+MDBX_INTERNAL int cursor_check(const MDBX_cursor *mc, int txn_bad_bits);
+
+/* без необходимости доступа к данным, без активации припаркованных транзакций. */
+static inline int cursor_check_pure(const MDBX_cursor *mc) {
+  return cursor_check(mc, MDBX_TXN_BLOCKED - MDBX_TXN_PARKED);
+}
+
+/* для чтения данных, с активацией припаркованных транзакций. */
+static inline int cursor_check_ro(const MDBX_cursor *mc) { return cursor_check(mc, MDBX_TXN_BLOCKED); }
+
+/* для записи данных. */
+static inline int cursor_check_rw(const MDBX_cursor *mc) {
+  return cursor_check(mc, (MDBX_TXN_BLOCKED - MDBX_TXN_PARKED) | MDBX_TXN_RDONLY);
+}
+
 MDBX_INTERNAL MDBX_cursor *cursor_eot(MDBX_cursor *cursor, MDBX_txn *txn);
 MDBX_INTERNAL int cursor_shadow(MDBX_cursor *cursor, MDBX_txn *nested, const size_t dbi);
 
@@ -299,6 +314,9 @@ MDBX_INTERNAL MDBX_cursor *cursor_cpstk(const MDBX_cursor *csrc, MDBX_cursor *cd
 
 MDBX_INTERNAL int __must_check_result cursor_ops(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data,
                                                  const MDBX_cursor_op op);
+
+MDBX_INTERNAL int __must_check_result cursor_check_multiple(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
+                                                            unsigned flags);
 
 MDBX_INTERNAL int __must_check_result cursor_put_checklen(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data,
                                                           unsigned flags);

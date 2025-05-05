@@ -728,8 +728,17 @@ __hot int cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data, unsig
     if (mc->clc->k.cmp(key, &current_key) != 0)
       return MDBX_EKEYMISMATCH;
 
-    if (unlikely((flags & MDBX_MULTIPLE)))
-      goto drop_current;
+    if (unlikely((flags & MDBX_MULTIPLE))) {
+      if (unlikely(!mc->subcur))
+        return MDBX_EINVAL;
+      err = cursor_del(mc, flags & MDBX_ALLDUPS);
+      if (unlikely(err != MDBX_SUCCESS))
+        return err;
+      if (unlikely(data[1].iov_len == 0))
+        return MDBX_SUCCESS;
+      flags -= MDBX_CURRENT;
+      goto skip_check_samedata;
+    }
 
     if (mc->subcur) {
       node_t *node = page_node(mc->pg[mc->top], mc->ki[mc->top]);
@@ -739,7 +748,6 @@ __hot int cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data, unsig
          * отличается, то вместо обновления требуется удаление и
          * последующая вставка. */
         if (mc->subcur->nested_tree.items > 1 || current_data.iov_len != data->iov_len) {
-        drop_current:
           err = cursor_del(mc, flags & MDBX_ALLDUPS);
           if (unlikely(err != MDBX_SUCCESS))
             return err;
@@ -830,7 +838,7 @@ __hot int cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data, unsig
             return csr.err;
           }
         }
-      } else if ((flags & MDBX_RESERVE) == 0) {
+      } else if (!(flags & (MDBX_RESERVE | MDBX_MULTIPLE))) {
         if (unlikely(eq_fast(data, &old_data))) {
           cASSERT(mc, mc->clc->v.cmp(data, &old_data) == 0);
           /* the same data, nothing to update */
@@ -847,6 +855,8 @@ __hot int cursor_put(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data, unsig
   size_t *batch_dupfix_done = nullptr, batch_dupfix_given = 0;
   if (unlikely(flags & MDBX_MULTIPLE)) {
     batch_dupfix_given = data[1].iov_len;
+    if (unlikely(data[1].iov_len == 0))
+      return /* nothing todo */ MDBX_SUCCESS;
     batch_dupfix_done = &data[1].iov_len;
     *batch_dupfix_done = 0;
   }
@@ -1409,6 +1419,7 @@ insert_node:;
           data[0].iov_base = ptr_disp(data[0].iov_base, data[0].iov_len);
           insert_key = insert_data = false;
           old_singledup.iov_base = nullptr;
+          sub_root = nullptr;
           goto more;
         }
       }
@@ -1426,6 +1437,21 @@ insert_node:;
   }
   mc->txn->flags |= MDBX_TXN_ERROR;
   return rc;
+}
+
+int cursor_check_multiple(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data, unsigned flags) {
+  (void)key;
+  if (unlikely(flags & MDBX_RESERVE))
+    return MDBX_EINVAL;
+  if (unlikely(!(mc->tree->flags & MDBX_DUPFIXED)))
+    return MDBX_INCOMPATIBLE;
+  const size_t number = data[1].iov_len;
+  if (unlikely(number > MAX_MAPSIZE / 2 / (BRANCH_NODE_MAX(MDBX_MAX_PAGESIZE) - NODESIZE))) {
+    /* checking for multiplication overflow */
+    if (unlikely(number > MAX_MAPSIZE / 2 / data->iov_len))
+      return MDBX_TOO_LARGE;
+  }
+  return MDBX_SUCCESS;
 }
 
 __hot int cursor_put_checklen(MDBX_cursor *mc, const MDBX_val *key, MDBX_val *data, unsigned flags) {
@@ -2330,4 +2356,41 @@ __hot int cursor_ops(MDBX_cursor *mc, MDBX_val *key, MDBX_val *data, const MDBX_
     DEBUG("unhandled/unimplemented cursor operation %u", op);
     return MDBX_EINVAL;
   }
+}
+
+int cursor_check(const MDBX_cursor *mc, int txn_bad_bits) {
+  if (unlikely(mc == nullptr))
+    return MDBX_EINVAL;
+
+  if (unlikely(mc->signature != cur_signature_live)) {
+    if (mc->signature != cur_signature_ready4dispose)
+      return MDBX_EBADSIGN;
+    return (txn_bad_bits > MDBX_TXN_FINISHED) ? MDBX_EINVAL : MDBX_SUCCESS;
+  }
+
+  /* проверяем что курсор в связном списке для отслеживания, исключение допускается только для read-only операций для
+   * служебных/временных курсоров на стеке. */
+  MDBX_MAYBE_UNUSED char stack_top[sizeof(void *)];
+  cASSERT(mc, cursor_is_tracked(mc) || (!(txn_bad_bits & MDBX_TXN_RDONLY) && stack_top < (char *)mc &&
+                                        (char *)mc - stack_top < (ptrdiff_t)globals.sys_pagesize * 4));
+
+  if (txn_bad_bits) {
+    int rc = check_txn(mc->txn, txn_bad_bits & ~MDBX_TXN_HAS_CHILD);
+    if (unlikely(rc != MDBX_SUCCESS)) {
+      cASSERT(mc, rc != MDBX_RESULT_TRUE);
+      return rc;
+    }
+
+    if (likely((mc->txn->flags & MDBX_TXN_HAS_CHILD) == 0))
+      return likely(!cursor_dbi_changed(mc)) ? MDBX_SUCCESS : MDBX_BAD_DBI;
+
+    cASSERT(mc, (mc->txn->flags & MDBX_TXN_RDONLY) == 0 && mc->txn != mc->txn->env->txn && mc->txn->env->txn);
+    rc = dbi_check(mc->txn->env->txn, cursor_dbi(mc));
+    if (unlikely(rc != MDBX_SUCCESS))
+      return rc;
+
+    cASSERT(mc, (mc->txn->flags & MDBX_TXN_RDONLY) == 0 && mc->txn == mc->txn->env->txn);
+  }
+
+  return MDBX_SUCCESS;
 }
