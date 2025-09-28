@@ -686,7 +686,7 @@ __cold static void chk_verbose_meta(MDBX_chk_scope_t *const scope, const unsigne
 __cold static int chk_pgvisitor(const size_t pgno, const unsigned npages, void *const ctx, const int deep,
                                 const walk_tbl_t *tbl_info, const size_t page_size, const page_type_t pagetype,
                                 const MDBX_error_t page_err, const size_t nentries, const size_t payload_bytes,
-                                const size_t header_bytes, const size_t unused_bytes) {
+                                const size_t header_bytes, const size_t unused_bytes, const size_t parent_pgno) {
   MDBX_chk_scope_t *const scope = ctx;
   MDBX_chk_internal_t *const chk = scope->internal;
   MDBX_chk_context_t *const usr = chk->usr;
@@ -698,7 +698,7 @@ __cold static int chk_pgvisitor(const size_t pgno, const unsigned npages, void *
     return err;
 
   if (deep > 42) {
-    chk_scope_issue(scope, "too deeply %u", deep);
+    chk_scope_issue(scope, "too deeply %u, page %zu, parent %zu", deep, pgno, parent_pgno);
     return MDBX_CORRUPTED /* avoid infinite loop/recursion */;
   }
   histogram_acc(deep, &tbl->histogram.deep);
@@ -722,9 +722,11 @@ __cold static int chk_pgvisitor(const size_t pgno, const unsigned npages, void *
 
   const char *pagetype_caption;
   bool branch = false;
+  struct MDBX_chk_histogram *filling = nullptr;
   switch (pagetype) {
   default:
-    chk_object_issue(scope, "page", pgno, "unknown page-type", "type %u, deep %i", (unsigned)pagetype, deep);
+    chk_object_issue(scope, "page", pgno, "unknown page-type", "type %u, deep %i, parent %zu", (unsigned)pagetype, deep,
+                     parent_pgno);
     pagetype_caption = "unknown";
     tbl->pages.other += npages;
     break;
@@ -742,42 +744,46 @@ __cold static int chk_pgvisitor(const size_t pgno, const unsigned npages, void *
     pagetype_caption = "large";
     histogram_acc(npages, &tbl->histogram.large_pages);
     if (tbl->flags & MDBX_DUPSORT)
-      chk_object_issue(scope, "page", pgno, "unexpected", "type %u, table %s flags 0x%x, deep %i", (unsigned)pagetype,
-                       chk_v2a(chk, &tbl->name), tbl->flags, deep);
+      chk_object_issue(scope, "page", pgno, "unexpected", "type %u, table %s flags 0x%x, deep %i, parent %zu",
+                       (unsigned)pagetype, chk_v2a(chk, &tbl->name), tbl->flags, deep, parent_pgno);
     break;
   case page_branch:
     branch = true;
     if (!nested) {
       pagetype_caption = "branch";
       tbl->pages.branch += 1;
+      filling = &tbl->histogram.tree_filling;
     } else {
       pagetype_caption = "nested-branch";
       tbl->pages.nested_branch += 1;
+      filling = &tbl->histogram.nested_tree_filling;
     }
     break;
   case page_dupfix_leaf:
     if (!nested)
-      chk_object_issue(scope, "page", pgno, "unexpected", "type %u, table %s flags 0x%x, deep %i", (unsigned)pagetype,
-                       chk_v2a(chk, &tbl->name), tbl->flags, deep);
+      chk_object_issue(scope, "page", pgno, "unexpected", "type %u, table %s flags 0x%x, deep %i, parent %zu",
+                       (unsigned)pagetype, chk_v2a(chk, &tbl->name), tbl->flags, deep, parent_pgno);
     /* fall through */
     __fallthrough;
   case page_leaf:
     if (!nested) {
       pagetype_caption = "leaf";
       tbl->pages.leaf += 1;
+      filling = &tbl->histogram.tree_filling;
       if (height != tbl_info->internal->height)
-        chk_object_issue(scope, "page", pgno, "wrong tree height", "actual %i != %i table %s", height,
-                         tbl_info->internal->height, chk_v2a(chk, &tbl->name));
+        chk_object_issue(scope, "page", pgno, "wrong tree height", "actual %i != %i table %s, parent %zu", height,
+                         tbl_info->internal->height, chk_v2a(chk, &tbl->name), parent_pgno);
     } else {
       pagetype_caption = (pagetype == page_leaf) ? "nested-leaf" : "nested-leaf-dupfix";
       tbl->pages.nested_leaf += 1;
+      filling = &tbl->histogram.nested_tree_filling;
       if (chk->last_nested != nested) {
         histogram_acc(height, &tbl->histogram.nested_tree);
         chk->last_nested = nested;
       }
       if (height != nested->height)
-        chk_object_issue(scope, "page", pgno, "wrong nested-tree height", "actual %i != %i dupsort-node %s", height,
-                         nested->height, chk_v2a(chk, &tbl->name));
+        chk_object_issue(scope, "page", pgno, "wrong nested-tree height", "actual %i != %i dupsort-node %s, parent %zu",
+                         height, nested->height, chk_v2a(chk, &tbl->name), parent_pgno);
     }
     break;
   case page_sub_dupfix_leaf:
@@ -785,10 +791,15 @@ __cold static int chk_pgvisitor(const size_t pgno, const unsigned npages, void *
     pagetype_caption = (pagetype == page_sub_leaf) ? "subleaf-dupsort" : "subleaf-dupfix";
     tbl->pages.nested_subleaf += 1;
     if ((tbl->flags & MDBX_DUPSORT) == 0 || nested)
-      chk_object_issue(scope, "page", pgno, "unexpected", "type %u, table %s flags 0x%x, deep %i", (unsigned)pagetype,
-                       chk_v2a(chk, &tbl->name), tbl->flags, deep);
+      chk_object_issue(scope, "page", pgno, "unexpected", "type %u, table %s flags 0x%x, deep %i, parent %zu",
+                       (unsigned)pagetype, chk_v2a(chk, &tbl->name), tbl->flags, deep, parent_pgno);
+    else
+      filling = &tbl->histogram.nested_tree_filling;
     break;
   }
+
+  if (filling)
+    histogram_acc((page_size - unused_bytes) * 100 / page_size, filling);
 
   if (npages) {
     if (tbl->cookie) {
@@ -813,7 +824,8 @@ __cold static int chk_pgvisitor(const size_t pgno, const unsigned npages, void *
       } else if (chk->pagemap[spanpgno]) {
         const MDBX_chk_table_t *const rival = chk->table[chk->pagemap[spanpgno] - 1];
         chk_object_issue(scope, "page", spanpgno, (branch && rival == tbl) ? "loop" : "already used",
-                         "%s-page: by %s, deep %i", pagetype_caption, chk_v2a(chk, &rival->name), deep);
+                         "%s-page: by %s, deep %i, parent %zu", pagetype_caption, chk_v2a(chk, &rival->name), deep,
+                         parent_pgno);
         already_used = true;
       } else {
         chk->pagemap[spanpgno] = (int16_t)tbl->id + 1;
@@ -827,21 +839,21 @@ __cold static int chk_pgvisitor(const size_t pgno, const unsigned npages, void *
   }
 
   if (MDBX_IS_ERROR(page_err)) {
-    chk_object_issue(scope, "page", pgno, "invalid/corrupted", "%s-page", pagetype_caption);
+    chk_object_issue(scope, "page", pgno, "invalid/corrupted", "%s-page, parent %zu", pagetype_caption, parent_pgno);
   } else {
     if (unused_bytes > page_size)
-      chk_object_issue(scope, "page", pgno, "illegal unused-bytes", "%s-page: %u < %" PRIuSIZE " < %u",
-                       pagetype_caption, 0, unused_bytes, env->ps);
+      chk_object_issue(scope, "page", pgno, "illegal unused-bytes", "%s-page: %u < %" PRIuSIZE " < %u, parent %zu",
+                       pagetype_caption, 0, unused_bytes, env->ps, parent_pgno);
 
     if (header_bytes < (int)sizeof(long) || (size_t)header_bytes >= env->ps - sizeof(long)) {
       chk_object_issue(scope, "page", pgno, "illegal header-length",
-                       "%s-page: %" PRIuSIZE " < %" PRIuSIZE " < %" PRIuSIZE, pagetype_caption, sizeof(long),
-                       header_bytes, env->ps - sizeof(long));
+                       "%s-page: %" PRIuSIZE " < %" PRIuSIZE " < %" PRIuSIZE ", parent %zu", pagetype_caption,
+                       sizeof(long), header_bytes, env->ps - sizeof(long), parent_pgno);
     }
     if (nentries < 1 || (pagetype == page_branch && nentries < 2)) {
       chk_object_issue(scope, "page", pgno, nentries ? "half-empty" : "empty",
-                       "%s-page: payload %" PRIuSIZE " bytes, %" PRIuSIZE " entries, deep %i", pagetype_caption,
-                       payload_bytes, nentries, deep);
+                       "%s-page: payload %" PRIuSIZE " bytes, %" PRIuSIZE " entries, deep %i, parent %zu",
+                       pagetype_caption, payload_bytes, nentries, deep, parent_pgno);
       tbl->pages.empty += 1;
     }
 
@@ -849,8 +861,9 @@ __cold static int chk_pgvisitor(const size_t pgno, const unsigned npages, void *
       if (page_bytes != page_size) {
         chk_object_issue(scope, "page", pgno, "misused",
                          "%s-page: %" PRIuPTR " != %" PRIuPTR " (%" PRIuPTR "h + %" PRIuPTR "p + %" PRIuPTR
-                         "u), deep %i",
-                         pagetype_caption, page_size, page_bytes, header_bytes, payload_bytes, unused_bytes, deep);
+                         "u), deep %i, parent %zu",
+                         pagetype_caption, page_size, page_bytes, header_bytes, payload_bytes, unused_bytes, deep,
+                         parent_pgno);
         if (page_size > page_bytes)
           tbl->lost_bytes += page_size - page_bytes;
       } else {
@@ -962,6 +975,12 @@ __cold static int chk_tree(MDBX_chk_scope_t *const scope) {
             line = chk_print(line, ", %" PRIuSIZE " empty pages", tbl->pages.empty);
           if (tbl->lost_bytes)
             line = chk_print(line, ", %" PRIuSIZE " bytes lost", tbl->lost_bytes);
+
+          line =
+              histogram_dist(chk_line_feed(line), &tbl->histogram.tree_filling, "tree %-filling density", "1", false);
+          if (tbl->histogram.nested_tree_filling.count)
+            line = histogram_dist(chk_line_feed(line), &tbl->histogram.nested_tree_filling,
+                                  "nested tree(s) %-filling density", "1", false);
           chk_line_end(line);
         }
       }
@@ -1331,7 +1350,7 @@ __cold static int chk_handle_gc(MDBX_chk_scope_t *const scope, MDBX_chk_table_t 
         number = data->iov_len / sizeof(pgno_t) - 1;
       } else if (data->iov_len - (number + 1) * sizeof(pgno_t) >=
                  /* LY: allow gap up to two page. it is ok
-                  * and better than shink-and-retry inside gc_update() */
+                  * and better than shrink-and-retry inside gc_update() */
                  usr->env->ps * 2)
         chk_object_issue(scope, "entry", txnid, "extra idl space",
                          "%" PRIuSIZE " < %" PRIuSIZE " (minor, not a trouble)", (number + 1) * sizeof(pgno_t),
