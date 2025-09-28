@@ -394,7 +394,7 @@ __cold static int copy_with_compacting(MDBX_env *env, MDBX_txn *txn, mdbx_fileha
         ERROR("%s/%d: %s", "MDBX_CORRUPTED", MDBX_CORRUPTED, "invalid GC-record content");
         return MDBX_CORRUPTED;
       }
-      gc_npages += MDBX_PNL_GETSIZE(pnl);
+      gc_npages += pnl_size(pnl);
       rc = outer_next(&couple.outer, &key, &data, MDBX_NEXT);
     }
     if (unlikely(rc != MDBX_NOTFOUND))
@@ -748,7 +748,8 @@ __cold static int copy2pathname(MDBX_txn *txn, const pathchar_t *dest_path, MDBX
    * We don't want the OS to cache the writes, since the source data is
    * already in the OS cache. */
   mdbx_filehandle_t newfd = INVALID_HANDLE_VALUE;
-  int rc = osal_openfile(MDBX_OPEN_COPY, txn->env, dest_path, &newfd,
+  int rc = osal_openfile((flags & MDBX_CP_OVERWRITE) ? MDBX_OPEN_COPY_OVERWRITE : MDBX_OPEN_COPY_EXCL, txn->env,
+                         dest_path, &newfd,
 #if defined(_WIN32) || defined(_WIN64)
                          (mdbx_mode_t)-1
 #else

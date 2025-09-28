@@ -457,6 +457,10 @@ __cold MDBX_INTERNAL int lck_destroy(MDBX_env *env, MDBX_env *inprocess_neighbor
     jitter4testing(false);
   }
 
+#if MDBX_LOCKING == MDBX_LOCKING_SYSV
+  env->me_sysv_ipc.semid = -1;
+#endif /* MDBX_LOCKING */
+
   if (current_pid != env->pid) {
     eASSERT(env, !inprocess_neighbor);
     NOTICE("drown env %p after-fork pid %d -> %d", __Wpedantic_format_voidptr(env), env->pid, current_pid);
@@ -773,14 +777,14 @@ static int osal_ipclock_lock(MDBX_env *env, osal_ipclock_t *ipc, const bool dont
   return rc;
 }
 
-int osal_ipclock_unlock(MDBX_env *env, osal_ipclock_t *ipc) {
+static int osal_ipclock_unlock(MDBX_env *env, osal_ipclock_t *ipc) {
   int err = MDBX_ENOSYS;
 #if MDBX_LOCKING == MDBX_LOCKING_POSIX2001 || MDBX_LOCKING == MDBX_LOCKING_POSIX2008
   err = pthread_mutex_unlock(ipc);
 #elif MDBX_LOCKING == MDBX_LOCKING_POSIX1988
   err = sem_post(ipc) ? errno : MDBX_SUCCESS;
 #elif MDBX_LOCKING == MDBX_LOCKING_SYSV
-  if (unlikely(*ipc != (pid_t)env->pid))
+  if (unlikely(*ipc != (pid_t)env->pid || env->me_sysv_ipc.key == -1))
     err = EPERM;
   else {
     *ipc = 0;
@@ -820,7 +824,6 @@ MDBX_INTERNAL void lck_rdt_unlock(MDBX_env *env) {
 
 int lck_txn_lock(MDBX_env *env, bool dont_wait) {
   TRACE("%swait %s", dont_wait ? "dont-" : "", ">>");
-  eASSERT(env, env->basal_txn || (env->lck == lckless_stub(env) && (env->flags & MDBX_RDONLY)));
   jitter4testing(true);
   const int err = osal_ipclock_lock(env, &env->lck->wrt_lock, dont_wait);
   int rc = err;
@@ -838,10 +841,8 @@ int lck_txn_lock(MDBX_env *env, bool dont_wait) {
 void lck_txn_unlock(MDBX_env *env) {
   TRACE("%s", ">>");
   if (env->basal_txn) {
-    eASSERT(env, !env->basal_txn || env->basal_txn->owner == osal_thread_self());
+    eASSERT(env, env->basal_txn->owner == osal_thread_self());
     env->basal_txn->owner = 0;
-  } else {
-    eASSERT(env, env->lck == lckless_stub(env) && (env->flags & MDBX_RDONLY));
   }
   int err = osal_ipclock_unlock(env, &env->lck->wrt_lock);
   TRACE("<< err %d", err);
