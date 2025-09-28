@@ -299,9 +299,9 @@ lib-shared libmdbx.$(SO_SUFFIX): mdbx-dylib.o $(call select_by,MDBX_BUILD_CXX,md
 	@echo '  LD $@'
 	$(QUIET)$(call select_by,MDBX_BUILD_CXX,$(CXX) $(CXXFLAGS),$(CC) $(CFLAGS)) $^ -pthread -shared $(LDFLAGS) $(call select_by,MDBX_BUILD_CXX,$(LIB_STDCXXFS)) $(LIBS) -o $@
 
-ninja-assertions: CMAKE_OPT += -DMDBX_FORCE_ASSERTIONS=ON
+ninja-assertions: CMAKE_OPT += -DMDBX_FORCE_ASSERTIONS=ON $(MDBX_BUILD_OPTIONS)
 ninja-assertions: cmake-build
-ninja-debug: CMAKE_OPT += -DCMAKE_BUILD_TYPE=Debug
+ninja-debug: CMAKE_OPT += -DCMAKE_BUILD_TYPE=Debug $(MDBX_BUILD_OPTIONS)
 ninja-debug: cmake-build
 ninja: cmake-build
 cmake-build:
@@ -367,7 +367,7 @@ else
 .PHONY: build-test build-test-with-valgrind check cross-gcc cross-qemu dist doxygen gcc-analyzer long-test
 .PHONY: reformat release-assets tags smoke test test-asan smoke-fault test-leak
 .PHONY: smoke-singleprocess test-singleprocess test-ubsan test-valgrind test-memcheck memcheck smoke-memcheck
-.PHONY: smoke-assertion test-assertion long-test-assertion test-ci test-ci-extra
+.PHONY: smoke-assertion test-assertion long-test-assertion test-ci test-ci-extra check-posix-locking
 
 test-ci-extra: test-ci cross-gcc cross-qemu
 
@@ -435,15 +435,26 @@ MDBX_DIST_DIR = libmdbx-$(MDBX_VERSION_NODOT)
 MDBX_SMOKE_EXTRA ?=
 
 check: DESTDIR = $(shell pwd)/@check-install
-check: CMAKE_OPT = -Werror=dev
-check: smoke-assertion ninja-assertions dist install test ctest
-
-smoke-assertion: MDBX_BUILD_OPTIONS:=$(strip $(MDBX_BUILD_OPTIONS) -DMDBX_FORCE_ASSERTIONS=1 -UNDEBUG -DMDBX_DEBUG=0)
+check: CMAKE_OPT += -Werror=dev
+check: clean | smoke-assertion ninja-assertions dist install test ctest
+smoke-assertion: MDBX_BUILD_OPTIONS += -DMDBX_FORCE_ASSERTIONS=1 -UNDEBUG -DMDBX_DEBUG=0
 smoke-assertion: smoke
-test-assertion: MDBX_BUILD_OPTIONS:=$(strip $(MDBX_BUILD_OPTIONS) -DMDBX_FORCE_ASSERTIONS=1 -UNDEBUG -DMDBX_DEBUG=0)
+test-assertion: MDBX_BUILD_OPTIONS += -DMDBX_FORCE_ASSERTIONS=1 -UNDEBUG -DMDBX_DEBUG=0
 test-assertion: smoke
-long-test-assertion: MDBX_BUILD_OPTIONS:=$(strip $(MDBX_BUILD_OPTIONS) -DMDBX_FORCE_ASSERTIONS=1 -UNDEBUG -DMDBX_DEBUG=0)
+long-test-assertion: MDBX_BUILD_OPTIONS += -DMDBX_FORCE_ASSERTIONS=1 -UNDEBUG -DMDBX_DEBUG=0
 long-test-assertion: smoke
+
+.PHONY: check-posix-locking-sysv check-posix-locking-1988 check-posix-locking-2001 check-posix-locking-2008
+check-posix-locking-sysv: MDBX_BUILD_OPTIONS += -DMDBX_LOCKING=5
+check-posix-locking-1988: MDBX_BUILD_OPTIONS += -DMDBX_LOCKING=1988
+check-posix-locking-2001: MDBX_BUILD_OPTIONS += -DMDBX_LOCKING=2001
+check-posix-locking-2008: MDBX_BUILD_OPTIONS += -DMDBX_LOCKING=2008
+check-posix-locking-sysv: check
+check-posix-locking-1988: check
+check-posix-locking-2001: check
+check-posix-locking-2008: check
+check-posix-locking:
+	$(QUIET)for LCK in sysv 1988 2001 2008; do $(MAKE) check-posix-locking-$${LCK} || break; done;
 
 smoke: build-test
 	@echo '  SMOKE `mdbx_test basic`...'
@@ -812,17 +823,21 @@ endif
 # Cross-compilation simple test
 
 CROSS_LIST = \
-	mips64-linux-gnuabi64-gcc mips-linux-gnu-gcc \
-	hppa-linux-gnu-gcc s390x-linux-gnu-gcc \
-	powerpc64-linux-gnu-gcc powerpc-linux-gnu-gcc \
-	arm-linux-gnueabihf-gcc aarch64-linux-gnu-gcc
+	aarch64-linux-gnu-gcc \
+	arm-linux-gnueabihf-gcc \
+	hppa-linux-gnu-gcc \
+	mips64-linux-gnuabi64-gcc \
+	mips-linux-gnu-gcc \
+	powerpc64-linux-gnu-gcc\
+	riscv64-linux-gnu-gcc \
+	s390x-linux-gnu-gcc \
+	sh4-linux-gnu-gcc
 
-## On Ubuntu Focal (22.04) with QEMU 6.2 (1:6.2+dfsg-2ubuntu6.6) & GCC 11.3 (11.3.0-1ubuntu1~22.04)
-# sh4-linux-gnu-gcc           - coredump (qemu mmap-troubles)
-# sparc64-linux-gnu-gcc       - coredump (qemu mmap-troubles, previously: qemu fails fcntl for F_SETLK/F_GETLK)
-# alpha-linux-gnu-gcc         - coredump (qemu mmap-troubles)
-# risc64-linux-gnu-gcc        - coredump (qemu qemu fails fcntl for F_SETLK/F_GETLK)
-CROSS_LIST_NOQEMU = sh4-linux-gnu-gcc sparc64-linux-gnu-gcc alpha-linux-gnu-gcc riscv64-linux-gnu-gcc
+## On Ubuntu Noble (24.04.2) with QEMU 8.2 (8.2.2+ds-0ubuntu1.7) & GCC 13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04)
+# sparc64-linux-gnu-gcc       - fails mmap/BAD_ADDRESS (previously: qemu-coredump sice mmap-troubles, qemu fails fcntl for F_SETLK/F_GETLK)
+# alpha-linux-gnu-gcc         - qemu-coredump (qemu mmap-troubles)
+# powerpc-linux-gnu-gcc       - fails mmap/BAD_ADDRESS (previously: qemu-coredump sice mmap-troubles, qemu fails fcntl for F_SETLK/F_GETLK)
+CROSS_LIST_NOQEMU = sparc64-linux-gnu-gcc alpha-linux-gnu-gcc powerpc-linux-gnu-gcc
 
 cross-gcc:
 	@echo '  Re-building by cross-compiler for: $(CROSS_LIST_NOQEMU) $(CROSS_LIST)'
@@ -844,7 +859,7 @@ cross-qemu:
 	$(QUIET)for CC in $(CROSS_LIST); do \
 		echo "===================== $$CC + qemu"; \
 		$(MAKE) IOARENA=false CXXSTD= clean && \
-			CC=$$CC CXX=$$(echo $$CC | $(SED) 's/-gcc/-g++/') EXE_LDFLAGS=-static MDBX_BUILD_OPTIONS="-DMDBX_SAFE4QEMU $(MDBX_BUILD_OPTIONS)" \
+			CC=$$CC CXX=$$(echo $$CC | $(SED) 's/-gcc/-g++/') EXE_LDFLAGS=-static MDBX_BUILD_OPTIONS="-DMDBX_LOCKING=5 -DMDBX_SAFE4QEMU $(MDBX_BUILD_OPTIONS)" \
 			$(MAKE) IOARENA=false smoke-singleprocess test-singleprocess || exit $$?; \
 	done
 
