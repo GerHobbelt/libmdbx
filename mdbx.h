@@ -4562,6 +4562,10 @@ typedef int(MDBX_cmp_func)(const MDBX_val *a, const MDBX_val *b) MDBX_CXX17_NOEX
  * \param [out] dbi     Address where the new \ref MDBX_dbi handle
  *                      will be stored.
  *
+ * The name in \ref mdbx_dbi_open() is a null terminated string. While
+ * \ref mdbx_dbi_open2() supports arbitrary length keys which are not
+ * truncated, for example to support a fixed width integer type.
+ *
  * For \ref mdbx_dbi_open_ex() additional arguments allow you to set custom
  * comparison functions for keys and values (for multimaps).
  * \see avoid_custom_comparators
@@ -4594,6 +4598,8 @@ LIBMDBX_API int mdbx_dbi_open2(MDBX_txn *txn, const MDBX_val *name, MDBX_db_flag
  * \param [in] name   The name of the table to open. If only a single
  *                    table is needed in the environment,
  *                    this value may be NULL.
+ *                    The name in \ref mdbx_dbi_open_ex() is null terminated,
+ *                    while \ref mdbx_dbi_open_ex2() supports an arbitrary length.
  * \param [in] flags  Special options for this table.
  * \param [in] keycmp  Optional custom key comparison function for a table.
  * \param [in] datacmp Optional custom data comparison function for a table.
@@ -6043,11 +6049,10 @@ MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API int mdbx_is_dirty(const MDBX_txn *txn, co
 /** \brief Sequence generation for a table.
  * \ingroup c_crud
  *
- * The function allows to create a linear sequence of unique positive integers
- * for each table. The function can be called for a read transaction to
- * retrieve the current sequence value, and the increment must be zero.
- * Sequence changes become visible outside the current write transaction after
- * it is committed, and discarded on abort.
+ * The function provides a linear sequence of unique positive integers for each table with acquire/allocate semantics.
+ * The function can be called for a read transaction to retrieve the current sequence value while the increment must be
+ * zero. Sequence changes become visible outside the current write transaction after it is committed, and discarded on
+ * abort.
  *
  * \param [in] txn        A transaction handle returned
  *                        by \ref mdbx_txn_begin().
@@ -6060,7 +6065,7 @@ MDBX_NOTHROW_PURE_FUNCTION LIBMDBX_API int mdbx_is_dirty(const MDBX_txn *txn, co
  * \returns A non-zero error value on failure and 0 on success,
  *          some possible errors are:
  * \retval MDBX_RESULT_TRUE   Increasing the sequence has resulted in an
- *                            overflow and therefore cannot be executed. */
+ *                            overflow and therefore cannot be performed. */
 LIBMDBX_API int mdbx_dbi_sequence(MDBX_txn *txn, MDBX_dbi dbi, uint64_t *result, uint64_t increment);
 
 /** \brief Compare two keys according to a particular table.

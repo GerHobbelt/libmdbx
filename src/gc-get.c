@@ -1263,7 +1263,7 @@ no_gc:
 
   eASSERT(env, newnext > txn->geo.end_pgno);
   const size_t grow_step = pv2pages(txn->geo.grow_pv);
-  size_t aligned = pgno_align2os_pgno(env, (pgno_t)(newnext + grow_step - newnext % grow_step));
+  size_t aligned = pgno_ceil2sp_pgno(env, (pgno_t)(newnext + grow_step - newnext % grow_step));
 
   if (aligned > txn->geo.upper)
     aligned = txn->geo.upper;
@@ -1365,7 +1365,7 @@ __hot pgr_t gc_alloc_single(const MDBX_cursor *const mc) {
     DEBUG_EXTRA("db %d use loose page %" PRIaPGNO, cursor_dbi_dbg(mc), lp->pgno);
     tASSERT(txn, lp->pgno < txn->geo.first_unallocated);
     tASSERT(txn, lp->pgno >= NUM_METAS);
-    VALGRIND_MAKE_MEM_UNDEFINED(page_data(lp), page_space(txn->env));
+    VALGRIND_MAKE_MEM_UNDEFINED(page2payload(lp), page_space(txn->env));
     lp->txnid = txn->front_txnid;
     pgr_t ret = {lp, MDBX_SUCCESS};
     return ret;

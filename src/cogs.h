@@ -220,14 +220,52 @@ MDBX_NOTHROW_PURE_FUNCTION static inline pgno_t bytes2pgno(const MDBX_env *env, 
   return (pgno_t)(bytes >> env->ps2ln);
 }
 
-MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL size_t bytes_align2os_bytes(const MDBX_env *env, size_t bytes);
+/* align to system page size */
+MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL size_t bytes_ceil2sp_bytes(const MDBX_env *env, size_t bytes);
+MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL size_t bytes_ceil2sp_pgno(const MDBX_env *env, size_t bytes);
+MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL size_t pgno_ceil2sp_bytes(const MDBX_env *env, size_t pgno);
+MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL pgno_t pgno_ceil2sp_pgno(const MDBX_env *env, size_t pgno);
 
-MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL size_t pgno_align2os_bytes(const MDBX_env *env, size_t pgno);
-
-MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL pgno_t pgno_align2os_pgno(const MDBX_env *env, size_t pgno);
+/* align to system allocation granularity */
+MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL size_t bytes_ceil2ag_bytes(const MDBX_env *env, size_t bytes);
+MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL size_t bytes_ceil2ag_pgno(const MDBX_env *env, size_t bytes);
+MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL size_t pgno_ceil2ag_bytes(const MDBX_env *env, size_t pgno);
+MDBX_NOTHROW_PURE_FUNCTION MDBX_INTERNAL pgno_t pgno_ceil2ag_pgno(const MDBX_env *env, size_t pgno);
 
 MDBX_NOTHROW_PURE_FUNCTION static inline pgno_t largechunk_npages(const MDBX_env *env, size_t bytes) {
   return bytes2pgno(env, PAGEHDRSZ - 1 + bytes) + 1;
+}
+
+typedef struct alignkey {
+  MDBX_val key;
+  uint64_t intbuf;
+} alignkey_t;
+
+static inline int check_key(const MDBX_cursor *mc, const MDBX_val *key, alignkey_t *alignkey) {
+  /* coverity[logical_vs_bitwise] */
+  if (unlikely(key->iov_len < mc->clc->k.lmin ||
+               (key->iov_len > mc->clc->k.lmax &&
+                (mc->clc->k.lmin == mc->clc->k.lmax || MDBX_DEBUG || MDBX_FORCE_ASSERTIONS)))) {
+    cASSERT(mc, !"Invalid key-size");
+    return MDBX_BAD_VALSIZE;
+  }
+
+  alignkey->key = *key;
+  if (mc->tree->flags & MDBX_INTEGERKEY) {
+    if (alignkey->key.iov_len == 8) {
+      if (unlikely(7 & (uintptr_t)alignkey->key.iov_base))
+        /* copy instead of return error to avoid break compatibility */
+        alignkey->key.iov_base = bcopy_8(&alignkey->intbuf, alignkey->key.iov_base);
+    } else if (alignkey->key.iov_len == 4) {
+      if (unlikely(3 & (uintptr_t)alignkey->key.iov_base))
+        /* copy instead of return error to avoid break compatibility */
+        alignkey->key.iov_base = bcopy_4(&alignkey->intbuf, alignkey->key.iov_base);
+    } else {
+      cASSERT(mc, !"key-size is invalid for MDBX_INTEGERKEY");
+      return MDBX_BAD_VALSIZE;
+    }
+  }
+  return MDBX_SUCCESS;
 }
 
 MDBX_NOTHROW_PURE_FUNCTION static inline MDBX_val get_key(const node_t *node) {
@@ -242,13 +280,20 @@ static inline void get_key_optional(const node_t *node, MDBX_val *keyptr /* __ma
     *keyptr = get_key(node);
 }
 
-MDBX_NOTHROW_PURE_FUNCTION static inline void *page_data(const page_t *mp) { return ptr_disp(mp, PAGEHDRSZ); }
+MDBX_NOTHROW_PURE_FUNCTION static inline void *page2payload(const page_t *mp) { return ptr_disp(mp, PAGEHDRSZ); }
 
-MDBX_NOTHROW_PURE_FUNCTION static inline const page_t *data_page(const void *data) {
+MDBX_NOTHROW_PURE_FUNCTION static inline const page_t *payload2page(const void *data) {
   return container_of(data, page_t, entries);
 }
 
-MDBX_NOTHROW_PURE_FUNCTION static inline meta_t *page_meta(page_t *mp) { return (meta_t *)page_data(mp); }
+MDBX_NOTHROW_PURE_FUNCTION static inline const page_t *ptr2page(const MDBX_env *env, const void *ptr) {
+  eASSERT(env,
+          ptr_dist(ptr, env->dxb_mmap.base) >= 0 && (size_t)ptr_dist(ptr, env->dxb_mmap.base) < env->dxb_mmap.limit);
+  const uintptr_t mask = env->ps - 1;
+  return (page_t *)((uintptr_t)ptr & ~mask);
+}
+
+MDBX_NOTHROW_PURE_FUNCTION static inline meta_t *page_meta(page_t *mp) { return (meta_t *)page2payload(mp); }
 
 MDBX_NOTHROW_PURE_FUNCTION static inline size_t page_numkeys(const page_t *mp) {
   assert(mp->lower <= mp->upper);
@@ -456,6 +501,14 @@ static __always_inline int check_txn(const MDBX_txn *txn, int bad_bits) {
 
 static inline int check_txn_rw(const MDBX_txn *txn, int bad_bits) {
   return check_txn(txn, (bad_bits | MDBX_TXN_RDONLY) & ~MDBX_TXN_PARKED);
+}
+
+MDBX_NOTHROW_CONST_FUNCTION static inline txnid_t txn_basis_snapshot(const MDBX_txn *txn) {
+  STATIC_ASSERT((MDBX_TXN_RDONLY >> 17) == 1);
+  STATIC_ASSERT((xMDBX_TXNID_STEP >> (xMDBX_TXNID_STEP == 2)) == 1);
+  const txnid_t committed_txnid = txn->txnid + (xMDBX_TXNID_STEP >> (xMDBX_TXNID_STEP == 2)) - ((txn->flags >> 17) & 1);
+  tASSERT(txn, committed_txnid == ((txn->flags & MDBX_TXN_RDONLY) ? txn->txnid : txn->txnid - xMDBX_TXNID_STEP));
+  return committed_txnid;
 }
 
 /*----------------------------------------------------------------------------*/

@@ -128,7 +128,7 @@ retry:;
           if (unlikely(err != MDBX_SUCCESS))
             return err;
 #endif
-          const size_t usedbytes = pgno_align2os_bytes(env, head.ptr_c->geometry.first_unallocated);
+          const size_t usedbytes = pgno_ceil2sp_bytes(env, head.ptr_c->geometry.first_unallocated);
           err = osal_msync(&env->dxb_mmap, 0, usedbytes, MDBX_SYNC_DATA);
 #if defined(_WIN32) || defined(_WIN64)
           imports.srwl_ReleaseShared(&env->remap_guard);
@@ -179,7 +179,7 @@ retry:;
     goto bailout;
   }
   if (!head.is_steady || ((flags & MDBX_SAFE_NOSYNC) == 0 && unsynced_pages)) {
-    DEBUG("meta-head %" PRIaPGNO ", %s, sync_pending %" PRIu64, data_page(head.ptr_c)->pgno,
+    DEBUG("meta-head %" PRIaPGNO ", %s, sync_pending %" PRIu64, payload2page(head.ptr_c)->pgno,
           durable_caption(head.ptr_c), unsynced_pages);
     meta_t meta = *head.ptr_c;
     rc = dxb_sync_locked(env, flags, &meta, &env->basal_txn->wr.troika);
