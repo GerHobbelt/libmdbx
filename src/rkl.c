@@ -138,7 +138,7 @@ __hot bool rkl_contain(const rkl_t *rkl, txnid_t id) {
   return false;
 }
 
-__hot bool rkl_find(const rkl_t *rkl, txnid_t id, rkl_iter_t *iter) {
+__hot bool rkl_find(const rkl_t *rkl, const txnid_t id, rkl_iter_t *iter) {
   assert(rkl_check(rkl));
   *iter = rkl_iterator(rkl, false);
   if (id >= rkl->solid_begin) {
@@ -218,9 +218,10 @@ static int extend_solid(rkl_t *rkl, txnid_t solid_begin, txnid_t solid_end, cons
   return MDBX_SUCCESS;
 }
 
-int rkl_push(rkl_t *rkl, const txnid_t id, const bool known_continuous) {
+int rkl_push(rkl_t *rkl, const txnid_t id) {
   assert(id >= MIN_TXNID && id < INVALID_TXNID);
   assert(rkl_check(rkl));
+  const bool known_continuous = false;
 
   if (rkl->solid_begin >= rkl->solid_end) {
     /* непрерывный интервал пуст */
@@ -392,11 +393,11 @@ txnid_t rkl_highest(const rkl_t *rkl) {
   return !solid_empty(rkl) ? rkl->solid_end - 1 : 0;
 }
 
-int rkl_merge(rkl_t *dst, const rkl_t *src, bool ignore_duplicates) {
+int rkl_merge(const rkl_t *src, rkl_t *dst, bool ignore_duplicates) {
   if (src->list_length) {
     size_t i = src->list_length;
     do {
-      int err = rkl_push(dst, src->list[i - 1], false);
+      int err = rkl_push(dst, src->list[i - 1]);
       if (unlikely(err != MDBX_SUCCESS) && (!ignore_duplicates || err != MDBX_RESULT_TRUE))
         return err;
     } while (--i);
@@ -404,12 +405,18 @@ int rkl_merge(rkl_t *dst, const rkl_t *src, bool ignore_duplicates) {
 
   txnid_t id = src->solid_begin;
   while (id < src->solid_end) {
-    int err = rkl_push(dst, id, false);
+    int err = rkl_push(dst, id);
     if (unlikely(err != MDBX_SUCCESS) && (!ignore_duplicates || err != MDBX_RESULT_TRUE))
       return err;
     ++id;
   }
   return MDBX_SUCCESS;
+}
+
+int rkl_destructive_merge(rkl_t *src, rkl_t *dst, bool ignore_duplicates) {
+  int err = rkl_merge(src, dst, ignore_duplicates);
+  rkl_destroy(src);
+  return err;
 }
 
 rkl_iter_t rkl_iterator(const rkl_t *rkl, const bool reverse) {
